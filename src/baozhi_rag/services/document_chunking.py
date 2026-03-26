@@ -285,15 +285,18 @@ class DocumentChunkService:
 
         return segments
 
-    def _parse_heading_level(self, style_name: str) -> int | None:
+    def _parse_heading_level(self, style_name: str | None) -> int | None:
         """解析标题样式级别。
 
         参数:
-            style_name: 段落样式名称，例如 `Heading 1` 或 `标题 1`。
+            style_name: 段落样式名称，例如 `Heading 1` 或 `标题 1`；为空时返回 None。
 
         返回:
             若样式表示标题则返回其层级，否则返回 None。
         """
+        if style_name is None:
+            return None
+
         matched = re.search(r"(Heading|标题)\s*(\d+)", style_name, flags=re.IGNORECASE)
         if matched is None:
             return None
