@@ -100,13 +100,15 @@ just run pytest -k health
 
 ## 文件上传
 
-当前版本提供 Word 文件上传与切块预览闭环，用于后续 RAG chunk 入库前验证切块效果。
+当前版本提供 Word 文件上传、领域词增强、可选 ES 入库与 chunk 检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`
 - 返回：`file_id`、原始文件名、大小、内容类型、相对存储路径、上传时间、切块状态、切块数量、切块预览
+- 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
+- 当 `ES_ENABLED=true` 时，上传后会自动创建索引并写入 chunk 文档
 
 示例：
 
@@ -116,8 +118,73 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
   -F "files=@example.docx"
 ```
 
-上传目录通过 `BAOZHI_RAG_UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`。
-切块窗口和旧版 Word 转换临时目录分别通过 `BAOZHI_RAG_DOC_CHUNK_SIZE`、`BAOZHI_RAG_DOC_CHUNK_OVERLAP`、`BAOZHI_RAG_DOC_CONVERT_TEMP_DIR` 配置。
+上传目录通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`。
+切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
+领域词典扩展文件通过 `DOMAIN_DICTIONARY_PATH` 配置。
+ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
+
+## Chunk 检索
+
+当前版本新增 `GET /search/chunks` 接口，用于基于 `content` 与领域词字段执行混合召回。
+
+- 查询参数：`q`
+- 可选参数：`size`
+- 默认返回条数：`SEARCH_DEFAULT_SIZE`
+- 混合检索字段：`content`、`fmm_terms`、`bmm_terms`、`merged_terms`
+
+示例：
+
+```powershell
+curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
+```
+
+## 本机检索基础设施
+
+仓库提供了本机开发用的 `Milvus + Elasticsearch` 容器编排文件：`docker-compose.search.yml`。
+
+- `Elasticsearch`：`http://127.0.0.1:9200`
+- `Milvus gRPC`：`127.0.0.1:19530`
+- `Milvus Health`：`http://127.0.0.1:9091/healthz`
+- `MinIO`：`http://127.0.0.1:9001`
+
+启动：
+
+```powershell
+docker compose -f docker-compose.search.yml up -d
+```
+
+查看状态：
+
+```powershell
+docker compose -f docker-compose.search.yml ps
+docker compose -f docker-compose.search.yml logs -f elasticsearch
+docker compose -f docker-compose.search.yml logs -f milvus
+```
+
+停止：
+
+```powershell
+docker compose -f docker-compose.search.yml down
+```
+
+如果需要连同卷数据一起清空：
+
+```powershell
+docker compose -f docker-compose.search.yml down -v
+```
+
+当前应用已预留 Elasticsearch 配置项，复制 `.env.example` 后默认会启用本机 ES：
+
+- `ES_ENABLED=true`
+- `ES_URL=http://127.0.0.1:9200`
+- `ES_INDEX_NAME=document_chunks`
+- `ES_VERIFY_CERTS=false`
+
+说明：
+
+- 该编排仅面向本机开发与联调，不适用于生产环境。
+- Elasticsearch 为单节点并关闭安全认证，便于本地调试。
+- Milvus 采用官方 standalone 模式，并带上 `etcd` 与 `MinIO` 依赖容器。
 
 ## 提交规范
 

@@ -5,6 +5,7 @@ description = "面向金融保险场景的 RAG 客服系统后端基础工程。
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+  "elasticsearch>=8.15.1,<9.0.0",
   "fastapi>=0.116.1,<1.0.0",
   "pydantic-settings>=2.10.1,<3.0.0",
   "python-docx>=1.2.0,<2.0.0",

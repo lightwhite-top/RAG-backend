@@ -27,6 +27,7 @@ class ChunkPreviewItem(BaseModel):
     chunk_index: int = Field(description="切块序号")
     char_count: int = Field(description="切块字符数")
     preview_text: str = Field(description="切块正文预览")
+    merged_terms: list[str] = Field(description="切块识别出的领域词项")
 
 
 class UploadFilesResponse(BaseModel):

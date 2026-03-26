@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from docx import Document
 from docx.document import Document as DocxDocument
 
-LOGGER = logging.getLogger(__name__)
+from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
-PREVIEW_LOG_LIMIT = 10
-PREVIEW_TEXT_LIMIT = 160
+LOGGER = logging.getLogger(__name__)
 
 
 class DocumentChunkingError(Exception):
@@ -38,24 +38,50 @@ class DocumentParseError(DocumentChunkingError):
 class DocumentChunk:
     """标准化切块结果。"""
 
+    file_id: str
     chunk_id: str
     chunk_index: int
     content: str
     char_count: int
     source_filename: str
     storage_key: str
+    fmm_terms: list[str] = field(default_factory=list)
+    bmm_terms: list[str] = field(default_factory=list)
+    merged_terms: list[str] = field(default_factory=list)
+
+    def to_search_document(self) -> dict[str, object]:
+        """构造 ES 入库文档。"""
+        return {
+            "chunk_id": self.chunk_id,
+            "file_id": self.file_id,
+            "source_filename": self.source_filename,
+            "storage_key": self.storage_key,
+            "chunk_index": self.chunk_index,
+            "char_count": self.char_count,
+            "content": self.content,
+            "fmm_terms": self.fmm_terms,
+            "bmm_terms": self.bmm_terms,
+            "merged_terms": self.merged_terms,
+        }
 
 
 class DocumentChunkService:
     """负责 Word 文档解析、切块与预览日志输出。"""
 
-    def __init__(self, chunk_size: int, chunk_overlap: int, convert_temp_dir: Path) -> None:
+    def __init__(
+        self,
+        chunk_size: int,
+        chunk_overlap: int,
+        convert_temp_dir: Path,
+        term_matcher: MaximumMatchingTermMatcher | None = None,
+    ) -> None:
         """初始化切块服务。
 
         参数:
             chunk_size: 单个切块的目标最大字符数。
             chunk_overlap: 相邻切块之间保留的重叠字符数。
             convert_temp_dir: `.doc` 转 `.docx` 时使用的临时目录。
+            term_matcher: 领域词匹配器；未传时使用默认金融保险词典。
 
         返回:
             None。
@@ -73,6 +99,7 @@ class DocumentChunkService:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._convert_temp_dir = convert_temp_dir
+        self._term_matcher = term_matcher or build_default_term_matcher()
 
     def chunk_document(
         self,
@@ -319,6 +346,7 @@ class DocumentChunkService:
 
         返回:
             基于字符窗口切分后的标准化 chunk 列表。
+            每个 chunk 都保留 file_id，以便后续 ES/Milvus 接入。
 
         异常:
             DocumentParseError: 当正文为空无法切块时抛出。
@@ -336,14 +364,19 @@ class DocumentChunkService:
             chunk_content = normalized_text[start:end].strip()
             if chunk_content:
                 chunk_index = len(chunks)
+                term_match_result = self._term_matcher.extract_terms(chunk_content)
                 chunks.append(
                     DocumentChunk(
+                        file_id=file_id,
                         chunk_id=f"{file_id}-chunk-{chunk_index}",
                         chunk_index=chunk_index,
                         content=chunk_content,
                         char_count=len(chunk_content),
                         source_filename=source_filename,
                         storage_key=storage_key,
+                        fmm_terms=term_match_result.fmm_terms,
+                        bmm_terms=term_match_result.bmm_terms,
+                        merged_terms=term_match_result.merged_terms,
                     )
                 )
 
@@ -369,7 +402,7 @@ class DocumentChunkService:
             chunks: 已生成的切块列表。
 
         返回:
-            None。日志默认输出总数、前若干个 chunk 摘要以及截断信息。
+            None。日志会输出 chunk 总数、每个 chunk 的完整正文，以及对应的 ES 预览文档。
         """
         LOGGER.info(
             "document_chunk_preview filename=%s storage_key=%s chunk_count=%s",
@@ -378,19 +411,35 @@ class DocumentChunkService:
             len(chunks),
         )
 
-        for chunk in chunks[:PREVIEW_LOG_LIMIT]:
-            preview = chunk.content.replace("\n", " ")[:PREVIEW_TEXT_LIMIT]
+        for chunk in chunks:
             LOGGER.info(
-                "document_chunk_item filename=%s chunk_index=%s char_count=%s preview=%s",
+                (
+                    "document_chunk_item_full filename=%s chunk_index=%s "
+                    "chunk_id=%s char_count=%s content=\n%s"
+                ),
                 source_filename,
                 chunk.chunk_index,
+                chunk.chunk_id,
                 chunk.char_count,
-                preview,
+                chunk.content,
+            )
+            LOGGER.info(
+                "document_chunk_es_preview %s",
+                json.dumps(
+                    self._build_es_preview_document(chunk),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             )
 
-        if len(chunks) > PREVIEW_LOG_LIMIT:
-            LOGGER.info(
-                "document_chunk_item_truncated filename=%s remaining=%s",
-                source_filename,
-                len(chunks) - PREVIEW_LOG_LIMIT,
-            )
+    def _build_es_preview_document(self, chunk: DocumentChunk) -> dict[str, object]:
+        """构造用于 ES 检索的预览文档。
+
+        参数:
+            chunk: 已生成的标准化 chunk 对象。
+
+        返回:
+            基于当前 chunk 文本和元数据构造的 ES 预览文档。
+            当前已包含内容检索与 FMM/BMM 词项增强字段。
+        """
+        return chunk.to_search_document()

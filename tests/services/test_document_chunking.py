@@ -102,14 +102,14 @@ def test_chunk_document_raises_for_unsupported_format(tmp_path: Path) -> None:
         )
 
 
-def test_chunk_document_logs_preview_and_truncates(
+def test_chunk_document_logs_full_chunk_and_es_preview(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """切块预览日志应输出摘要并在过多时截断。"""
+    """切块日志应输出完整 chunk 和 ES 预览。"""
     file_path = tmp_path / "preview.docx"
-    paragraphs: list[tuple[str, str | None]] = [(f"第{i}段内容。" * 10, None) for i in range(12)]
+    paragraphs: list[tuple[str, str | None]] = [("第0段内容。" * 10, None)]
     _write_docx(file_path, paragraphs=paragraphs)
-    service = DocumentChunkService(chunk_size=30, chunk_overlap=5, convert_temp_dir=tmp_path)
+    service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=tmp_path)
 
     with caplog.at_level("INFO"):
         service.chunk_document(
@@ -120,7 +120,9 @@ def test_chunk_document_logs_preview_and_truncates(
         )
 
     assert "document_chunk_preview" in caplog.text
-    assert "document_chunk_item_truncated" in caplog.text
+    assert "document_chunk_item_full" in caplog.text
+    assert "document_chunk_es_preview" in caplog.text
+    assert "第0段内容。" in caplog.text
 
 
 def _write_docx(file_path: Path, paragraphs: Sequence[tuple[str, str | None]]) -> None:
@@ -132,3 +134,4 @@ def _write_docx(file_path: Path, paragraphs: Sequence[tuple[str, str | None]]) -
             paragraph.style = style
 
     document.save(str(file_path))
+
