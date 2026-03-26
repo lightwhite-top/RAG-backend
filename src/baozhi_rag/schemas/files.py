@@ -16,6 +16,17 @@ class UploadedFileItem(BaseModel):
     size: int = Field(description="文件大小，单位为字节")
     storage_key: str = Field(description="相对存储路径")
     uploaded_at: datetime = Field(description="上传完成时间")
+    chunk_status: str = Field(description="切块处理状态")
+    chunk_count: int = Field(description="切块数量")
+    chunk_preview: list[ChunkPreviewItem] = Field(description="切块预览列表")
+
+
+class ChunkPreviewItem(BaseModel):
+    """单个切块的预览信息。"""
+
+    chunk_index: int = Field(description="切块序号")
+    char_count: int = Field(description="切块字符数")
+    preview_text: str = Field(description="切块正文预览")
 
 
 class UploadFilesResponse(BaseModel):

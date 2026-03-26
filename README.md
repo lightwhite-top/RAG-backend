@@ -61,6 +61,13 @@ just bootstrap
 just dev
 ```
 
+如果使用 VS Code 打开本仓库，工作区已内置 Python 保存自动格式化配置：
+
+- 保存时使用 `Ruff` 作为默认格式化器
+- 保存时执行导入整理与可安全应用的自动修复
+
+首次使用请确保已安装 VS Code 的 Python 与 Ruff 扩展。
+
 服务启动后访问以下地址：
 
 - 文档地址：`http://127.0.0.1:8000/docs`
@@ -93,23 +100,24 @@ just run pytest -k health
 
 ## 文件上传
 
-当前版本提供本地文件上传最小闭环，用于后续 RAG chunk 入库前的文件接收与暂存。
+当前版本提供 Word 文件上传与切块预览闭环，用于后续 RAG chunk 入库前验证切块效果。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
-- 返回：`file_id`、原始文件名、大小、内容类型、相对存储路径、上传时间
+- 当前支持：`.docx`、`.doc`
+- 返回：`file_id`、原始文件名、大小、内容类型、相对存储路径、上传时间、切块状态、切块数量、切块预览
 
 示例：
 
 ```powershell
 curl -X POST "http://127.0.0.1:8000/files/upload" `
   -H "accept: application/json" `
-  -F "files=@docs/development.md" `
-  -F "files=@README.md"
+  -F "files=@example.docx"
 ```
 
 上传目录通过 `BAOZHI_RAG_UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`。
+切块窗口和旧版 Word 转换临时目录分别通过 `BAOZHI_RAG_DOC_CHUNK_SIZE`、`BAOZHI_RAG_DOC_CHUNK_OVERLAP`、`BAOZHI_RAG_DOC_CONVERT_TEMP_DIR` 配置。
 
 ## 提交规范
 

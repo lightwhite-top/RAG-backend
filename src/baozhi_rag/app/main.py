@@ -17,12 +17,26 @@ LOGGER = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """创建并配置 FastAPI 应用实例。"""
+    """创建并配置 FastAPI 应用实例。
+
+    参数:
+        settings: 可选的应用配置对象；未传入时从环境变量加载默认配置。
+
+    返回:
+        配置完成并挂载路由的 FastAPI 实例。
+    """
     current_settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        """管理应用生命周期事件。"""
+        """管理应用生命周期事件。
+
+        参数:
+            _: 当前 FastAPI 应用实例，本实现中不直接使用。
+
+        返回:
+            一个异步上下文管理器，在启动时初始化日志并在关闭时记录停机日志。
+        """
         configure_logging(current_settings)
         LOGGER.info(
             "service_startup env=%s version=%s",
@@ -43,7 +57,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_model=ServiceInfoResponse, summary="服务信息")
     def root() -> ServiceInfoResponse:
-        """返回服务基础信息，便于环境探活与调试。"""
+        """返回服务基础信息，便于环境探活与调试。
+
+        返回:
+            包含服务名、运行环境、版本号和文档地址的服务信息响应。
+        """
         return ServiceInfoResponse(
             service=current_settings.app_name,
             environment=current_settings.app_env,

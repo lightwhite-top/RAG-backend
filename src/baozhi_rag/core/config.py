@@ -28,9 +28,19 @@ class Settings(BaseSettings):
         default=Path("data/uploads"),
         description="上传文件本地存储根目录",
     )
+    doc_chunk_size: int = Field(default=800, description="Word 文档切块大小")
+    doc_chunk_overlap: int = Field(default=150, description="Word 文档切块重叠长度")
+    doc_convert_temp_dir: Path = Field(
+        default=Path("data/tmp/converted"),
+        description="旧版 Word 转换临时目录",
+    )
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """缓存配置对象，避免重复读取环境变量。"""
+    """缓存并返回应用配置对象。
+
+    返回:
+        从环境变量和 `.env` 文件解析出的 Settings 实例。
+    """
     return Settings()
