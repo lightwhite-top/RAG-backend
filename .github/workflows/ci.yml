@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: uv sync --all-groups
+
+      - name: Ruff 检查
+        run: uv run ruff check .
+
+      - name: Mypy 检查
+        run: uv run mypy
+
+      - name: Pytest 测试
+        run: uv run pytest

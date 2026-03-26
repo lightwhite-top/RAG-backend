@@ -1,0 +1,18 @@
+# <type>(<scope>): <subject>
+#
+# 常用 type：
+# feat     新功能
+# fix      缺陷修复
+# refactor 重构
+# docs     文档变更
+# test     测试变更
+# chore    工程与依赖维护
+#
+# 示例：
+# feat(api): 初始化健康检查接口
+#
+# 正文建议说明：
+# 1. 变更背景
+# 2. 方案说明
+# 3. 风险与回滚点
+
