@@ -147,7 +147,9 @@ just run pytest -k health
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`
-- 成功返回：`201 Created`，响应体为通用消息 `{"message": "文件上传成功"}`
+- HTTP 状态码：服务正常处理时统一返回 `200 OK`
+- 成功响应示例：`{"state": "success", "message": "文件上传成功"}`
+- 业务失败响应示例：`{"state": "error", "message": "暂不支持的文件格式: .txt"}`
 - 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
 - 上传后会强制执行百炼 embedding，为 `chunk` 补充 `content_embedding`
 - 上传后会自动创建索引并写入 chunk 文档
