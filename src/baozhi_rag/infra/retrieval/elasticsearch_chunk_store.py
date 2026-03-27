@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest
+from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest, ChunkSearchStore
 
 if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
@@ -36,7 +36,7 @@ class ElasticsearchSearchError(ElasticsearchStoreError):
     """Elasticsearch 检索异常。"""
 
 
-class ElasticsearchChunkStore:
+class ElasticsearchChunkStore(ChunkSearchStore):
     """负责 chunk 索引创建、写入、删除与检索。"""
 
     def __init__(
@@ -88,6 +88,18 @@ class ElasticsearchChunkStore:
             raise ElasticsearchIndexError(msg) from exc
 
         self._index_ready = True
+
+    def ensure_ready(self) -> None:
+        """启动期就绪校验：确保客户端可创建且索引可存在/可创建。"""
+        try:
+            self._get_client()
+        except ElasticsearchStoreError:
+            raise
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            msg = "初始化 ES 客户端失败"
+            raise ElasticsearchDependencyError(msg) from exc
+
+        self.ensure_index()
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> int:
         """将 chunk 文档批量写入 ES。"""
