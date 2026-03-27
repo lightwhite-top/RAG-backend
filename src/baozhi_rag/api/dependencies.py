@@ -22,7 +22,7 @@ def get_document_preview_service(
     """构造文件上传与切块预览服务。"""
     file_store = LocalFileStore(settings.upload_root_dir)
     term_matcher = build_default_term_matcher(settings.domain_dictionary_path)
-    chunk_store = ElasticsearchChunkStore.from_settings(settings) if settings.es_enabled else None
+    chunk_store = ElasticsearchChunkStore.from_settings(settings)
 
     return DocumentPreviewService(
         file_upload_service=FileUploadService(file_store),

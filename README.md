@@ -68,6 +68,46 @@ just dev
 
 首次使用请确保已安装 VS Code 的 Python 与 Ruff 扩展。
 
+## VS Code 调试
+
+仓库已内置 `.vscode/launch.json`，可直接在 VS Code 中使用调试面板启动。
+
+首次使用建议按以下步骤操作：
+
+```powershell
+uv sync --all-groups
+Copy-Item .env.example .env
+```
+
+然后在 VS Code 中：
+
+- 使用 `Python: Select Interpreter` 选择工作区内的 `.venv`
+- 打开“运行和调试”面板
+- 选择以下任一配置后按 `F5`
+
+可用调试配置：
+
+- `Python 调试程序: FastAPI`
+  - 适合稳定打断点
+  - 启动命令等价于 `uvicorn baozhi_rag.app.main:app --host 127.0.0.1 --port 8000`
+- `Python 调试程序: FastAPI（热重载）`
+  - 适合一边改代码一边联调
+  - 等价于 `uvicorn baozhi_rag.app.main:app --host 127.0.0.1 --port 8000 --reload`
+  - 由于热重载会派生子进程，断点稳定性可能略弱于无热重载模式
+- `Python 调试程序: Pytest 当前文件`
+  - 适合直接调试当前测试文件
+
+调试配置默认会：
+
+- 读取工作区根目录下的 `.env`
+- 将 `src` 注入 `PYTHONPATH`
+- 在集成终端中输出日志
+
+服务启动后可访问：
+
+- `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/health/live`
+
 服务启动后访问以下地址：
 
 - 文档地址：`http://127.0.0.1:8000/docs`
@@ -100,7 +140,7 @@ just run pytest -k health
 
 ## 文件上传
 
-当前版本提供 Word 文件上传、领域词增强、可选 ES 入库与 chunk 检索闭环。
+当前版本提供 Word 文件上传、领域词增强、ES 入库与 chunk 检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
@@ -108,7 +148,7 @@ just run pytest -k health
 - 当前支持：`.docx`、`.doc`
 - 返回：`file_id`、原始文件名、大小、内容类型、相对存储路径、上传时间、切块状态、切块数量、切块预览
 - 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
-- 当 `ES_ENABLED=true` 时，上传后会自动创建索引并写入 chunk 文档
+- 上传后会自动创建索引并写入 chunk 文档
 
 示例：
 
@@ -173,9 +213,8 @@ docker compose -f docker-compose.search.yml down
 docker compose -f docker-compose.search.yml down -v
 ```
 
-当前应用已预留 Elasticsearch 配置项，复制 `.env.example` 后默认会启用本机 ES：
+当前应用已预留 Elasticsearch 配置项，复制 `.env.example` 后请确保本机 ES 可用：
 
-- `ES_ENABLED=true`
 - `ES_URL=http://127.0.0.1:9200`
 - `ES_INDEX_NAME=document_chunks`
 - `ES_VERIFY_CERTS=false`

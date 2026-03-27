@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from baozhi_rag.api.dependencies import get_chunk_search_service
 from baozhi_rag.app.main import create_app
 from baozhi_rag.core.config import Settings
+from baozhi_rag.infra.retrieval.elasticsearch_chunk_store import (
+    ElasticsearchDependencyError,
+    ElasticsearchSearchError,
+    ElasticsearchStoreError,
+)
 from baozhi_rag.services.chunk_search import ChunkSearchHit
 
 
@@ -35,8 +41,8 @@ class FakeChunkSearchService:
         ]
 
 
-def test_search_chunks_returns_hits_when_es_enabled(tmp_path: Path) -> None:
-    """启用 ES 时应返回 chunk 检索结果。"""
+def build_test_client(tmp_path: Path, service: object) -> TestClient:
+    """创建注入检索服务替身的测试客户端。"""
     settings = Settings(
         app_name="Baozhi RAG Test",
         app_env="test",
@@ -47,13 +53,16 @@ def test_search_chunks_returns_hits_when_es_enabled(tmp_path: Path) -> None:
         doc_chunk_size=120,
         doc_chunk_overlap=20,
         doc_convert_temp_dir=tmp_path / "tmp",
-        es_enabled=True,
         search_default_size=10,
     )
     app = create_app(settings)
-    app.dependency_overrides[get_chunk_search_service] = lambda: FakeChunkSearchService()
+    app.dependency_overrides[get_chunk_search_service] = lambda: service
+    return TestClient(app)
 
-    client = TestClient(app)
+
+def test_search_chunks_returns_hits(tmp_path: Path) -> None:
+    """检索服务可用时应返回 chunk 检索结果。"""
+    client = build_test_client(tmp_path, FakeChunkSearchService())
     response = client.get("/search/chunks", params={"q": "免赔额", "size": 5})
 
     assert response.status_code == 200
@@ -64,23 +73,53 @@ def test_search_chunks_returns_hits_when_es_enabled(tmp_path: Path) -> None:
     assert payload["hits"][0]["merged_terms"] == ["免赔额", "保险责任"]
 
 
-def test_search_chunks_returns_503_when_es_disabled(tmp_path: Path) -> None:
-    """未启用 ES 时检索接口应直接返回 503。"""
-    settings = Settings(
-        app_name="Baozhi RAG Test",
-        app_env="test",
-        debug=False,
-        version="0.1.0-test",
-        log_level="INFO",
-        upload_root_dir=tmp_path,
-        doc_chunk_size=120,
-        doc_chunk_overlap=20,
-        doc_convert_temp_dir=tmp_path / "tmp",
-        es_enabled=False,
-    )
-    client = TestClient(create_app(settings))
+def test_search_chunks_maps_value_error_to_400(tmp_path: Path) -> None:
+    """检索参数错误应映射为 400。"""
+
+    class ValueErrorService:
+        def search(self, _: str, __: int) -> list[ChunkSearchHit]:
+            raise ValueError("参数非法")
+
+    client = build_test_client(tmp_path, ValueErrorService())
 
     response = client.get("/search/chunks", params={"q": "免赔额"})
 
-    assert response.status_code == 503
-    assert "ES 检索未启用" in response.json()["detail"]
+    assert response.status_code == 400
+    assert response.json()["detail"] == "参数非法"
+
+
+def test_search_chunks_maps_dependency_error_to_500(tmp_path: Path) -> None:
+    """检索依赖异常应映射为 500。"""
+
+    class DependencyErrorService:
+        def search(self, _: str, __: int) -> list[ChunkSearchHit]:
+            raise ElasticsearchDependencyError("ES 依赖不可用")
+
+    client = build_test_client(tmp_path, DependencyErrorService())
+
+    response = client.get("/search/chunks", params={"q": "免赔额"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "ES 依赖不可用"
+
+
+@pytest.mark.parametrize(
+    "error_cls",
+    [ElasticsearchSearchError, ElasticsearchStoreError],
+)
+def test_search_chunks_maps_search_related_error_to_502(
+    tmp_path: Path,
+    error_cls: type[Exception],
+) -> None:
+    """检索执行或存储异常应映射为 502。"""
+
+    class SearchRelatedErrorService:
+        def search(self, _: str, __: int) -> list[ChunkSearchHit]:
+            raise error_cls("检索链路异常")
+
+    client = build_test_client(tmp_path, SearchRelatedErrorService())
+
+    response = client.get("/search/chunks", params={"q": "免赔额"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "检索链路异常"

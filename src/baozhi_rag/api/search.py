@@ -19,22 +19,23 @@ from baozhi_rag.services.chunk_search import ChunkSearchService
 router = APIRouter(prefix="/search", tags=["search"])
 
 
+def get_search_default_size(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> int:
+    """读取检索接口默认返回条数。"""
+    return settings.search_default_size
+
+
 @router.get("/chunks", response_model=ChunkSearchResponse, summary="检索 chunk")
 def search_chunks(
     q: Annotated[str, Query(min_length=1, description="查询文本")],
-    settings: Annotated[Settings, Depends(get_settings)],
+    default_size: Annotated[int, Depends(get_search_default_size)],
     service: Annotated[ChunkSearchService, Depends(get_chunk_search_service)],
     size: Annotated[int | None, Query(gt=0, le=50, description="返回条数")] = None,
 ) -> ChunkSearchResponse:
     """执行基于全文和领域词的 chunk 混合检索。"""
-    if not settings.es_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="ES 检索未启用，请先配置 ES_ENABLED=true",
-        )
-
     try:
-        hits = service.search(q, size or settings.search_default_size)
+        hits = service.search(q, size or default_size)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except ElasticsearchDependencyError as exc:

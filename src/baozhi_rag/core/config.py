@@ -71,11 +71,6 @@ class Settings(BaseSettings):
         description="金融保险领域词典文件路径，按行存储词项",
         validation_alias=AliasChoices("DOMAIN_DICTIONARY_PATH"),
     )
-    es_enabled: bool = Field(
-        default=False,
-        description="是否启用 Elasticsearch 入库与检索",
-        validation_alias=AliasChoices("ES_ENABLED"),
-    )
     es_url: str = Field(
         default="http://127.0.0.1:9200",
         description="Elasticsearch 地址",
