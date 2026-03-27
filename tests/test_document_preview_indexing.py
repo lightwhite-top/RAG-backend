@@ -36,8 +36,9 @@ class RecordingChunkStore:
     def search(self, request: ChunkSearchRequest) -> list[ChunkSearchHit]:
         return []
 
-def test_upload_and_preview_files_indexes_chunks_when_store_enabled(tmp_path: Path) -> None:
-    """启用检索存储时应在切块后执行 ES 入库。"""
+
+def test_upload_and_preview_files_always_indexes_chunks(tmp_path: Path) -> None:
+    """上传切块后应始终执行 ES 入库。"""
     file_store = LocalFileStore(tmp_path)
     chunk_store = RecordingChunkStore()
     service = DocumentPreviewService(
@@ -51,7 +52,7 @@ def test_upload_and_preview_files_indexes_chunks_when_store_enabled(tmp_path: Pa
         chunk_store=chunk_store,
     )
 
-    results = service.upload_and_preview_files(
+    results = service.upload_and_chunk_files(
         [
             FileUploadInput(
                 filename="产品说明.docx",

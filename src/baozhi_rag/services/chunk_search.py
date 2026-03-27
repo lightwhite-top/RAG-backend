@@ -44,15 +44,19 @@ class ChunkSearchStore(Protocol):
 
     def ensure_index(self) -> None:
         """确保索引存在。"""
+        ...
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> int:
         """写入 chunk 文档。"""
+        ...
 
     def delete_chunks_by_file_id(self, file_id: str) -> None:
         """按文件标识删除 chunk。"""
+        ...
 
     def search(self, request: ChunkSearchRequest) -> list[ChunkSearchHit]:
         """执行 chunk 检索。"""
+        ...
 
 
 class ChunkSearchService:

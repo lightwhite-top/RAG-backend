@@ -15,7 +15,9 @@ from baozhi_rag.services.file_upload import FileUploadInput, FileUploadService, 
 class ChunkedFileResult:
     """已上传并完成切块预览的文件结果。"""
 
+    # 上传结果（包含文件的元数据和存储信息）
     upload: UploadedFileResult
+    # 切块结果（包含每个切块的文本内容、位置信息和关联的文件 ID 等）列表
     chunks: list[DocumentChunk]
 
 
@@ -27,7 +29,7 @@ class DocumentPreviewService:
         file_upload_service: FileUploadService,
         chunk_service: DocumentChunkService,
         file_store: LocalFileStore,
-        chunk_store: ChunkSearchStore | None = None,
+        chunk_store: ChunkSearchStore,
     ) -> None:
         """初始化上传预览服务。
 
@@ -35,7 +37,7 @@ class DocumentPreviewService:
             file_upload_service: 负责文件落盘的上传服务。
             chunk_service: 负责按文件格式解析并切块的服务。
             file_store: 本地文件存储适配器，用于在失败时执行回滚。
-            chunk_store: 可选的检索存储适配器；存在时会在上传后执行 ES 入库。
+            chunk_store: 检索存储适配器；上传后始终执行 ES 入库。
 
         返回:
             None。
@@ -45,7 +47,7 @@ class DocumentPreviewService:
         self._file_store = file_store
         self._chunk_store = chunk_store
 
-    def upload_and_preview_files(self, files: list[FileUploadInput]) -> list[ChunkedFileResult]:
+    def upload_and_chunk_files(self, files: list[FileUploadInput]) -> list[ChunkedFileResult]:
         """上传文件并生成切块预览。
 
         参数:
@@ -57,15 +59,20 @@ class DocumentPreviewService:
         异常:
             Exception: 透传上传或切块阶段抛出的异常，并在抛出前回滚本次已落盘文件。
         """
+        # 首先执行文件上传，获取每个文件的落盘结果；如果上传阶段抛出异常，直接透传并不需要回滚
         uploaded_files = self._file_upload_service.upload_files(files)
+
+        # 存储本次切块已成功索引的文件 ID 列表，以便在切块阶段发生异常时回滚已索引的 chunk 文档
         indexed_file_ids: list[str] = []
 
         try:
+            # 获得每个文件的切块结果
             results = [
-                # 依次对每个已上传文件执行切块，并将结果封装在 ChunkedFileResult 中返回
+                # 封装结果对象，包含上传结果和切块结果
                 ChunkedFileResult(
+                    # 上传结果（包含文件的元数据和存储信息）
                     upload=uploaded_file,
-                    # 通过文件存储适配器解析出文件的绝对路径，并传递给切块服务进行切块预览
+                    # 切块结果（包含每个切块的文本内容、位置信息和关联的文件 ID 等）列表
                     chunks=self._chunk_service.chunk_document(
                         file_path=self._file_store.resolve_path(uploaded_file.storage_key),
                         source_filename=uploaded_file.original_filename,
@@ -75,6 +82,7 @@ class DocumentPreviewService:
                 )
                 for uploaded_file in uploaded_files
             ]
+            # 对切块结果执行索引写入
             indexed_file_ids = self._index_chunks(results)
             return results
         except Exception:
@@ -83,12 +91,14 @@ class DocumentPreviewService:
             raise
 
     def _index_chunks(self, results: list[ChunkedFileResult]) -> list[str]:
-        """在启用检索存储时写入 chunk 文档。"""
-        if self._chunk_store is None:
-            return []
-
+        """写入 chunk 文档并返回已索引文件 ID 列表。"""
+        # 确保索引已创建
         self._chunk_store.ensure_index()
+
+        # 记录已成功索引的文件 ID 列表
         indexed_file_ids: list[str] = []
+
+        # 逐个写入检索存储
         for result in results:
             self._chunk_store.index_chunks(result.chunks)
             indexed_file_ids.append(result.upload.file_id)
@@ -108,9 +118,6 @@ class DocumentPreviewService:
 
     def _rollback_indexed_chunks(self, indexed_file_ids: list[str]) -> None:
         """索引失败时删除已写入的 chunk 文档。"""
-        if self._chunk_store is None:
-            return
-
         for file_id in reversed(indexed_file_ids):
             with suppress(Exception):
                 self._chunk_store.delete_chunks_by_file_id(file_id)

@@ -41,7 +41,7 @@ async def upload_files(
         HTTPException: 当文件名非法、文件格式不支持、存储失败或切块失败时抛出。
     """
     try:
-        results = service.upload_and_preview_files(
+        results = service.upload_and_chunk_files(
             [
                 FileUploadInput(
                     filename=file.filename or "",
