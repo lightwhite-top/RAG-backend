@@ -22,4 +22,5 @@ site/
 uv.lock.bak
 *.log
 .env
-
+data/
+docs/
