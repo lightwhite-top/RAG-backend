@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
+import textwrap
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -123,6 +123,7 @@ class DocumentChunkService:
             UnsupportedDocumentTypeError: 当文件扩展名未被支持时抛出。
             DocumentChunkingError: 当解析、转换或切块失败时抛出。
         """
+        # 获取文件拓展名并转换为小写
         suffix = file_path.suffix.lower()
 
         match suffix:
@@ -145,6 +146,7 @@ class DocumentChunkService:
                 raise UnsupportedDocumentTypeError(msg)
 
         self._log_chunk_preview(
+            file_id=file_id,
             source_filename=source_filename,
             storage_key=storage_key,
             chunks=chunks,
@@ -390,6 +392,7 @@ class DocumentChunkService:
 
     def _log_chunk_preview(
         self,
+        file_id: str,
         source_filename: str,
         storage_key: str,
         chunks: list[DocumentChunk],
@@ -397,40 +400,33 @@ class DocumentChunkService:
         """将切块摘要打印到控制台日志。
 
         参数:
+            file_id: 当前文档文件标识。
             source_filename: 上传时的原始文件名。
             storage_key: 文件在本地存储中的相对路径。
             chunks: 已生成的切块列表。
 
         返回:
-            None。日志会输出 chunk 总数、每个 chunk 的完整正文，以及对应的 ES 预览文档。
+            None。日志会输出文件级摘要，以及每个 chunk 的多行预览信息。
         """
+        char_counts = ", ".join(str(chunk.char_count) for chunk in chunks)
         LOGGER.info(
-            "document_chunk_preview filename=%s storage_key=%s chunk_count=%s",
+            (
+                "document_chunk_preview\n"
+                "  file_id          : %s\n"
+                "  filename         : %s\n"
+                "  storage_key      : %s\n"
+                "  chunk_count      : %s\n"
+                "  chunk_char_counts: [%s]"
+            ),
+            file_id,
             source_filename,
             storage_key,
             len(chunks),
+            char_counts,
         )
 
         for chunk in chunks:
-            LOGGER.info(
-                (
-                    "document_chunk_item_full filename=%s chunk_index=%s "
-                    "chunk_id=%s char_count=%s content=\n%s"
-                ),
-                source_filename,
-                chunk.chunk_index,
-                chunk.chunk_id,
-                chunk.char_count,
-                chunk.content,
-            )
-            LOGGER.info(
-                "document_chunk_es_preview %s",
-                json.dumps(
-                    self._build_es_preview_document(chunk),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
+            LOGGER.info("%s", self._format_chunk_log(chunk))
 
     def _build_es_preview_document(self, chunk: DocumentChunk) -> dict[str, object]:
         """构造用于 ES 检索的预览文档。
@@ -443,3 +439,49 @@ class DocumentChunkService:
             当前已包含内容检索与 FMM/BMM 词项增强字段。
         """
         return chunk.to_search_document()
+
+    def _format_chunk_log(self, chunk: DocumentChunk) -> str:
+        """把单个 chunk 渲染为便于控制台阅读的多行文本。"""
+        content_preview = self._format_log_multiline_value(
+            self._build_content_preview(chunk.content),
+            indent="    ",
+        )
+        merged_terms = ", ".join(chunk.merged_terms) if chunk.merged_terms else "-"
+
+        return (
+            "document_chunk_item\n"
+            f"  chunk_index      : {chunk.chunk_index}\n"
+            f"  chunk_id         : {chunk.chunk_id}\n"
+            f"  char_count       : {chunk.char_count}\n"
+            f"  merged_terms     : {merged_terms}\n"
+            "  content_preview  :\n"
+            f"{content_preview}"
+        )
+
+    def _build_content_preview(self, content: str, max_chars: int = 220) -> str:
+        """构造日志中的正文预览，避免把整段内容直接铺满控制台。"""
+        normalized = content.strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        return f"{normalized[:max_chars]}...(已截断，共{len(normalized)}字符)"
+
+    def _format_log_multiline_value(self, value: str, indent: str) -> str:
+        """把多行文本包装并缩进，便于在控制台中按字段阅读。"""
+        wrapped_lines: list[str] = []
+        for raw_line in value.splitlines() or [""]:
+            line = raw_line.strip()
+            if not line:
+                wrapped_lines.append(indent)
+                continue
+
+            wrapped_lines.extend(
+                f"{indent}{wrapped_line}"
+                for wrapped_line in textwrap.wrap(
+                    line,
+                    width=88,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            )
+
+        return "\n".join(wrapped_lines)

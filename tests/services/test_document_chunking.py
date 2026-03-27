@@ -102,12 +102,12 @@ def test_chunk_document_raises_for_unsupported_format(tmp_path: Path) -> None:
         )
 
 
-def test_chunk_document_logs_full_chunk_and_es_preview(
+def test_chunk_document_logs_multiline_chunk_preview(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """切块日志应输出完整 chunk 和 ES 预览。"""
+    """切块日志应输出字段对齐的多行预览。"""
     file_path = tmp_path / "preview.docx"
-    paragraphs: list[tuple[str, str | None]] = [("第0段内容。" * 10, None)]
+    paragraphs: list[tuple[str, str | None]] = [(("第0段内容。" * 25) + "补充说明。", None)]
     _write_docx(file_path, paragraphs=paragraphs)
     service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=tmp_path)
 
@@ -120,8 +120,15 @@ def test_chunk_document_logs_full_chunk_and_es_preview(
         )
 
     assert "document_chunk_preview" in caplog.text
-    assert "document_chunk_item_full" in caplog.text
-    assert "document_chunk_es_preview" in caplog.text
+    assert "  file_id          : file-5" in caplog.text
+    assert "  chunk_count      : 1" in caplog.text
+    assert "  chunk_char_counts: [155]" in caplog.text
+    assert "document_chunk_item" in caplog.text
+    assert "  chunk_id         : file-5-chunk-0" in caplog.text
+    assert "  char_count       : 155" in caplog.text
+    assert "  content_preview  :" in caplog.text
+    assert "document_chunk_item_full" not in caplog.text
+    assert "document_chunk_es_preview" not in caplog.text
     assert "第0段内容。" in caplog.text
 
 
@@ -134,4 +141,3 @@ def _write_docx(file_path: Path, paragraphs: Sequence[tuple[str, str | None]]) -
             paragraph.style = style
 
     document.save(str(file_path))
-
