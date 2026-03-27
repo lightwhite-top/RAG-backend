@@ -101,6 +101,46 @@ class Settings(BaseSettings):
         description="是否校验 Elasticsearch 证书",
         validation_alias=AliasChoices("ES_VERIFY_CERTS"),
     )
+    bailian_api_key: str | None = Field(
+        default=None,
+        description="阿里云百炼 DashScope API Key",
+        validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
+    )
+    bailian_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        description="阿里云百炼 OpenAI 兼容接口地址",
+        validation_alias=AliasChoices("DASHSCOPE_BASE_URL", "BAILIAN_BASE_URL"),
+    )
+    bailian_timeout_seconds: float = Field(
+        default=30.0,
+        description="阿里云百炼模型调用超时时间（秒）",
+        validation_alias=AliasChoices("BAILIAN_TIMEOUT_SECONDS"),
+    )
+    bailian_chat_model: str | None = Field(
+        default=None,
+        description="预留的阿里云百炼聊天模型名称",
+        validation_alias=AliasChoices("BAILIAN_CHAT_MODEL"),
+    )
+    chunk_embedding_enabled: bool = Field(
+        default=False,
+        description="是否启用 chunk 向量化与语义检索",
+        validation_alias=AliasChoices("CHUNK_EMBEDDING_ENABLED"),
+    )
+    chunk_embedding_model: str = Field(
+        default="text-embedding-v4",
+        description="chunk 向量化模型名称",
+        validation_alias=AliasChoices("CHUNK_EMBEDDING_MODEL"),
+    )
+    chunk_embedding_dimensions: int = Field(
+        default=1024,
+        description="chunk 向量维度",
+        validation_alias=AliasChoices("CHUNK_EMBEDDING_DIMENSIONS"),
+    )
+    chunk_embedding_batch_size: int = Field(
+        default=10,
+        description="单次批量向量化请求的最大文本条数",
+        validation_alias=AliasChoices("CHUNK_EMBEDDING_BATCH_SIZE"),
+    )
     search_default_size: int = Field(
         default=10,
         description="chunk 检索默认返回条数",

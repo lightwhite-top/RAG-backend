@@ -23,6 +23,7 @@ def _build_settings(tmp_path: Path) -> Settings:
         doc_chunk_size=120,
         doc_chunk_overlap=20,
         doc_convert_temp_dir=tmp_path / "tmp",
+        chunk_embedding_enabled=False,
     )
 
 
@@ -70,4 +71,44 @@ def test_startup_failure_es_unavailable_raises_on_lifespan(
 
     app = app_main.create_app(_build_settings(tmp_path))
     with pytest.raises(RuntimeError, match="es unavailable"), TestClient(app):
+        pass
+
+
+def test_startup_embedding_enabled_requires_bailian_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启用向量化时，应用启动应先校验百炼客户端配置。"""
+
+    class _FakeStore:
+        def ensure_ready(self) -> None:
+            return
+
+    class _FakeChunkStoreFactory:
+        @classmethod
+        def from_settings(cls, _: Settings) -> _FakeStore:
+            return _FakeStore()
+
+    class _FakeBailianClient:
+        def ensure_ready(self) -> None:
+            msg = "missing api key"
+            raise RuntimeError(msg)
+
+    class _FakeBailianClientFactory:
+        @classmethod
+        def from_settings(cls, _: Settings) -> _FakeBailianClient:
+            return _FakeBailianClient()
+
+    settings = _build_settings(tmp_path).model_copy(
+        update={
+            "chunk_embedding_enabled": True,
+            "chunk_embedding_model": "text-embedding-v4",
+            "chunk_embedding_dimensions": 1024,
+        }
+    )
+    monkeypatch.setattr(app_main, "ElasticsearchChunkStore", _FakeChunkStoreFactory)
+    monkeypatch.setattr(app_main, "AlibabaModelStudioClient", _FakeBailianClientFactory)
+
+    app = app_main.create_app(settings)
+    with pytest.raises(RuntimeError, match="missing api key"), TestClient(app):
         pass

@@ -7,6 +7,7 @@
 - Python 3.13
 - FastAPI
 - uv
+- 阿里云百炼 OpenAI 兼容接口
 - Ruff
 - Mypy
 - Pytest
@@ -148,6 +149,7 @@ just run pytest -k health
 - 当前支持：`.docx`、`.doc`
 - 返回：`file_id`、原始文件名、大小、内容类型、相对存储路径、上传时间、切块状态、切块数量、切块预览
 - 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
+- 可选启用百炼 embedding，为 `chunk` 补充 `content_embedding`
 - 上传后会自动创建索引并写入 chunk 文档
 
 示例：
@@ -162,15 +164,18 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
 领域词典扩展文件通过 `DOMAIN_DICTIONARY_PATH` 配置。
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
+百炼模型配置通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 配置。
+向量化开关与模型参数通过 `CHUNK_EMBEDDING_ENABLED`、`CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置。
 
 ## Chunk 检索
 
-当前版本新增 `GET /search/chunks` 接口，用于基于 `content` 与领域词字段执行混合召回。
+当前版本新增 `GET /search/chunks` 接口，用于基于 `content`、领域词字段和可选查询向量执行混合召回。
 
 - 查询参数：`q`
 - 可选参数：`size`
 - 默认返回条数：`SEARCH_DEFAULT_SIZE`
 - 混合检索字段：`content`、`fmm_terms`、`bmm_terms`、`merged_terms`
+- 当 `CHUNK_EMBEDDING_ENABLED=true` 时，会额外启用 `content_embedding` 的语义检索打分
 
 示例：
 
@@ -218,6 +223,18 @@ docker compose -f docker-compose.search.yml down -v
 - `ES_URL=http://127.0.0.1:9200`
 - `ES_INDEX_NAME=document_chunks`
 - `ES_VERIFY_CERTS=false`
+
+如果要启用阿里云百炼向量化，请额外配置：
+
+- `DASHSCOPE_API_KEY=<你的百炼密钥>`
+- `CHUNK_EMBEDDING_ENABLED=true`
+- `CHUNK_EMBEDDING_MODEL=text-embedding-v4`
+- `CHUNK_EMBEDDING_DIMENSIONS=1024`
+
+说明：
+
+- 当前工程通过百炼 OpenAI 兼容接口统一封装 embedding 能力，后续接入聊天模型时可直接复用同一客户端。
+- 已存在的 ES 索引如果还没有 `content_embedding` 字段，应用启动时会尝试补充映射；如果维度和当前配置不一致，需要手动重建索引。
 
 说明：
 

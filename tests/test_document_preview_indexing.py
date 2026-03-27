@@ -9,6 +9,7 @@ from typing import Any
 from docx import Document
 
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
+from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_preview import DocumentPreviewService
@@ -37,6 +38,16 @@ class RecordingChunkStore:
         return []
 
 
+class FakeEmbeddingClient:
+    """返回固定向量的测试替身。"""
+
+    def ensure_ready(self) -> None:
+        return
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[float(len(text))] for text in texts]
+
+
 def test_upload_and_preview_files_always_indexes_chunks(tmp_path: Path) -> None:
     """上传切块后应始终执行 ES 入库。"""
     file_store = LocalFileStore(tmp_path)
@@ -50,6 +61,7 @@ def test_upload_and_preview_files_always_indexes_chunks(tmp_path: Path) -> None:
         ),
         file_store=file_store,
         chunk_store=chunk_store,
+        chunk_embedding_service=ChunkEmbeddingService(FakeEmbeddingClient()),
     )
 
     results = service.upload_and_chunk_files(
@@ -69,6 +81,7 @@ def test_upload_and_preview_files_always_indexes_chunks(tmp_path: Path) -> None:
     assert len(indexed_chunks) == 1
     chunk = indexed_chunks[0]
     assert chunk.merged_terms == ["保险责任", "免赔额", "保险", "责任免除"]
+    assert chunk.content_embedding == [13.0]
     assert chunk_store.deleted_file_ids == []
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ class ChunkSearchRequest:
     fmm_terms: list[str]
     bmm_terms: list[str]
     merged_terms: list[str]
+    query_embedding: list[float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,10 +68,12 @@ class ChunkSearchService:
         self,
         term_matcher: MaximumMatchingTermMatcher,
         store: ChunkSearchStore,
+        chunk_embedding_service: ChunkEmbeddingService | None = None,
     ) -> None:
         """初始化检索服务。"""
         self._term_matcher = term_matcher
         self._store = store
+        self._chunk_embedding_service = chunk_embedding_service
 
     def search(self, query_text: str, size: int) -> list[ChunkSearchHit]:
         """执行基于全文与领域词的混合检索。"""
@@ -88,5 +92,10 @@ class ChunkSearchService:
             fmm_terms=terms.fmm_terms,
             bmm_terms=terms.bmm_terms,
             merged_terms=terms.merged_terms,
+            query_embedding=(
+                self._chunk_embedding_service.embed_query(normalized_query)
+                if self._chunk_embedding_service is not None
+                else None
+            ),
         )
         return self._store.search(request)

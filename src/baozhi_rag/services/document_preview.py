@@ -6,6 +6,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
+from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchStore
 from baozhi_rag.services.document_chunking import DocumentChunk, DocumentChunkService
 from baozhi_rag.services.file_upload import FileUploadInput, FileUploadService, UploadedFileResult
@@ -30,6 +31,7 @@ class DocumentPreviewService:
         chunk_service: DocumentChunkService,
         file_store: LocalFileStore,
         chunk_store: ChunkSearchStore,
+        chunk_embedding_service: ChunkEmbeddingService | None = None,
     ) -> None:
         """初始化上传预览服务。
 
@@ -38,6 +40,7 @@ class DocumentPreviewService:
             chunk_service: 负责按文件格式解析并切块的服务。
             file_store: 本地文件存储适配器，用于在失败时执行回滚。
             chunk_store: 检索存储适配器；上传后始终执行 ES 入库。
+            chunk_embedding_service: 可选的 chunk 向量化服务；启用后会在入库前补充向量。
 
         返回:
             None。
@@ -46,6 +49,7 @@ class DocumentPreviewService:
         self._chunk_service = chunk_service
         self._file_store = file_store
         self._chunk_store = chunk_store
+        self._chunk_embedding_service = chunk_embedding_service
 
     def upload_and_chunk_files(self, files: list[FileUploadInput]) -> list[ChunkedFileResult]:
         """上传文件并生成切块预览。
@@ -82,13 +86,27 @@ class DocumentPreviewService:
                 )
                 for uploaded_file in uploaded_files
             ]
+            enriched_results = self._embed_chunks(results)
             # 对切块结果执行索引写入
-            indexed_file_ids = self._index_chunks(results)
-            return results
+            indexed_file_ids = self._index_chunks(enriched_results)
+            return enriched_results
         except Exception:
             self._rollback_indexed_chunks(indexed_file_ids)
             self._rollback_uploaded_files(uploaded_files)
             raise
+
+    def _embed_chunks(self, results: list[ChunkedFileResult]) -> list[ChunkedFileResult]:
+        """在入库前为 chunk 列表补充向量。"""
+        if self._chunk_embedding_service is None:
+            return results
+
+        return [
+            ChunkedFileResult(
+                upload=result.upload,
+                chunks=self._chunk_embedding_service.embed_chunks(result.chunks),
+            )
+            for result in results
+        ]
 
     def _index_chunks(self, results: list[ChunkedFileResult]) -> list[str]:
         """写入 chunk 文档并返回已索引文件 ID 列表。"""
