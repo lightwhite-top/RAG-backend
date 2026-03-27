@@ -82,7 +82,8 @@
 ## 7. 提交与分支规范
 
 - 提交信息采用 Conventional Commits。
-- 推荐格式：`feat(scope): summary`
+- 推荐格式：`feat(scope): 中文摘要`
+- 提交摘要必须使用简体中文；`type` 与 `scope` 保持 Conventional Commits 习惯写法。
 - 单个提交只做一类事情，不要把功能、重构、依赖升级混在一起。
 - 推荐分支命名：
   - `feature/<topic>`

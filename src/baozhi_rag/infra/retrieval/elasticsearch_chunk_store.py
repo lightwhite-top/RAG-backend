@@ -50,7 +50,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         username: str | None,
         password: str | None,
         verify_certs: bool,
-        embedding_enabled: bool,
         embedding_dimensions: int,
     ) -> None:
         """初始化 ES 存储适配器。"""
@@ -60,7 +59,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         self._username = username
         self._password = password
         self._verify_certs = verify_certs
-        self._embedding_enabled = embedding_enabled
         self._embedding_dimensions = embedding_dimensions
         self._client: Any | None = None
         self._index_ready = False
@@ -75,7 +73,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
             username=settings.es_username,
             password=settings.es_password,
             verify_certs=settings.es_verify_certs,
-            embedding_enabled=settings.chunk_embedding_enabled,
             embedding_dimensions=settings.chunk_embedding_dimensions,
         )
 
@@ -166,7 +163,7 @@ class ElasticsearchChunkStore(ChunkSearchStore):
 
     @classmethod
     def build_search_query(cls, request: ChunkSearchRequest) -> dict[str, object]:
-        """构造结合全文与领域词的 ES 查询。"""
+        """构造结合全文、领域词与向量相似度的 ES 查询。"""
         should_queries: list[dict[str, object]] = [
             {
                 "match": {
@@ -209,15 +206,10 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         lexical_query: dict[str, object] = {
             "bool": {
                 "should": should_queries,
-                "minimum_should_match": 1,
+                "minimum_should_match": 0,
+                "filter": [{"exists": {"field": cls._EMBEDDING_FIELD_NAME}}],
             }
         }
-        if request.query_embedding is None:
-            return lexical_query
-
-        bool_query = cast(dict[str, object], lexical_query["bool"])
-        bool_query["minimum_should_match"] = 0
-        bool_query["filter"] = [{"exists": {"field": cls._EMBEDDING_FIELD_NAME}}]
         return {
             "script_score": {
                 "query": lexical_query,
@@ -290,9 +282,8 @@ class ElasticsearchChunkStore(ChunkSearchStore):
             "fmm_terms": {"type": "keyword"},
             "bmm_terms": {"type": "keyword"},
             "merged_terms": {"type": "keyword"},
+            self._EMBEDDING_FIELD_NAME: self._build_embedding_mapping(),
         }
-        if self._embedding_enabled:
-            properties[self._EMBEDDING_FIELD_NAME] = self._build_embedding_mapping()
 
         return {
             "dynamic": "strict",
@@ -359,10 +350,7 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         )
 
     def _ensure_embedding_mapping(self, client: Any) -> None:
-        """在启用语义检索时补齐向量字段映射。"""
-        if not self._embedding_enabled:
-            return
-
+        """补齐并校验向量字段映射。"""
         response = client.indices.get_mapping(index=self._index_name)
         index_mapping = response.get(self._index_name, {})
         mappings = index_mapping.get("mappings", {})
@@ -386,8 +374,7 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         vector_dims = vector_mapping.get("dims")
         if vector_type != "dense_vector" or vector_dims != self._embedding_dimensions:
             msg = (
-                "ES 向量字段与当前配置不一致，"
-                f"字段={self._EMBEDDING_FIELD_NAME} dims={vector_dims}"
+                f"ES 向量字段与当前配置不一致，字段={self._EMBEDDING_FIELD_NAME} dims={vector_dims}"
             )
             raise ElasticsearchIndexError(msg)
 

@@ -41,7 +41,7 @@ class AlibabaModelStudioClient:
         api_key: str | None,
         base_url: str,
         timeout_seconds: float,
-        embedding_model: str | None,
+        embedding_model: str,
         embedding_dimensions: int,
         embedding_batch_size: int,
         chat_model: str | None,
@@ -52,7 +52,7 @@ class AlibabaModelStudioClient:
             api_key: DashScope API Key。
             base_url: 百炼 OpenAI 兼容接口地址。
             timeout_seconds: 单次调用超时时间。
-            embedding_model: 向量模型名称；不启用时可为空。
+            embedding_model: 向量模型名称。
             embedding_dimensions: 向量维度。
             embedding_batch_size: 单次批量向量化最大文本数。
             chat_model: 预留的聊天模型名称；后续接入对话生成时复用。
@@ -65,6 +65,9 @@ class AlibabaModelStudioClient:
         """
         if timeout_seconds <= 0:
             msg = "百炼客户端超时时间必须大于 0"
+            raise ValueError(msg)
+        if not embedding_model.strip():
+            msg = "百炼向量模型名称不能为空"
             raise ValueError(msg)
         if embedding_dimensions <= 0:
             msg = "向量维度必须大于 0"
@@ -89,7 +92,7 @@ class AlibabaModelStudioClient:
             api_key=settings.bailian_api_key,
             base_url=settings.bailian_base_url,
             timeout_seconds=settings.bailian_timeout_seconds,
-            embedding_model=settings.chunk_embedding_model if settings.chunk_embedding_enabled else None,
+            embedding_model=settings.chunk_embedding_model,
             embedding_dimensions=settings.chunk_embedding_dimensions,
             embedding_batch_size=settings.chunk_embedding_batch_size,
             chat_model=settings.bailian_chat_model,
@@ -115,10 +118,6 @@ class AlibabaModelStudioClient:
         """
         if not texts:
             return []
-        if not self._embedding_model:
-            msg = "未配置百炼向量模型"
-            raise AlibabaModelStudioConfigurationError(msg)
-
         self._validate_api_key()
         client = self._get_client()
         embeddings: list[list[float]] = []

@@ -48,10 +48,11 @@ class DocumentChunk:
     fmm_terms: list[str] = field(default_factory=list)
     bmm_terms: list[str] = field(default_factory=list)
     merged_terms: list[str] = field(default_factory=list)
+    content_embedding: list[float] | None = None
 
     def to_search_document(self) -> dict[str, object]:
         """构造 ES 入库文档。"""
-        return {
+        search_document: dict[str, object] = {
             "chunk_id": self.chunk_id,
             "file_id": self.file_id,
             "source_filename": self.source_filename,
@@ -63,6 +64,9 @@ class DocumentChunk:
             "bmm_terms": self.bmm_terms,
             "merged_terms": self.merged_terms,
         }
+        if self.content_embedding is not None:
+            search_document["content_embedding"] = self.content_embedding
+        return search_document
 
 
 class DocumentChunkService:

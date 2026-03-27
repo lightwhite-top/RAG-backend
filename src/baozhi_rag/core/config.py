@@ -121,11 +121,6 @@ class Settings(BaseSettings):
         description="预留的阿里云百炼聊天模型名称",
         validation_alias=AliasChoices("BAILIAN_CHAT_MODEL"),
     )
-    chunk_embedding_enabled: bool = Field(
-        default=False,
-        description="是否启用 chunk 向量化与语义检索",
-        validation_alias=AliasChoices("CHUNK_EMBEDDING_ENABLED"),
-    )
     chunk_embedding_model: str = Field(
         default="text-embedding-v4",
         description="chunk 向量化模型名称",

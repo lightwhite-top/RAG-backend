@@ -40,8 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             一个异步上下文管理器，在启动时初始化日志并在关闭时记录停机日志。
         """
         configure_logging(current_settings)
-        if current_settings.chunk_embedding_enabled:
-            AlibabaModelStudioClient.from_settings(current_settings).ensure_ready()
+        AlibabaModelStudioClient.from_settings(current_settings).ensure_ready()
         ElasticsearchChunkStore.from_settings(current_settings).ensure_ready()
         LOGGER.info(
             "service_startup env=%s version=%s",

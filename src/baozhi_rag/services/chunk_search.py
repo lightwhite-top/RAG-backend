@@ -21,7 +21,7 @@ class ChunkSearchRequest:
     fmm_terms: list[str]
     bmm_terms: list[str]
     merged_terms: list[str]
-    query_embedding: list[float] | None = None
+    query_embedding: list[float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +68,7 @@ class ChunkSearchService:
         self,
         term_matcher: MaximumMatchingTermMatcher,
         store: ChunkSearchStore,
-        chunk_embedding_service: ChunkEmbeddingService | None = None,
+        chunk_embedding_service: ChunkEmbeddingService,
     ) -> None:
         """初始化检索服务。"""
         self._term_matcher = term_matcher
@@ -92,10 +92,6 @@ class ChunkSearchService:
             fmm_terms=terms.fmm_terms,
             bmm_terms=terms.bmm_terms,
             merged_terms=terms.merged_terms,
-            query_embedding=(
-                self._chunk_embedding_service.embed_query(normalized_query)
-                if self._chunk_embedding_service is not None
-                else None
-            ),
+            query_embedding=self._chunk_embedding_service.embed_query(normalized_query),
         )
         return self._store.search(request)

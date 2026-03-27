@@ -18,10 +18,8 @@ from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.term_matching import build_default_term_matcher
 
 
-def _build_chunk_embedding_service(settings: Settings) -> ChunkEmbeddingService | None:
-    """按配置构造 chunk 向量化服务。"""
-    if not settings.chunk_embedding_enabled:
-        return None
+def _build_chunk_embedding_service(settings: Settings) -> ChunkEmbeddingService:
+    """构造必选的 chunk 向量化服务。"""
     return ChunkEmbeddingService(AlibabaModelStudioClient.from_settings(settings))
 
 

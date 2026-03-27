@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from baozhi_rag.api.dependencies import get_document_preview_service
 from baozhi_rag.infra.retrieval.elasticsearch_chunk_store import ElasticsearchStoreError
-from baozhi_rag.schemas.files import ChunkPreviewItem, UploadedFileItem, UploadFilesResponse
+from baozhi_rag.schemas.common import MessageResponse
 from baozhi_rag.services.document_chunking import (
     DocumentChunkingError,
     UnsupportedDocumentTypeError,
@@ -23,25 +23,30 @@ from baozhi_rag.services.file_upload import (
 router = APIRouter(prefix="/files", tags=["files"])
 
 
-@router.post("/upload", response_model=UploadFilesResponse, summary="上传文件")
+@router.post(
+    "/upload",
+    response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="上传文件",
+)
 async def upload_files(
     files: Annotated[list[UploadFile], File(description="待上传文件列表")],
     service: Annotated[DocumentPreviewService, Depends(get_document_preview_service)],
-) -> UploadFilesResponse:
-    """接收多个文件、落盘并返回切块预览。
+) -> MessageResponse:
+    """接收多个文件、落盘并返回通用成功消息。
 
     参数:
         files: 通过 `multipart/form-data` 上传的文件列表。
-        service: 上传、切块与可选 ES 入库编排服务。
+        service: 上传、切块、向量化与 ES 入库编排服务。
 
     返回:
-        包含上传元数据、切块状态、切块数量和预览摘要的响应对象。
+        表示文件上传和入库完成的通用消息响应。
 
     异常:
         HTTPException: 当文件名非法、文件格式不支持、存储失败或切块失败时抛出。
     """
     try:
-        results = service.upload_and_chunk_files(
+        service.upload_and_chunk_files(
             [
                 FileUploadInput(
                     filename=file.filename or "",
@@ -74,27 +79,4 @@ async def upload_files(
         for file in files:
             await file.close()
 
-    return UploadFilesResponse(
-        files=[
-            UploadedFileItem(
-                file_id=result.upload.file_id,
-                original_filename=result.upload.original_filename,
-                content_type=result.upload.content_type,
-                size=result.upload.size,
-                storage_key=result.upload.storage_key,
-                uploaded_at=result.upload.uploaded_at,
-                chunk_status="success",
-                chunk_count=len(result.chunks),
-                chunk_preview=[
-                    ChunkPreviewItem(
-                        chunk_index=chunk.chunk_index,
-                        char_count=chunk.char_count,
-                        preview_text=chunk.content.replace("\n", " ")[:160],
-                        merged_terms=chunk.merged_terms,
-                    )
-                    for chunk in result.chunks[:3]
-                ],
-            )
-            for result in results
-        ]
-    )
+    return MessageResponse(message="文件上传成功")

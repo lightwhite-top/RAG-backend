@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 .nox/
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 .tox/
 .venv/
@@ -25,3 +26,4 @@ uv.lock.bak
 .sisyphus/
 data/
 docs/
+tests/
