@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -24,6 +25,8 @@ else:  # pragma: no cover - 导入成功路径不需要单独覆盖
     MILVUS_CLIENT_CLASS = ImportedMilvusClient
     MILVUS_DATA_TYPE = ImportedMilvusDataType
     MILVUS_IMPORT_ERROR = None
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MilvusStoreError(AppError):
@@ -72,6 +75,9 @@ class MilvusChunkVectorStore:
     _PRIMARY_FIELD_NAME = "chunk_id"
     _FILE_ID_FIELD_NAME = "file_id"
     _VECTOR_FIELD_NAME = "content_embedding"
+    _VECTOR_INDEX_NAME = "content_embedding_idx"
+    _VECTOR_INDEX_TYPE = "AUTOINDEX"
+    _VECTOR_METRIC_TYPE = "COSINE"
 
     def __init__(
         self,
@@ -113,8 +119,11 @@ class MilvusChunkVectorStore:
                 client.create_collection(
                     collection_name=self._collection_name,
                     schema=self._build_schema(),
+                    index_params=self._build_index_params(),
                     consistency_level="Strong",
                 )
+            else:
+                self._ensure_vector_index(client)
             client.load_collection(collection_name=self._collection_name)
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             msg = f"创建或加载 Milvus 集合失败: {self._collection_name}"
@@ -229,6 +238,41 @@ class MilvusChunkVectorStore:
             dim=self._embedding_dimensions,
         )
         return schema
+
+    def _build_index_params(self) -> Any:
+        """构造 Milvus 向量索引参数。"""
+        if MILVUS_CLIENT_CLASS is None:
+            msg = "未安装 pymilvus 依赖，无法构造 Milvus 索引参数"
+            raise MilvusDependencyError(msg) from MILVUS_IMPORT_ERROR
+
+        index_params = MILVUS_CLIENT_CLASS.prepare_index_params()
+        index_params.add_index(
+            field_name=self._VECTOR_FIELD_NAME,
+            index_name=self._VECTOR_INDEX_NAME,
+            index_type=self._VECTOR_INDEX_TYPE,
+            metric_type=self._VECTOR_METRIC_TYPE,
+        )
+        return index_params
+
+    def _ensure_vector_index(self, client: Any) -> None:
+        """确保向量字段已建立检索索引。"""
+        index_names = client.list_indexes(
+            collection_name=self._collection_name,
+            field_name=self._VECTOR_FIELD_NAME,
+        )
+        if index_names:
+            return
+
+        LOGGER.info(
+            "milvus_index_missing collection=%s field=%s index_name=%s creating_index=true",
+            self._collection_name,
+            self._VECTOR_FIELD_NAME,
+            self._VECTOR_INDEX_NAME,
+        )
+        client.create_index(
+            collection_name=self._collection_name,
+            index_params=self._build_index_params(),
+        )
 
     def _build_entity(self, chunk: DocumentChunk) -> dict[str, object]:
         """把单个 chunk 转换为 Milvus 实体。"""
