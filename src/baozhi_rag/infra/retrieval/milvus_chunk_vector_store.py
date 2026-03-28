@@ -88,7 +88,18 @@ class MilvusChunkVectorStore:
         collection_name: str,
         embedding_dimensions: int,
     ) -> None:
-        """初始化 Milvus 向量存储适配器。"""
+        """初始化 Milvus 向量存储适配器。
+
+        参数:
+            uri: Milvus 服务地址。
+            token: Milvus 认证令牌；未启用认证时可为空。
+            db_name: 目标数据库名称。
+            collection_name: chunk 向量集合名称。
+            embedding_dimensions: 向量维度，用于定义集合 schema。
+
+        返回:
+            None。
+        """
         self._uri = uri
         self._token = token
         self._db_name = db_name
@@ -99,7 +110,14 @@ class MilvusChunkVectorStore:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> MilvusChunkVectorStore:
-        """基于应用配置创建 Milvus 向量存储适配器。"""
+        """基于应用配置创建 Milvus 向量存储适配器。
+
+        参数:
+            settings: 当前应用配置对象。
+
+        返回:
+            已按配置装配完成的 Milvus 向量存储实例。
+        """
         return cls(
             uri=settings.milvus_uri,
             token=settings.milvus_token,
@@ -109,7 +127,14 @@ class MilvusChunkVectorStore:
         )
 
     def ensure_collection(self) -> None:
-        """确保向量集合存在且已加载。"""
+        """确保向量集合存在且已加载。
+
+        返回:
+            None。
+
+        异常:
+            MilvusIndexError: 当集合创建、索引创建或加载失败时抛出。
+        """
         if self._collection_ready:
             return
 
@@ -132,7 +157,15 @@ class MilvusChunkVectorStore:
         self._collection_ready = True
 
     def ensure_ready(self) -> None:
-        """启动期就绪校验：确保客户端可创建且集合可存在/可创建。"""
+        """启动期就绪校验：确保客户端可创建且集合可存在/可创建。
+
+        返回:
+            None。
+
+        异常:
+            MilvusDependencyError: 当客户端依赖或初始化失败时抛出。
+            MilvusIndexError: 当集合初始化失败时抛出。
+        """
         try:
             self._get_client()
         except MilvusStoreError:
@@ -144,7 +177,17 @@ class MilvusChunkVectorStore:
         self.ensure_collection()
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> int:
-        """将 chunk 向量批量写入 Milvus。"""
+        """将 chunk 向量批量写入 Milvus。
+
+        参数:
+            chunks: 已完成向量化的 chunk 列表。
+
+        返回:
+            实际写入的 chunk 数量。
+
+        异常:
+            MilvusIndexError: 当批量写入失败时抛出。
+        """
         if not chunks:
             return 0
 
@@ -161,7 +204,17 @@ class MilvusChunkVectorStore:
         return len(chunks)
 
     def delete_chunks_by_file_id(self, file_id: str) -> None:
-        """删除指定文件的全部向量实体。"""
+        """删除指定文件的全部向量实体。
+
+        参数:
+            file_id: 需要删除的文件唯一标识。
+
+        返回:
+            None。
+
+        异常:
+            MilvusIndexError: 当删除失败时抛出。
+        """
         self.ensure_collection()
         try:
             self._get_client().delete(
@@ -173,7 +226,18 @@ class MilvusChunkVectorStore:
             raise MilvusIndexError(msg) from exc
 
     def search(self, query_embedding: list[float], size: int) -> list[MilvusVectorSearchHit]:
-        """执行向量相似度检索。"""
+        """执行向量相似度检索。
+
+        参数:
+            query_embedding: 查询文本对应的向量表示。
+            size: 期望返回的命中数量。
+
+        返回:
+            Milvus 返回的向量检索命中列表。
+
+        异常:
+            MilvusSearchError: 当查询向量为空或检索失败时抛出。
+        """
         if not query_embedding:
             msg = "查询向量不能为空"
             raise MilvusSearchError(msg)

@@ -56,14 +56,23 @@ class DocumentParseError(DocumentChunkingError):
 class DocumentChunk:
     """标准化切块结果。"""
 
+    # 原始文件维度的稳定标识
     file_id: str
+    # 切块的唯一标识，格式约定为 `{file_id}-chunk-{chunk_index}`。
     chunk_id: str
+    # 文件内的切块顺序号
     chunk_index: int
+    # 切块后的正文内容
     content: str
+    # 切块的字符数
     char_count: int
+    # 上传时的原始文件名
     source_filename: str
+    # 文件在本地存储中的相对路径
     storage_key: str
+    # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=list)
+    # 向量化
     content_embedding: list[float] | None = None
 
     def to_search_document(self) -> dict[str, object]:

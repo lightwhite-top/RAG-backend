@@ -69,7 +69,20 @@ class ElasticsearchChunkStore:
         verify_certs: bool,
         embedding_dimensions: int,
     ) -> None:
-        """初始化 ES 文档存储适配器。"""
+        """初始化 ES 文档存储适配器。
+
+        参数:
+            index_name: chunk 文档索引名称。
+            url: Elasticsearch 服务地址。
+            api_key: ES API Key；启用时优先于用户名密码。
+            username: ES 用户名。
+            password: ES 密码。
+            verify_certs: 是否校验 HTTPS 证书。
+            embedding_dimensions: 预留的向量维度配置，当前主要用于保持构造参数一致性。
+
+        返回:
+            None。
+        """
         self._index_name = index_name
         self._url = url
         self._api_key = api_key
@@ -82,7 +95,14 @@ class ElasticsearchChunkStore:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ElasticsearchChunkStore:
-        """基于应用配置创建 ES 适配器。"""
+        """基于应用配置创建 ES 适配器。
+
+        参数:
+            settings: 当前应用配置对象。
+
+        返回:
+            已按配置完成连接参数装配的 ES 存储实例。
+        """
         return cls(
             index_name=settings.es_index_name,
             url=settings.es_url,
@@ -94,7 +114,14 @@ class ElasticsearchChunkStore:
         )
 
     def ensure_index(self) -> None:
-        """确保 chunk 索引存在。"""
+        """确保 chunk 索引存在。
+
+        返回:
+            None。
+
+        异常:
+            ElasticsearchIndexError: 当索引检查或创建失败时抛出。
+        """
         if self._index_ready:
             return
 
@@ -112,7 +139,15 @@ class ElasticsearchChunkStore:
         self._index_ready = True
 
     def ensure_ready(self) -> None:
-        """启动期就绪校验：确保客户端可创建且索引可存在/可创建。"""
+        """启动期就绪校验：确保客户端可创建且索引可存在/可创建。
+
+        返回:
+            None。
+
+        异常:
+            ElasticsearchDependencyError: 当客户端依赖或初始化失败时抛出。
+            ElasticsearchIndexError: 当索引检查或创建失败时抛出。
+        """
         try:
             self._get_client()
         except ElasticsearchStoreError:
@@ -124,7 +159,17 @@ class ElasticsearchChunkStore:
         self.ensure_index()
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> int:
-        """将 chunk 文档批量写入 ES。"""
+        """将 chunk 文档批量写入 ES。
+
+        参数:
+            chunks: 待写入 ES 的 chunk 列表。
+
+        返回:
+            实际写入的 chunk 数量。
+
+        异常:
+            ElasticsearchIndexError: 当批量写入失败时抛出。
+        """
         if not chunks:
             return 0
 
@@ -145,7 +190,17 @@ class ElasticsearchChunkStore:
         return len(chunks)
 
     def delete_chunks_by_file_id(self, file_id: str) -> None:
-        """删除指定文件的全部 chunk 文档。"""
+        """删除指定文件的全部 chunk 文档。
+
+        参数:
+            file_id: 需要删除的文件唯一标识。
+
+        返回:
+            None。
+
+        异常:
+            ElasticsearchIndexError: 当删除失败时抛出。
+        """
         self.ensure_index()
         try:
             self._get_client().delete_by_query(
@@ -159,7 +214,17 @@ class ElasticsearchChunkStore:
             raise ElasticsearchIndexError(msg) from exc
 
     def search(self, request: ChunkSearchRequest) -> list[ChunkSearchHit]:
-        """执行 chunk 词法检索。"""
+        """执行 chunk 词法检索。
+
+        参数:
+            request: 已完成领域词抽取和查询向量生成的检索请求。
+
+        返回:
+            ES 返回的词法检索命中结果列表。
+
+        异常:
+            ElasticsearchSearchError: 当检索执行失败时抛出。
+        """
         self.ensure_index()
 
         try:
@@ -177,7 +242,17 @@ class ElasticsearchChunkStore:
         return [self._parse_hit(hit) for hit in hits]
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[ChunkSearchHit]:
-        """按 chunk 标识批量获取文档内容。"""
+        """按 chunk 标识批量获取文档内容。
+
+        参数:
+            chunk_ids: 需要回查的 chunk 标识列表。
+
+        返回:
+            与输入顺序一致的 chunk 命中列表；缺失文档会被自动跳过。
+
+        异常:
+            ElasticsearchSearchError: 当批量读取失败时抛出。
+        """
         if not chunk_ids:
             return []
 
@@ -206,7 +281,14 @@ class ElasticsearchChunkStore:
 
     @classmethod
     def build_search_query(cls, request: ChunkSearchRequest) -> dict[str, object]:
-        """构造结合全文与领域词的 ES 词法查询。"""
+        """构造结合全文与领域词的 ES 词法查询。
+
+        参数:
+            request: 当前检索请求，包含查询文本与 `merged_terms`。
+
+        返回:
+            可直接传给 Elasticsearch 的查询 DSL。
+        """
         should_queries: list[dict[str, object]] = [
             {
                 "match": {
