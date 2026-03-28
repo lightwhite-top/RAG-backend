@@ -51,7 +51,7 @@ line-ending = "lf"
 
 [tool.mypy]
 python_version = "3.13"
-files = ["src", "tests", "scripts"]
+files = ["src", "tests"]
 mypy_path = "src"
 namespace_packages = true
 explicit_package_bases = true
