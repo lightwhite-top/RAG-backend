@@ -63,8 +63,6 @@ class DocumentChunk:
     char_count: int
     source_filename: str
     storage_key: str
-    fmm_terms: list[str] = field(default_factory=list)
-    bmm_terms: list[str] = field(default_factory=list)
     merged_terms: list[str] = field(default_factory=list)
     content_embedding: list[float] | None = None
 
@@ -78,8 +76,6 @@ class DocumentChunk:
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
             "content": self.content,
-            "fmm_terms": self.fmm_terms,
-            "bmm_terms": self.bmm_terms,
             "merged_terms": self.merged_terms,
         }
 
@@ -395,8 +391,6 @@ class DocumentChunkService:
                         char_count=len(chunk_content),
                         source_filename=source_filename,
                         storage_key=storage_key,
-                        fmm_terms=term_match_result.fmm_terms,
-                        bmm_terms=term_match_result.bmm_terms,
                         merged_terms=term_match_result.merged_terms,
                     )
                 )
@@ -455,7 +449,7 @@ class DocumentChunkService:
 
         返回:
             基于当前 chunk 文本和元数据构造的 ES 预览文档。
-            当前已包含内容检索与 FMM/BMM 词项增强字段。
+            当前已包含内容检索与领域词增强字段。
         """
         return chunk.to_search_document()
 

@@ -1,6 +1,11 @@
 services:
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.10
+    build:
+      context: .
+      dockerfile: docker/elasticsearch-ik/Dockerfile
+      args:
+        ES_VERSION: 8.19.10
+    image: baozhi-elasticsearch-ik:8.19.10
     container_name: baozhi-elasticsearch
     environment:
       discovery.type: single-node

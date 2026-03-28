@@ -54,8 +54,6 @@ def search_chunks(
                     chunk_index=hit.chunk_index,
                     char_count=hit.char_count,
                     content=hit.content,
-                    fmm_terms=hit.fmm_terms,
-                    bmm_terms=hit.bmm_terms,
                     merged_terms=hit.merged_terms,
                     score=hit.score,
                 )

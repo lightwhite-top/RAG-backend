@@ -227,24 +227,6 @@ class ElasticsearchChunkStore:
                     }
                 }
             )
-        if request.fmm_terms:
-            should_queries.append(
-                {
-                    "constant_score": {
-                        "filter": {"terms": {"fmm_terms": request.fmm_terms}},
-                        "boost": 4.0,
-                    }
-                }
-            )
-        if request.bmm_terms:
-            should_queries.append(
-                {
-                    "constant_score": {
-                        "filter": {"terms": {"bmm_terms": request.bmm_terms}},
-                        "boost": 4.0,
-                    }
-                }
-            )
 
         return {
             "bool": {
@@ -308,9 +290,11 @@ class ElasticsearchChunkStore:
             "storage_key": {"type": "keyword"},
             "chunk_index": {"type": "integer"},
             "char_count": {"type": "integer"},
-            "content": {"type": "text"},
-            "fmm_terms": {"type": "keyword"},
-            "bmm_terms": {"type": "keyword"},
+            "content": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
             "merged_terms": {"type": "keyword"},
         }
 
@@ -330,8 +314,6 @@ class ElasticsearchChunkStore:
             "chunk_index",
             "char_count",
             "content",
-            "fmm_terms",
-            "bmm_terms",
             "merged_terms",
         ]
 
@@ -372,8 +354,6 @@ class ElasticsearchChunkStore:
             chunk_index=int(source.get("chunk_index", 0)),
             char_count=int(source.get("char_count", 0)),
             content=str(source.get("content", "")),
-            fmm_terms=_as_string_list(source.get("fmm_terms")),
-            bmm_terms=_as_string_list(source.get("bmm_terms")),
             merged_terms=_as_string_list(source.get("merged_terms")),
             score=float(score) if isinstance(score, (int, float)) else None,
         )

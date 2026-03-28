@@ -152,7 +152,7 @@ just run pytest -k health
 - 下游依赖或系统故障返回 `5xx`
 - 成功响应示例：`{"state": "success", "message": "文件上传成功", "data": {"file_count": 1, "files": []}, "request_id": "7f6f4f9f..."}` 
 - 失败响应示例：`{"state": "error", "code": "unsupported_document_type", "message": "暂不支持的文件格式: .txt", "request_id": "7f6f4f9f..."}` 
-- 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
+- 切块增强字段：`merged_terms`
 - 上传后会强制执行百炼 embedding，为 `chunk` 补充 `content_embedding`
 - 上传后会自动写入 ES 文档索引与 Milvus 向量集合
 
@@ -166,7 +166,7 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 上传目录通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
-领域词典扩展文件通过 `DOMAIN_DICTIONARY_PATH` 配置。
+默认领域词典文件位于 `src/baozhi_rag/domain/default_domain_terms.txt`，自定义扩展词典可通过 `DOMAIN_DICTIONARY_PATH` 配置。
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置。
 百炼模型配置通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 配置。
@@ -179,7 +179,8 @@ Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NA
 - 查询参数：`q`
 - 可选参数：`size`
 - 默认返回条数：`SEARCH_DEFAULT_SIZE`
-- ES 检索字段：`content`、`fmm_terms`、`bmm_terms`、`merged_terms`
+- ES 检索字段：`content`、`merged_terms`
+  - `content` 使用 `ik_max_word` 建索引，`ik_smart` 做查询分析
 - Milvus 检索字段：`content_embedding`
 - 结果融合策略：基于 ES 和 Milvus 的 Reciprocal Rank Fusion
 - 成功响应中的业务结果放在 `data` 字段
@@ -208,8 +209,6 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
         "chunk_index": 0,
         "char_count": 24,
         "content": "本条款包含免赔额和保险责任说明。",
-        "fmm_terms": ["免赔额", "保险责任"],
-        "bmm_terms": ["免赔额", "保险责任"],
         "merged_terms": ["免赔额", "保险责任"],
         "score": 0.032786
       }
@@ -278,6 +277,7 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 ## 本机检索基础设施
 
 仓库提供了本机开发用的 `Milvus + Elasticsearch` 容器编排文件：`docker-compose.search.yml`。
+其中 Elasticsearch 会在构建时自动安装 IK 分词插件。
 
 - `Elasticsearch`：`http://127.0.0.1:9200`
 - `Milvus gRPC`：`127.0.0.1:19530`
@@ -288,6 +288,12 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 
 ```powershell
 docker compose -f docker-compose.search.yml up -d
+```
+
+首次启动或改动了 Elasticsearch Dockerfile 后，建议先执行：
+
+```powershell
+docker compose -f docker-compose.search.yml build elasticsearch
 ```
 
 查看状态：
@@ -328,8 +334,9 @@ docker compose -f docker-compose.search.yml down -v
 说明：
 
 - 当前工程通过百炼 OpenAI 兼容接口统一封装 embedding 能力，后续接入聊天模型时可直接复用同一客户端。
-- ES 只承载文本和结构化检索字段，不再存储 `content_embedding`。
+- ES 只承载文本和结构化检索字段，不再存储 `content_embedding`；其中 `content` 使用 IK 中文分词。
 - Milvus 承载 `content_embedding` 向量集合，若向量维度与当前配置不一致，需要重建对应集合。
+- 如果在接入 IK 前已经创建过 `document_chunks` 索引，需要删除旧索引并重建，才能让新的 analyzer 生效。
 
 说明：
 

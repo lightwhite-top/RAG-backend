@@ -15,8 +15,6 @@ class ChunkSearchHitItem(BaseModel):
     chunk_index: int = Field(description="chunk 序号")
     char_count: int = Field(description="chunk 字符数")
     content: str = Field(description="chunk 正文")
-    fmm_terms: list[str] = Field(description="正向最大匹配词项")
-    bmm_terms: list[str] = Field(description="逆向最大匹配词项")
     merged_terms: list[str] = Field(description="合并去重后的领域词项")
     score: float | None = Field(description="检索得分")
 

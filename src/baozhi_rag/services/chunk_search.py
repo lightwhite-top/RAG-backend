@@ -29,8 +29,6 @@ class ChunkSearchRequest:
 
     query_text: str
     size: int
-    fmm_terms: list[str]
-    bmm_terms: list[str]
     merged_terms: list[str]
     query_embedding: list[float]
 
@@ -46,8 +44,6 @@ class ChunkSearchHit:
     chunk_index: int
     char_count: int
     content: str
-    fmm_terms: list[str]
-    bmm_terms: list[str]
     merged_terms: list[str]
     score: float | None
 
@@ -100,8 +96,6 @@ class ChunkSearchService:
         request = ChunkSearchRequest(
             query_text=normalized_query,
             size=size,
-            fmm_terms=terms.fmm_terms,
-            bmm_terms=terms.bmm_terms,
             merged_terms=terms.merged_terms,
             query_embedding=self._chunk_embedding_service.embed_query(normalized_query),
         )
