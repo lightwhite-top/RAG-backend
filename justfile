@@ -13,7 +13,7 @@ env:
     if (!(Test-Path .env)) { Copy-Item .env.example .env }
 
 hooks:
-    uv run pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg
+    uv run pre-commit install --hook-type pre-commit --hook-type pre-push
 
 bootstrap: sync env hooks
 

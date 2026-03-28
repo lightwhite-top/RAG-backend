@@ -23,8 +23,6 @@
 |-- docs/
 |   `-- development.md
 |-- pyproject.toml
-|-- scripts/
-|   `-- check_commit_msg.py
 |-- src/
 |   `-- baozhi_rag/
 |       |-- api/
@@ -51,7 +49,7 @@
 ```powershell
 uv sync --all-groups
 Copy-Item .env.example .env
-uv run pre-commit install --hook-type pre-commit --hook-type pre-push --hook-type commit-msg
+uv run pre-commit install --hook-type pre-commit --hook-type pre-push
 uv run uvicorn baozhi_rag.app.main:app --reload
 ```
 
@@ -346,7 +344,7 @@ docker compose -f docker-compose.search.yml down -v
 
 ## 提交规范
 
-项目采用 Conventional Commits，并通过 `commit-msg` 钩子校验。推荐格式如下：
+项目推荐采用 Conventional Commits。推荐格式如下：
 
 ```text
 feat(api): 初始化健康检查接口
