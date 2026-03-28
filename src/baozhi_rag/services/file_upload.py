@@ -11,21 +11,36 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
 
+from fastapi import status
+
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
 
 LOGGER = logging.getLogger(__name__)
 
 
-class FileUploadError(Exception):
+class FileUploadError(AppError):
     """文件上传失败基类。"""
+
+    default_message = "文件上传失败"
+    default_error_code = "file_upload_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 class InvalidUploadFileError(FileUploadError):
     """上传文件参数非法。"""
 
+    default_message = "上传文件参数非法"
+    default_error_code = "invalid_upload_file"
+    default_status_code = status.HTTP_400_BAD_REQUEST
+
 
 class FileStorageError(FileUploadError):
     """文件保存或回滚失败。"""
+
+    default_message = "文件保存失败"
+    default_error_code = "file_storage_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 @dataclass(frozen=True, slots=True)

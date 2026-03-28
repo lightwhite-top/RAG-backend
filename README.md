@@ -141,18 +141,20 @@ just run pytest -k health
 
 ## 文件上传
 
-当前版本提供 Word 文件上传、领域词增强、ES 入库与 chunk 检索闭环。
+当前版本提供 Word 文件上传、领域词增强、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`
-- HTTP 状态码：服务正常处理时统一返回 `200 OK`
-- 成功响应示例：`{"state": "success", "message": "文件上传成功"}`
-- 业务失败响应示例：`{"state": "error", "message": "暂不支持的文件格式: .txt"}`
+- 成功时返回 `200 OK`
+- 业务输入错误返回 `4xx`
+- 下游依赖或系统故障返回 `5xx`
+- 成功响应示例：`{"state": "success", "message": "文件上传成功", "data": {"file_count": 1, "files": []}, "request_id": "7f6f4f9f..."}` 
+- 失败响应示例：`{"state": "error", "code": "unsupported_document_type", "message": "暂不支持的文件格式: .txt", "request_id": "7f6f4f9f..."}` 
 - 切块增强字段：`fmm_terms`、`bmm_terms`、`merged_terms`
 - 上传后会强制执行百炼 embedding，为 `chunk` 补充 `content_embedding`
-- 上传后会自动创建索引并写入 chunk 文档
+- 上传后会自动写入 ES 文档索引与 Milvus 向量集合
 
 示例：
 
@@ -166,24 +168,112 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
 领域词典扩展文件通过 `DOMAIN_DICTIONARY_PATH` 配置。
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
+Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置。
 百炼模型配置通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 配置。
 向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置。
 
 ## Chunk 检索
 
-当前版本新增 `GET /search/chunks` 接口，用于基于 `content`、领域词字段和查询向量执行混合召回。
+当前版本新增 `GET /search/chunks` 接口，用于基于 ES 文本召回和 Milvus 向量召回执行混合检索。
 
 - 查询参数：`q`
 - 可选参数：`size`
 - 默认返回条数：`SEARCH_DEFAULT_SIZE`
-- 混合检索字段：`content`、`fmm_terms`、`bmm_terms`、`merged_terms`
-- 会始终启用 `content_embedding` 的语义检索打分
+- ES 检索字段：`content`、`fmm_terms`、`bmm_terms`、`merged_terms`
+- Milvus 检索字段：`content_embedding`
+- 结果融合策略：基于 ES 和 Milvus 的 Reciprocal Rank Fusion
+- 成功响应中的业务结果放在 `data` 字段
 
 示例：
 
 ```powershell
 curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 ```
+
+响应示例：
+
+```json
+{
+  "state": "success",
+  "message": "检索成功",
+  "data": {
+    "query": "免赔额",
+    "size": 1,
+    "hits": [
+      {
+        "chunk_id": "chunk-1",
+        "file_id": "file-1",
+        "source_filename": "保险条款.docx",
+        "storage_key": "2026/03/28/file-1_保险条款.docx",
+        "chunk_index": 0,
+        "char_count": 24,
+        "content": "本条款包含免赔额和保险责任说明。",
+        "fmm_terms": ["免赔额", "保险责任"],
+        "bmm_terms": ["免赔额", "保险责任"],
+        "merged_terms": ["免赔额", "保险责任"],
+        "score": 0.032786
+      }
+    ]
+  },
+  "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1"
+}
+```
+
+## 成功响应规范
+
+当前版本统一采用以下成功响应外壳：
+
+```json
+{
+  "state": "success",
+  "message": "操作成功",
+  "data": {},
+  "meta": {},
+  "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1"
+}
+```
+
+字段约定：
+
+- `message` 只放人类可读提示，不承载结构化业务数据
+- `data` 只放业务数据主体，前端如果要取结果，优先从这里取
+- `meta` 预留给分页、游标、统计等附加信息；当前接口暂未广泛使用
+- `request_id` 用于日志检索、审计追踪和问题定位
+
+## 错误处理规范
+
+当前版本已统一接入全局异常处理，设计目标等价于 Spring Boot 中的 `@ControllerAdvice`：
+
+- 路由层不再手写重复的 `try/except` 做 HTTP 映射
+- 业务层、服务层、基础设施层优先抛出统一 `AppError` 子类
+- FastAPI 全局异常处理器统一把异常翻译为稳定的 HTTP 状态码和错误体
+- 每个请求都会返回 `X-Request-ID` 响应头，错误体中也会带上同一个 `request_id`
+- 未声明异常统一返回 `500` 和通用消息，避免把内部栈信息直接暴露给调用方
+
+统一错误响应结构：
+
+```json
+{
+  "state": "error",
+  "code": "request_validation_error",
+  "message": "请求参数校验失败",
+  "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1",
+  "details": [
+    {
+      "field": "query.q",
+      "message": "字段不能为空"
+    }
+  ]
+}
+```
+
+推荐约定：
+
+- `4xx` 表示调用方输入、协议或资源状态问题
+- `5xx` 表示系统内部故障或外部依赖故障
+- `code` 使用稳定的机器可读标识，前端和调用方基于 `code` 做分支判断
+- `message` 使用面向用户或调用方的可读提示
+- `request_id` 用于日志检索、审计追踪和问题定位
 
 ## 本机检索基础设施
 
@@ -220,11 +310,14 @@ docker compose -f docker-compose.search.yml down
 docker compose -f docker-compose.search.yml down -v
 ```
 
-当前应用已预留 Elasticsearch 配置项，复制 `.env.example` 后请确保本机 ES 可用：
+当前应用要求同时准备 Elasticsearch 与 Milvus，复制 `.env.example` 后请确保本机检索基础设施可用：
 
 - `ES_URL=http://127.0.0.1:9200`
 - `ES_INDEX_NAME=document_chunks`
 - `ES_VERIFY_CERTS=false`
+- `MILVUS_URI=http://127.0.0.1:19530`
+- `MILVUS_DB_NAME=default`
+- `MILVUS_COLLECTION_NAME=document_chunk_vectors`
 
 要启用当前上传与检索链路，请确保已配置阿里云百炼向量化参数：
 
@@ -235,7 +328,8 @@ docker compose -f docker-compose.search.yml down -v
 说明：
 
 - 当前工程通过百炼 OpenAI 兼容接口统一封装 embedding 能力，后续接入聊天模型时可直接复用同一客户端。
-- 已存在的 ES 索引如果还没有 `content_embedding` 字段，应用启动时会尝试补充映射；如果维度和当前配置不一致，需要手动重建索引。
+- ES 只承载文本和结构化检索字段，不再存储 `content_embedding`。
+- Milvus 承载 `content_embedding` 向量集合，若向量维度与当前配置不一致，需要重建对应集合。
 
 说明：
 

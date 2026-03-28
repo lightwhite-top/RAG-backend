@@ -8,7 +8,7 @@ from fastapi import Depends
 
 from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
-from baozhi_rag.infra.retrieval.elasticsearch_chunk_store import ElasticsearchChunkStore
+from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchService
@@ -29,7 +29,7 @@ def get_document_preview_service(
     """构造文件上传与切块预览服务。"""
     file_store = LocalFileStore(settings.upload_root_dir)
     term_matcher = build_default_term_matcher(settings.domain_dictionary_path)
-    chunk_store = ElasticsearchChunkStore.from_settings(settings)
+    chunk_store = HybridChunkStore.from_settings(settings)
     chunk_embedding_service = _build_chunk_embedding_service(settings)
 
     return DocumentPreviewService(
@@ -52,6 +52,6 @@ def get_chunk_search_service(
     """构造 chunk 检索服务。"""
     return ChunkSearchService(
         term_matcher=build_default_term_matcher(settings.domain_dictionary_path),
-        store=ElasticsearchChunkStore.from_settings(settings),
+        store=HybridChunkStore.from_settings(settings),
         chunk_embedding_service=_build_chunk_embedding_service(settings),
     )

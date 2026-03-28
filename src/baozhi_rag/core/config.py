@@ -101,6 +101,26 @@ class Settings(BaseSettings):
         description="是否校验 Elasticsearch 证书",
         validation_alias=AliasChoices("ES_VERIFY_CERTS"),
     )
+    milvus_uri: str = Field(
+        default="http://127.0.0.1:19530",
+        description="Milvus 连接地址",
+        validation_alias=AliasChoices("MILVUS_URI"),
+    )
+    milvus_token: str | None = Field(
+        default=None,
+        description="Milvus 认证令牌，格式通常为 user:password",
+        validation_alias=AliasChoices("MILVUS_TOKEN"),
+    )
+    milvus_db_name: str = Field(
+        default="default",
+        description="Milvus 数据库名称",
+        validation_alias=AliasChoices("MILVUS_DB_NAME"),
+    )
+    milvus_collection_name: str = Field(
+        default="document_chunk_vectors",
+        description="Milvus 向量集合名称",
+        validation_alias=AliasChoices("MILVUS_COLLECTION_NAME"),
+    )
     bailian_api_key: str | None = Field(
         default=None,
         description="阿里云百炼 DashScope API Key",

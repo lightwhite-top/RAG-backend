@@ -5,11 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from fastapi import status
+
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher
 
 if TYPE_CHECKING:
     from baozhi_rag.services.document_chunking import DocumentChunk
+
+
+class ChunkSearchValidationError(AppError):
+    """检索请求参数非法。"""
+
+    default_message = "检索参数非法"
+    default_error_code = "chunk_search_validation_error"
+    default_status_code = status.HTTP_400_BAD_REQUEST
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,7 +53,7 @@ class ChunkSearchHit:
 
 
 class ChunkSearchStore(Protocol):
-    """chunk 检索存储抽象。"""
+    """chunk 混合检索存储抽象。"""
 
     def ensure_index(self) -> None:
         """确保索引存在。"""
@@ -62,7 +73,7 @@ class ChunkSearchStore(Protocol):
 
 
 class ChunkSearchService:
-    """编排查询词分解与存储检索。"""
+    """编排查询词分解、向量化与混合检索。"""
 
     def __init__(
         self,
@@ -76,14 +87,14 @@ class ChunkSearchService:
         self._chunk_embedding_service = chunk_embedding_service
 
     def search(self, query_text: str, size: int) -> list[ChunkSearchHit]:
-        """执行基于全文与领域词的混合检索。"""
+        """执行基于 ES 词法与 Milvus 语义的混合检索。"""
         normalized_query = query_text.strip()
         if not normalized_query:
             msg = "查询文本不能为空"
-            raise ValueError(msg)
+            raise ChunkSearchValidationError(msg)
         if size <= 0:
             msg = "size 必须大于 0"
-            raise ValueError(msg)
+            raise ChunkSearchValidationError(msg)
 
         terms = self._term_matcher.extract_terms(normalized_query)
         request = ChunkSearchRequest(

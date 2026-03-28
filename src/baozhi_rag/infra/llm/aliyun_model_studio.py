@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from fastapi import status
+
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.llm import ChatMessage
 
 try:  # pragma: no cover - 是否安装依赖取决于运行环境
@@ -16,20 +19,36 @@ else:  # pragma: no cover - 导入成功路径不需要单独覆盖
     OPENAI_IMPORT_ERROR = None
 
 
-class AlibabaModelStudioError(Exception):
+class AlibabaModelStudioError(AppError):
     """阿里云百炼客户端异常。"""
+
+    default_message = "阿里云百炼调用失败"
+    default_error_code = "bailian_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
 class AlibabaModelStudioDependencyError(AlibabaModelStudioError):
     """百炼客户端依赖缺失。"""
 
+    default_message = "百炼客户端依赖缺失"
+    default_error_code = "bailian_dependency_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+
 
 class AlibabaModelStudioConfigurationError(AlibabaModelStudioError):
     """百炼客户端配置异常。"""
 
+    default_message = "百炼客户端配置异常"
+    default_error_code = "bailian_configuration_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+
 
 class AlibabaModelStudioInvocationError(AlibabaModelStudioError):
     """百炼模型调用异常。"""
+
+    default_message = "百炼模型调用失败"
+    default_error_code = "bailian_invocation_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
 class AlibabaModelStudioClient:

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from fastapi import status
+
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.document_chunking import DocumentChunk
 from baozhi_rag.services.llm import EmbeddingModelClient
 
 
-class ChunkEmbeddingError(Exception):
+class ChunkEmbeddingError(AppError):
     """chunk 向量化失败。"""
+
+    default_message = "向量化失败"
+    default_error_code = "chunk_embedding_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
 class ChunkEmbeddingService:

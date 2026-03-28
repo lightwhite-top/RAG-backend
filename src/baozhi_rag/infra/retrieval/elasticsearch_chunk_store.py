@@ -1,10 +1,13 @@
-"""Elasticsearch chunk 检索适配。"""
+"""Elasticsearch chunk 文本检索适配。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest, ChunkSearchStore
+from fastapi import status
+
+from baozhi_rag.core.exceptions import AppError
+from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest
 
 if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
@@ -20,26 +23,40 @@ else:  # pragma: no cover - 导入成功路径不需要单独覆盖
     ELASTICSEARCH_IMPORT_ERROR = None
 
 
-class ElasticsearchStoreError(Exception):
+class ElasticsearchStoreError(AppError):
     """Elasticsearch 适配层异常。"""
+
+    default_message = "Elasticsearch 调用失败"
+    default_error_code = "elasticsearch_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
 class ElasticsearchDependencyError(ElasticsearchStoreError):
     """Elasticsearch 客户端依赖缺失。"""
 
+    default_message = "Elasticsearch 客户端依赖缺失"
+    default_error_code = "elasticsearch_dependency_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+
 
 class ElasticsearchIndexError(ElasticsearchStoreError):
     """Elasticsearch 索引或写入异常。"""
+
+    default_message = "Elasticsearch 索引写入失败"
+    default_error_code = "elasticsearch_index_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
 class ElasticsearchSearchError(ElasticsearchStoreError):
     """Elasticsearch 检索异常。"""
 
+    default_message = "Elasticsearch 检索失败"
+    default_error_code = "elasticsearch_search_error"
+    default_status_code = status.HTTP_502_BAD_GATEWAY
 
-class ElasticsearchChunkStore(ChunkSearchStore):
-    """负责 chunk 索引创建、写入、删除与检索。"""
 
-    _EMBEDDING_FIELD_NAME = "content_embedding"
+class ElasticsearchChunkStore:
+    """负责 chunk 文档索引创建、写入、读取与检索。"""
 
     def __init__(
         self,
@@ -52,7 +69,7 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         verify_certs: bool,
         embedding_dimensions: int,
     ) -> None:
-        """初始化 ES 存储适配器。"""
+        """初始化 ES 文档存储适配器。"""
         self._index_name = index_name
         self._url = url
         self._api_key = api_key
@@ -88,8 +105,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
                     index=self._index_name,
                     mappings=self._build_mappings(),
                 )
-            else:
-                self._ensure_embedding_mapping(client)
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             msg = f"创建或检查 ES 索引失败: {self._index_name}"
             raise ElasticsearchIndexError(msg) from exc
@@ -144,7 +159,7 @@ class ElasticsearchChunkStore(ChunkSearchStore):
             raise ElasticsearchIndexError(msg) from exc
 
     def search(self, request: ChunkSearchRequest) -> list[ChunkSearchHit]:
-        """执行 chunk 混合检索。"""
+        """执行 chunk 词法检索。"""
         self.ensure_index()
 
         try:
@@ -161,9 +176,37 @@ class ElasticsearchChunkStore(ChunkSearchStore):
         hits = response.get("hits", {}).get("hits", [])
         return [self._parse_hit(hit) for hit in hits]
 
+    def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[ChunkSearchHit]:
+        """按 chunk 标识批量获取文档内容。"""
+        if not chunk_ids:
+            return []
+
+        self.ensure_index()
+        try:
+            response = self._get_client().mget(index=self._index_name, ids=chunk_ids)
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            msg = "按 chunk_id 批量读取 ES 文档失败"
+            raise ElasticsearchSearchError(msg) from exc
+
+        docs = response.get("docs", [])
+        if not isinstance(docs, list):
+            return []
+
+        hit_map: dict[str, ChunkSearchHit] = {}
+        for doc in docs:
+            if not isinstance(doc, dict) or not doc.get("found"):
+                continue
+            source = doc.get("_source", {})
+            if not isinstance(source, dict):
+                continue
+            hit = self._parse_hit({"_source": source, "_score": None})
+            hit_map[hit.chunk_id] = hit
+
+        return [hit_map[chunk_id] for chunk_id in chunk_ids if chunk_id in hit_map]
+
     @classmethod
     def build_search_query(cls, request: ChunkSearchRequest) -> dict[str, object]:
-        """构造结合全文、领域词与向量相似度的 ES 查询。"""
+        """构造结合全文与领域词的 ES 词法查询。"""
         should_queries: list[dict[str, object]] = [
             {
                 "match": {
@@ -203,23 +246,10 @@ class ElasticsearchChunkStore(ChunkSearchStore):
                 }
             )
 
-        lexical_query: dict[str, object] = {
+        return {
             "bool": {
                 "should": should_queries,
-                "minimum_should_match": 0,
-                "filter": [{"exists": {"field": cls._EMBEDDING_FIELD_NAME}}],
-            }
-        }
-        return {
-            "script_score": {
-                "query": lexical_query,
-                "script": {
-                    "source": (
-                        "_score + cosineSimilarity(params.query_vector, "
-                        f"'{cls._EMBEDDING_FIELD_NAME}') + 1.0"
-                    ),
-                    "params": {"query_vector": request.query_embedding},
-                },
+                "minimum_should_match": 1,
             }
         }
 
@@ -282,7 +312,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
             "fmm_terms": {"type": "keyword"},
             "bmm_terms": {"type": "keyword"},
             "merged_terms": {"type": "keyword"},
-            self._EMBEDDING_FIELD_NAME: self._build_embedding_mapping(),
         }
 
         return {
@@ -348,43 +377,6 @@ class ElasticsearchChunkStore(ChunkSearchStore):
             merged_terms=_as_string_list(source.get("merged_terms")),
             score=float(score) if isinstance(score, (int, float)) else None,
         )
-
-    def _ensure_embedding_mapping(self, client: Any) -> None:
-        """补齐并校验向量字段映射。"""
-        response = client.indices.get_mapping(index=self._index_name)
-        index_mapping = response.get(self._index_name, {})
-        mappings = index_mapping.get("mappings", {})
-        properties = mappings.get("properties", {})
-        if not isinstance(properties, dict):
-            properties = {}
-
-        vector_mapping = properties.get(self._EMBEDDING_FIELD_NAME)
-        if vector_mapping is None:
-            client.indices.put_mapping(
-                index=self._index_name,
-                properties={self._EMBEDDING_FIELD_NAME: self._build_embedding_mapping()},
-            )
-            return
-
-        if not isinstance(vector_mapping, dict):
-            msg = f"ES 向量字段映射非法: {self._EMBEDDING_FIELD_NAME}"
-            raise ElasticsearchIndexError(msg)
-
-        vector_type = vector_mapping.get("type")
-        vector_dims = vector_mapping.get("dims")
-        if vector_type != "dense_vector" or vector_dims != self._embedding_dimensions:
-            msg = (
-                f"ES 向量字段与当前配置不一致，字段={self._EMBEDDING_FIELD_NAME} dims={vector_dims}"
-            )
-            raise ElasticsearchIndexError(msg)
-
-    def _build_embedding_mapping(self) -> dict[str, object]:
-        """构造向量字段映射。"""
-        return {
-            "type": "dense_vector",
-            "dims": self._embedding_dimensions,
-            "index": False,
-        }
 
 
 def _as_string_list(value: object) -> list[str]:

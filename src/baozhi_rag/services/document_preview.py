@@ -39,7 +39,7 @@ class DocumentPreviewService:
             file_upload_service: 负责文件落盘的上传服务。
             chunk_service: 负责按文件格式解析并切块的服务。
             file_store: 本地文件存储适配器，用于在失败时执行回滚。
-            chunk_store: 检索存储适配器；上传后始终执行 ES 入库。
+            chunk_store: 检索存储适配器；上传后始终执行 ES 文档与 Milvus 向量双写。
             chunk_embedding_service: chunk 向量化服务；用于在入库前补充向量。
 
         返回:
@@ -88,7 +88,7 @@ class DocumentPreviewService:
             ]
             # 将切块结果进行向量化
             enriched_results = self._embed_chunks(results)
-            # 对切块结果执行es索引写入
+            # 对切块结果执行 ES 文档与 Milvus 向量双写
             indexed_file_ids = self._index_chunks(enriched_results)
             return enriched_results
         except Exception:

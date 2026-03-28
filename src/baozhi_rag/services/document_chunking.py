@@ -12,26 +12,44 @@ from pathlib import Path
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from fastapi import status
 
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
 
 
-class DocumentChunkingError(Exception):
+class DocumentChunkingError(AppError):
     """文档切块失败。"""
+
+    default_message = "文档切块失败"
+    default_error_code = "document_chunking_error"
+    default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 class UnsupportedDocumentTypeError(DocumentChunkingError):
     """不支持的文档格式。"""
 
+    default_message = "不支持的文档格式"
+    default_error_code = "unsupported_document_type"
+    default_status_code = status.HTTP_400_BAD_REQUEST
+
 
 class DocumentConversionError(DocumentChunkingError):
     """文档格式转换失败。"""
 
+    default_message = "文档格式转换失败"
+    default_error_code = "document_conversion_error"
+    default_status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+
 
 class DocumentParseError(DocumentChunkingError):
     """文档内容解析失败。"""
+
+    default_message = "文档内容解析失败"
+    default_error_code = "document_parse_error"
+    default_status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +69,8 @@ class DocumentChunk:
     content_embedding: list[float] | None = None
 
     def to_search_document(self) -> dict[str, object]:
-        """构造 ES 入库文档。"""
-        search_document: dict[str, object] = {
+        """构造 ES 文本检索入库文档。"""
+        return {
             "chunk_id": self.chunk_id,
             "file_id": self.file_id,
             "source_filename": self.source_filename,
@@ -64,9 +82,6 @@ class DocumentChunk:
             "bmm_terms": self.bmm_terms,
             "merged_terms": self.merged_terms,
         }
-        if self.content_embedding is not None:
-            search_document["content_embedding"] = self.content_embedding
-        return search_document
 
 
 class DocumentChunkService:
