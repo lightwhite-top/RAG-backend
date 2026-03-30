@@ -12,6 +12,8 @@ from pathlib import Path
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.oxml.text.paragraph import CT_P
+from docx.text.paragraph import Paragraph
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
@@ -204,6 +206,7 @@ class DocumentChunkService:
             msg = f"解析 docx 文件失败: {source_filename}"
             raise DocumentParseError(msg) from exc
 
+        # 将标题与正文进行合并，形成带上下文的文本片段列表
         segments = self._extract_docx_segments(document)
         if not segments:
             msg = f"Word 文档内容为空，无法切块: {source_filename}"
@@ -317,7 +320,9 @@ class DocumentChunkService:
         返回:
             去除空段落后、带标题上下文的文本片段列表。
         """
+        # 维护一个滑动窗口式的标题层级上下文，当遇到标题段时更新上下文并将其与后续正文段合并，形成带上下文的文本片段。
         headings: list[str] = []
+        # 抽取段落文本并合并标题上下文，形成切块前的文本片段列表
         segments: list[str] = []
 
         for paragraph in document.paragraphs:
@@ -325,9 +330,10 @@ class DocumentChunkService:
             if not text:
                 continue
 
-            style_name = paragraph.style.name if paragraph.style else ""
-            heading_level = self._parse_heading_level(style_name)
+            # 优先使用大纲级别识别标题，样式名作为兜底
+            heading_level = self._get_heading_level(paragraph)
             if heading_level is not None:
+                # 滑动窗口式维护当前标题层级上下文
                 headings = headings[: heading_level - 1]
                 headings.append(text)
                 segments.append(" / ".join(headings))
@@ -338,11 +344,51 @@ class DocumentChunkService:
 
         return segments
 
-    def _parse_heading_level(self, style_name: str | None) -> int | None:
-        """解析标题样式级别。
+    def _get_heading_level(self, paragraph: Paragraph) -> int | None:
+        """获取段落的大纲级别。
+
+        通过读取 Word 底层 XML 样式属性识别标题级别，支持：
+        - 标准标题样式：Heading 1-9、标题 1-9
+        - 自定义样式名：条款标题、章节名、章、节、条、款、项等
 
         参数:
-            style_name: 段落样式名称，例如 `Heading 1` 或 `标题 1`；为空时返回 None。
+            paragraph: `python-docx` 解析后的段落对象。
+
+        返回:
+            若段落为标题则返回其级别 (1-9)，否则返回 None。
+        """
+        # 1. 优先从样式名识别（包含用户自定义样式）
+        style_name = paragraph.style.name if paragraph.style else ""
+        level = self._parse_heading_level_by_name(style_name)
+        if level is not None:
+            return level
+
+        # 2. 兜底：从底层 XML 读取样式 ID（某些自定义样式可能未暴露到 style.name）
+        xml_element = paragraph._element
+        if not isinstance(xml_element, CT_P):
+            return None
+
+        p_pr = xml_element.pPr
+        if p_pr is None:
+            return None
+
+        # 查找 pStyle 元素
+        p_style = p_pr.pStyle
+        if p_style is None:
+            return None
+
+        # 读取样式 val 属性
+        style_val = p_style.val
+        if style_val is None:
+            return None
+
+        return self._parse_heading_level_by_name(style_val)
+
+    def _parse_heading_level_by_name(self, style_name: str | None) -> int | None:
+        """基于样式名称解析标题级别（兜底逻辑）。
+
+        参数:
+            style_name: 段落样式名称，例如 `Heading 1`、`标题 1`、`条款标题` 等。
 
         返回:
             若样式表示标题则返回其层级，否则返回 None。
@@ -350,10 +396,38 @@ class DocumentChunkService:
         if style_name is None:
             return None
 
+        # 匹配标准标题样式：Heading 1-9、标题 1-9
         matched = re.search(r"(Heading|标题)\s*(\d+)", style_name, flags=re.IGNORECASE)
-        if matched is None:
-            return None
-        return int(matched.group(2))
+        if matched is not None:
+            return int(matched.group(2))
+
+        # 匹配自定义样式名：条款标题、章节名、一级标题等视为一级标题
+        # 这些样式通常没有数字后缀，统一视为级别 1
+        custom_heading_patterns = [
+            r"^条款标题$",
+            r"^章节名$",
+            r"^章$",
+            r"^节$",
+            r"^条$",
+            r"^款$",
+            r"^项$",
+        ]
+        for pattern in custom_heading_patterns:
+            if re.match(pattern, style_name, flags=re.IGNORECASE):
+                return 1
+
+        return None
+
+    def _parse_heading_level(self, style_name: str | None) -> int | None:
+        """解析标题样式级别（已废弃，保留以便向后兼容）。
+
+        参数:
+            style_name: 段落样式名称。
+
+        返回:
+            若样式表示标题则返回其层级，否则返回 None。
+        """
+        return self._parse_heading_level_by_name(style_name)
 
     def _build_chunks(
         self,
