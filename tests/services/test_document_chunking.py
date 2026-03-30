@@ -178,6 +178,62 @@ def test_parse_heading_level_by_name_edge_cases() -> None:
     assert service._parse_heading_level_by_name("条款标题自定义") is None  # 必须精确匹配
 
 
+def test_parse_heading_level_by_content_chapter_patterns() -> None:
+    """应支持通过正文内容识别章节编号模式。"""
+    service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=Path("."))
+
+    # 第 X 章 - 一级标题
+    assert service._parse_heading_level_by_content("第一章 总则") == 1
+    assert service._parse_heading_level_by_content("第 1 章 总则") == 1
+    assert service._parse_heading_level_by_content("第 二 章 总则") == 1
+
+    # 第 X 节 - 二级标题
+    assert service._parse_heading_level_by_content("第一节 适用范围") == 2
+    assert service._parse_heading_level_by_content("第 1 节 适用范围") == 2
+
+    # 第 X 条 - 根据编号类型判断级别
+    assert service._parse_heading_level_by_content("第一条 保险责任") == 2  # 中文数字
+    assert service._parse_heading_level_by_content("第 1 条 保险责任") == 3  # 阿拉伯数字
+
+
+def test_parse_heading_level_by_content_number_patterns() -> None:
+    """应支持通过正文内容识别中文数字和括号编号模式。"""
+    service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=Path("."))
+
+    # （一）、(一) - 中文括号 + 中文数字，二级标题
+    assert service._parse_heading_level_by_content("（一）适用范围") == 2
+    assert service._parse_heading_level_by_content("(一) 适用范围") == 2
+
+    # 一、二、三、 - 中文数字 + 顿号，一级标题
+    assert service._parse_heading_level_by_content("一、总则") == 1
+    assert service._parse_heading_level_by_content("二、分则") == 1
+    assert service._parse_heading_level_by_content("十、附则") == 1
+
+    # 1.1、1.1.1 - 小数点分隔，根据段数判断级别
+    # 注意：1.1 有 2 个数字段，所以是级别 2
+    assert service._parse_heading_level_by_content("1.1 概述") == 2
+    assert service._parse_heading_level_by_content("1.1.1 详细说明") == 3
+    assert service._parse_heading_level_by_content("1.1.1.1 补充内容") == 4
+
+
+def test_parse_heading_level_by_content_edge_cases() -> None:
+    """应正确处理正文内容匹配的边界情况。"""
+    service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=Path("."))
+
+    # 非标题内容
+    assert service._parse_heading_level_by_content("这是普通正文") is None
+    assert service._parse_heading_level_by_content("正文内容没有任何编号") is None
+    assert service._parse_heading_level_by_content("") is None
+
+    # 边界情况：第一条 vs 第 1 条
+    assert service._parse_heading_level_by_content("第一条") == 2
+    assert service._parse_heading_level_by_content("第 1 条") == 3
+
+    # 级别上限 - 最多支持 9 段数字
+    assert service._parse_heading_level_by_content("1.1.1.1.1.1.1.1.1") == 9  # 9 段数字
+    assert service._parse_heading_level_by_content("1.1.1.1.1.1.1.1.1.1") == 9  # 10 段也返回 9
+
+
 def _write_docx(file_path: Path, paragraphs: Sequence[tuple[str, str | None]]) -> None:
     """写入测试用 docx 文件（仅设置样式名）。
 

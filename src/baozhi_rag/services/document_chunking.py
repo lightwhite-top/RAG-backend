@@ -347,9 +347,10 @@ class DocumentChunkService:
     def _get_heading_level(self, paragraph: Paragraph) -> int | None:
         """获取段落的大纲级别。
 
-        通过读取 Word 底层 XML 样式属性识别标题级别，支持：
-        - 标准标题样式：Heading 1-9、标题 1-9
-        - 自定义样式名：条款标题、章节名、章、节、条、款、项等
+        采用三级优先级识别策略：
+        1. 标准样式（Heading n / 标题 n） > 自定义样式名
+        2. XML 样式 ID 兜底（某些自定义样式可能未暴露到 style.name）
+        3. 正文内容正则匹配（第 X 章、第 X 条、（一）、一、等）
 
         参数:
             paragraph: `python-docx` 解析后的段落对象。
@@ -357,32 +358,33 @@ class DocumentChunkService:
         返回:
             若段落为标题则返回其级别 (1-9)，否则返回 None。
         """
-        # 1. 优先从样式名识别（包含用户自定义样式）
+        # 优先级 1：从样式名识别（包含标准样式和自定义样式名）
         style_name = paragraph.style.name if paragraph.style else ""
         level = self._parse_heading_level_by_name(style_name)
         if level is not None:
             return level
 
-        # 2. 兜底：从底层 XML 读取样式 ID（某些自定义样式可能未暴露到 style.name）
+        # 优先级 2：从底层 XML 读取样式 ID（某些自定义样式可能未暴露到 style.name）
         xml_element = paragraph._element
-        if not isinstance(xml_element, CT_P):
-            return None
+        if isinstance(xml_element, CT_P):
+            p_pr = xml_element.pPr
+            if p_pr is not None:
+                p_style = p_pr.pStyle
+                if p_style is not None:
+                    style_val = p_style.val
+                    if style_val is not None:
+                        level = self._parse_heading_level_by_name(style_val)
+                        if level is not None:
+                            return level
 
-        p_pr = xml_element.pPr
-        if p_pr is None:
-            return None
+        # 优先级 3：从正文内容正则匹配识别（第 X 章、第 X 条、（一）、一、等）
+        text = paragraph.text.strip()
+        if text:
+            level = self._parse_heading_level_by_content(text)
+            if level is not None:
+                return level
 
-        # 查找 pStyle 元素
-        p_style = p_pr.pStyle
-        if p_style is None:
-            return None
-
-        # 读取样式 val 属性
-        style_val = p_style.val
-        if style_val is None:
-            return None
-
-        return self._parse_heading_level_by_name(style_val)
+        return None
 
     def _parse_heading_level_by_name(self, style_name: str | None) -> int | None:
         """基于样式名称解析标题级别（兜底逻辑）。
@@ -415,6 +417,60 @@ class DocumentChunkService:
         for pattern in custom_heading_patterns:
             if re.match(pattern, style_name, flags=re.IGNORECASE):
                 return 1
+
+        return None
+
+    def _parse_heading_level_by_content(self, text: str) -> int | None:
+        """基于段落正文内容正则匹配识别标题级别。
+
+        支持以下正文编号模式（优先级 3，作为样式名识别的兜底）：
+        - 第 X 章 / 第 X 节 / 第 X 条：根据编号数字推断级别
+        - （一）、(一)：中文括号 + 中文数字，视为二级标题
+        - 一、二、三、：中文数字 + 顿号，视为一级标题
+        - 1.1、1.1.1：小数点分隔的数字，根据段数推断级别
+
+        参数:
+            text: 段落正文文本。
+
+        返回:
+            若匹配到标题模式则返回其级别 (1-9)，否则返回 None。
+        """
+        # 模式 1：第 X 章、第 X 节、第 X 条
+        chapter_match = re.match(r"^第\s*([一二三四五六七八九十\d]+)\s*(章|节|条)\b", text)
+        if chapter_match:
+            num_str = chapter_match.group(1)
+            unit = chapter_match.group(2)
+            # 章/节视为一级，条视为二级
+            if unit == "章":
+                return 1
+            if unit == "节":
+                return 2
+            if unit == "条":
+                # 如果编号是中文数字，视为二级；如果是阿拉伯数字，视为三级
+                if re.match(r"^[一二三四五六七八九十]+$", num_str):
+                    return 2
+                return 3
+
+        # 模式 2：（一）、(一) —— 中文括号 + 中文数字
+        paren_match = re.match(r"^[（(]([一二三四五六七八九十]+)[)）]", text)
+        if paren_match:
+            return 2  # 视为二级标题
+
+        # 模式 3：一、二、三、 —— 中文数字 + 顿号
+        chinese_num_match = re.match(r"^([一二三四五六七八九十]+)[、．.]", text)
+        if chinese_num_match:
+            return 1  # 视为一级标题
+
+        # 模式 4：1.1、1.1.1 —— 小数点分隔的数字
+        # 使用更灵活的正则，支持任意段数
+        dotted_match = re.match(
+            r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?",
+            text,
+        )
+        if dotted_match:
+            # 根据非空捕获组数判断级别
+            levels = sum(1 for g in dotted_match.groups() if g is not None)
+            return min(levels, 9)  # 最多支持 9 级
 
         return None
 
