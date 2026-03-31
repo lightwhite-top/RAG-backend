@@ -780,7 +780,9 @@ class DocumentChunkService:
         """
         normalized_heading = heading_context.strip()
         heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
-        content_with_context = f"{heading_prefix}{table_markdown}" if heading_prefix else table_markdown
+        content_with_context = (
+            f"{heading_prefix}{table_markdown}" if heading_prefix else table_markdown
+        )
 
         if len(content_with_context) <= self._chunk_size:
             # 小表格，整体作为一个 chunk
