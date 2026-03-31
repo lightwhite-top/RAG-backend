@@ -8,11 +8,14 @@ import subprocess
 import textwrap
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 from fastapi import status
 
@@ -20,6 +23,22 @@ from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
+
+
+class SegmentType(Enum):
+    """文档片段类型。"""
+
+    PARAGRAPH = "paragraph"
+    TABLE = "table"
+
+
+@dataclass
+class DocumentSegment:
+    """文档片段，可以是段落或表格。"""
+
+    content: str
+    segment_type: SegmentType
+    heading_context: str
 
 
 class DocumentChunkingError(AppError):
@@ -212,12 +231,49 @@ class DocumentChunkService:
             msg = f"Word 文档内容为空，无法切块: {source_filename}"
             raise DocumentParseError(msg)
 
-        return self._build_chunks(
-            text="\n\n".join(segments),
-            source_filename=source_filename,
-            storage_key=storage_key,
-            file_id=file_id,
-        )
+        chunks: list[DocumentChunk] = []
+        paragraph_buffer: list[str] = []
+
+        for segment in segments:
+            if segment.segment_type is SegmentType.PARAGRAPH:
+                paragraph_buffer.append(segment.content)
+                continue
+
+            if paragraph_buffer:
+                chunks.extend(
+                    self._build_chunks(
+                        text="\n\n".join(paragraph_buffer),
+                        source_filename=source_filename,
+                        storage_key=storage_key,
+                        file_id=file_id,
+                        start_index=len(chunks),
+                    )
+                )
+                paragraph_buffer.clear()
+
+            chunks.extend(
+                self._build_table_chunks(
+                    table_markdown=segment.content,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                    start_index=len(chunks),
+                    heading_context=segment.heading_context,
+                )
+            )
+
+        if paragraph_buffer:
+            chunks.extend(
+                self._build_chunks(
+                    text="\n\n".join(paragraph_buffer),
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                    start_index=len(chunks),
+                )
+            )
+
+        return chunks
 
     def chunk_doc(
         self,
@@ -311,36 +367,162 @@ class DocumentChunkService:
             if converted_path.parent.exists():
                 converted_path.parent.rmdir()
 
-    def _extract_docx_segments(self, document: DocxDocument) -> list[str]:
-        """抽取 docx 段落并保留标题上下文。
+    def _is_vertically_merged_continuation(self, cell: _Cell) -> bool:
+        """检查单元格是否是垂直合并的延续格（需要跳过）。
+
+        参数:
+            cell: 表格单元格对象。
+
+        返回:
+            True 表示该单元格是合并延续格，应跳过；False 表示正常单元格或合并起始格。
+        """
+        tc_pr = cell._element.tcPr
+        if tc_pr is None:
+            return False
+
+        vmerge = tc_pr.vMerge
+        if vmerge is None:
+            return False
+
+        # restart 表示合并开始，continue 或无 val 表示延续
+        val = vmerge.val
+        return val is None or val == "continue"
+
+    def _table_to_markdown(self, table: Table) -> str:
+        """将表格转换为 Markdown 格式，处理合并单元格。
+
+        参数:
+            table: python-docx 的 Table 对象。
+
+        返回:
+            Markdown 格式的表格字符串；空表格返回空字符串。
+        """
+        if not table.rows:
+            return ""
+
+        lines: list[str] = []
+        previous_row_texts: list[str] | None = None
+
+        for row_index, row in enumerate(table.rows):
+            row_values: list[str] = []
+            current_row_texts: list[str] = []
+
+            for column_index, cell in enumerate(row.cells):
+                text = cell.text.strip().replace("\n", " ").replace("|", "\\|")
+                current_row_texts.append(text)
+
+                tc_pr = cell._element.tcPr
+                has_vertical_merge_marker = tc_pr is not None and tc_pr.vMerge is not None
+                is_repeated_vertical_merge = (
+                    has_vertical_merge_marker
+                    and previous_row_texts is not None
+                    and column_index < len(previous_row_texts)
+                    and text
+                    and text == previous_row_texts[column_index]
+                )
+                if self._is_vertically_merged_continuation(cell) or is_repeated_vertical_merge:
+                    row_values.append("")
+                else:
+                    row_values.append(text)
+
+            lines.append("| " + " | ".join(row_values) + " |")
+            if row_index == 0:
+                lines.append("|" + "|".join(["---"] * len(row_values)) + "|")
+            previous_row_texts = current_row_texts
+
+        return "\n".join(lines)
+
+    def _process_paragraph(
+        self,
+        paragraph: Paragraph,
+        headings: list[str],
+    ) -> tuple[DocumentSegment | None, list[str]]:
+        """处理单个段落，返回 DocumentSegment 和更新后的 headings。
+
+        参数:
+            paragraph: python-docx 的 Paragraph 对象。
+            headings: 当前的标题层级列表。
+
+        返回:
+            元组 (DocumentSegment | None, 更新后的 headings 列表)。
+            空段落返回 (None, headings)。
+        """
+        text = paragraph.text.strip()
+        if not text:
+            return None, headings
+
+        heading_level = self._get_heading_level(paragraph)
+        if heading_level is not None:
+            # 更新标题层级
+            updated_headings = headings[: heading_level - 1] + [text]
+            content = " / ".join(updated_headings)
+            segment = DocumentSegment(
+                content=content,
+                segment_type=SegmentType.PARAGRAPH,
+                heading_context=" / ".join(updated_headings),
+            )
+            return segment, updated_headings
+
+        # 普通段落
+        context = " / ".join(headings)
+        content = f"{context}\n{text}" if context else text
+        segment = DocumentSegment(
+            content=content,
+            segment_type=SegmentType.PARAGRAPH,
+            heading_context=" / ".join(headings),
+        )
+        return segment, headings
+
+    def _process_table(
+        self,
+        table: Table,
+        headings: list[str],
+    ) -> DocumentSegment | None:
+        """处理单个表格，转换为 Markdown 格式。
+
+        参数:
+            table: python-docx 的 Table 对象。
+            headings: 当前的标题层级列表。
+
+        返回:
+            包含 Markdown 表格的 DocumentSegment；空表格返回 None。
+        """
+        markdown = self._table_to_markdown(table)
+        if not markdown:
+            return None
+
+        return DocumentSegment(
+            content=markdown,
+            segment_type=SegmentType.TABLE,
+            heading_context=" / ".join(headings),
+        )
+
+    def _extract_docx_segments(self, document: DocxDocument) -> list[DocumentSegment]:
+        """抽取段落和表格，保持原始顺序并保留标题上下文。
 
         参数:
             document: `python-docx` 解析后的文档对象。
 
         返回:
-            去除空段落后、带标题上下文的文本片段列表。
+            包含段落和表格的 DocumentSegment 列表，按文档原始顺序排列。
         """
-        # 维护一个滑动窗口式的标题层级上下文，当遇到标题段时更新上下文并将其与后续正文段合并，形成带上下文的文本片段。
         headings: list[str] = []
-        # 抽取段落文本并合并标题上下文，形成切块前的文本片段列表
-        segments: list[str] = []
+        segments: list[DocumentSegment] = []
 
-        for paragraph in document.paragraphs:
-            text = paragraph.text.strip()
-            if not text:
-                continue
-
-            # 优先使用大纲级别识别标题，样式名作为兜底
-            heading_level = self._get_heading_level(paragraph)
-            if heading_level is not None:
-                # 滑动窗口式维护当前标题层级上下文
-                headings = headings[: heading_level - 1]
-                headings.append(text)
-                segments.append(" / ".join(headings))
-                continue
-
-            context = " / ".join(headings)
-            segments.append(f"{context}\n{text}" if context else text)
+        # 遍历 body 的所有子元素，保持段落和表格的原始顺序
+        for element in document.element.body:
+            if isinstance(element, CT_P):
+                # 处理段落
+                paragraph = Paragraph(element, document)
+                segment, headings = self._process_paragraph(paragraph, headings)
+                if segment:
+                    segments.append(segment)
+            elif isinstance(element, CT_Tbl):
+                # 处理表格
+                table = Table(element, document)
+                segment = self._process_table(table, headings)
+                if segment:
+                    segments.append(segment)
 
         return segments
 
@@ -485,12 +667,45 @@ class DocumentChunkService:
         """
         return self._parse_heading_level_by_name(style_name)
 
+    def _create_chunk(
+        self,
+        content: str,
+        chunk_index: int,
+        source_filename: str,
+        storage_key: str,
+        file_id: str,
+    ) -> DocumentChunk:
+        """基于统一元数据创建单个 chunk。
+
+        参数:
+            content: 当前 chunk 的正文内容。
+            chunk_index: 当前 chunk 在文件中的顺序号。
+            source_filename: 上传时的原始文件名。
+            storage_key: 文件在本地存储中的相对路径。
+            file_id: 文件唯一标识。
+
+        返回:
+            已补齐 `chunk_id`、字符数和领域词抽取结果的标准化 chunk。
+        """
+        term_match_result = self._term_matcher.extract_terms(content)
+        return DocumentChunk(
+            file_id=file_id,
+            chunk_id=f"{file_id}-chunk-{chunk_index}",
+            chunk_index=chunk_index,
+            content=content,
+            char_count=len(content),
+            source_filename=source_filename,
+            storage_key=storage_key,
+            merged_terms=term_match_result.merged_terms,
+        )
+
     def _build_chunks(
         self,
         text: str,
         source_filename: str,
         storage_key: str,
         file_id: str,
+        start_index: int = 0,
     ) -> list[DocumentChunk]:
         """按固定窗口与 overlap 生成切块。
 
@@ -499,6 +714,7 @@ class DocumentChunkService:
             source_filename: 上传时的原始文件名。
             storage_key: 文件在本地存储中的相对路径。
             file_id: 文件唯一标识。
+            start_index: 当前批次切块写入前的起始序号。
 
         返回:
             基于字符窗口切分后的标准化 chunk 列表。
@@ -519,18 +735,13 @@ class DocumentChunkService:
             end = min(start + self._chunk_size, len(normalized_text))
             chunk_content = normalized_text[start:end].strip()
             if chunk_content:
-                chunk_index = len(chunks)
-                term_match_result = self._term_matcher.extract_terms(chunk_content)
                 chunks.append(
-                    DocumentChunk(
-                        file_id=file_id,
-                        chunk_id=f"{file_id}-chunk-{chunk_index}",
-                        chunk_index=chunk_index,
+                    self._create_chunk(
                         content=chunk_content,
-                        char_count=len(chunk_content),
+                        chunk_index=start_index + len(chunks),
                         source_filename=source_filename,
                         storage_key=storage_key,
-                        merged_terms=term_match_result.merged_terms,
+                        file_id=file_id,
                     )
                 )
 
@@ -541,6 +752,138 @@ class DocumentChunkService:
             start = next_start if next_start > start else end
 
         return chunks
+
+    def _build_table_chunks(
+        self,
+        table_markdown: str,
+        source_filename: str,
+        storage_key: str,
+        file_id: str,
+        start_index: int = 0,
+        heading_context: str = "",
+    ) -> list[DocumentChunk]:
+        """为表格生成独立的 chunks。
+
+        小表格整体作为一个 chunk；
+        大表格按行分组切分，每组补充表头。
+
+        参数:
+            table_markdown: 表格的 Markdown 字符串。
+            source_filename: 上传时的原始文件名。
+            storage_key: 文件在本地存储中的相对路径。
+            file_id: 文件唯一标识。
+            start_index: 当前批次切块写入前的起始序号。
+            heading_context: 表格所在标题上下文，会附加到每个表格 chunk 前部。
+
+        返回:
+            表格切块列表。
+        """
+        normalized_heading = heading_context.strip()
+        heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
+        content_with_context = f"{heading_prefix}{table_markdown}" if heading_prefix else table_markdown
+
+        if len(content_with_context) <= self._chunk_size:
+            # 小表格，整体作为一个 chunk
+            return [
+                self._create_chunk(
+                    content=content_with_context,
+                    chunk_index=start_index,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                )
+            ]
+
+        # 大表格，需要切分
+        lines = table_markdown.split("\n")
+        if len(lines) < 3:
+            # 格式异常，当作小表格
+            return [
+                self._create_chunk(
+                    content=content_with_context,
+                    chunk_index=start_index,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                )
+            ]
+
+        header_line = lines[0]
+        separator_line = lines[1]
+        split_tables = self._split_large_table(
+            table_markdown,
+            header_line,
+            separator_line,
+            heading_context=heading_context,
+        )
+
+        chunks: list[DocumentChunk] = []
+        for offset, table_part in enumerate(split_tables):
+            chunks.append(
+                self._create_chunk(
+                    content=table_part,
+                    chunk_index=start_index + offset,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                )
+            )
+
+        return chunks
+
+    def _split_large_table(
+        self,
+        markdown: str,
+        header_line: str,
+        separator_line: str,
+        heading_context: str = "",
+    ) -> list[str]:
+        """将超大表格按行分组切分，每组补充表头。
+
+        参数:
+            markdown: 完整的表格 Markdown 字符串。
+            header_line: 表头行（如 "| 列1 | 列2 |"）。
+            separator_line: 分隔行（如 "|---|---|"）。
+            heading_context: 表格所在标题上下文，会附加到每个切分结果前部。
+
+        返回:
+            切分后的表格 Markdown 列表，每个都包含表头。
+        """
+        lines = markdown.split("\n")
+        if len(lines) <= 2:
+            normalized_heading = heading_context.strip()
+            if not normalized_heading:
+                return [markdown]
+            return [f"{normalized_heading}\n{markdown}"]
+
+        normalized_heading = heading_context.strip()
+        heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
+        header = f"{header_line}\n{separator_line}"
+        chunk_prefix = f"{heading_prefix}{header}" if heading_prefix else header
+        header_size = len(chunk_prefix)
+        data_rows = lines[2:]
+
+        chunks: list[str] = []
+        current_rows: list[str] = []
+        current_size = header_size
+
+        for row in data_rows:
+            row_size = len(row) + 1  # +1 for newline
+
+            if current_size + row_size > self._chunk_size and current_rows:
+                chunk_content = chunk_prefix + "\n" + "\n".join(current_rows)
+                chunks.append(chunk_content)
+                current_rows = []
+                current_size = header_size
+
+            current_rows.append(row)
+            current_size += row_size
+
+        if current_rows:
+            chunk_content = chunk_prefix + "\n" + "\n".join(current_rows)
+            chunks.append(chunk_content)
+
+        return chunks if chunks else [markdown]
 
     def _log_chunk_preview(
         self,

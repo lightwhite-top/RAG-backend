@@ -257,6 +257,7 @@ class HybridChunkStore(ChunkSearchStore):
             # 向量检索
             semantic_hits = self._vector_store.search(request.query_embedding, request.size)
 
+            # 结果融合：使用 RRF 算法对词法检索结果和向量检索结果进行融合排序，并补全文档载荷
             return self._fuse_hits(
                 lexical_hits=lexical_hits,
                 semantic_hits=semantic_hits,

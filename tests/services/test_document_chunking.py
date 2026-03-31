@@ -60,6 +60,99 @@ def test_chunk_docx_applies_overlap_for_long_text(tmp_path: Path) -> None:
     assert chunks[1].content[:20] == chunks[0].content[-20:]
 
 
+def test_table_to_markdown_skips_vertical_merge_continuation(tmp_path: Path) -> None:
+    """表格转 Markdown 时应跳过纵向合并的延续格。"""
+    file_path = tmp_path / "merged-table.docx"
+    document = Document()
+    table = document.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "保障项目"
+    table.cell(0, 1).text = "说明"
+    table.cell(1, 0).text = "免赔额"
+    table.cell(1, 1).text = "首年1000元"
+    table.cell(2, 0).text = ""
+    table.cell(2, 1).text = "次年2000元"
+    table.cell(1, 0).merge(table.cell(2, 0))
+    document.save(str(file_path))
+
+    service = DocumentChunkService(chunk_size=200, chunk_overlap=20, convert_temp_dir=tmp_path)
+    markdown = service._table_to_markdown(Document(str(file_path)).tables[0])
+
+    assert markdown.splitlines() == [
+        "| 保障项目 | 说明 |",
+        "|---|---|",
+        "| 免赔额 | 首年1000元 |",
+        "|  | 次年2000元 |",
+    ]
+
+
+def test_chunk_docx_splits_paragraph_and_table_chunks_in_document_order(tmp_path: Path) -> None:
+    """段落与表格混排时应按文档顺序独立切块。"""
+    file_path = tmp_path / "mixed.docx"
+    document = Document()
+    document.add_paragraph("保障计划", style="Heading 1")
+    document.add_paragraph("投保前请阅读责任说明。")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "责任"
+    table.cell(0, 1).text = "说明"
+    table.cell(1, 0).text = "住院"
+    table.cell(1, 1).text = "赔付80%"
+    document.add_paragraph("表格后的补充说明。")
+    document.save(str(file_path))
+
+    service = DocumentChunkService(chunk_size=120, chunk_overlap=20, convert_temp_dir=tmp_path)
+    chunks = service.chunk_document(
+        file_path=file_path,
+        source_filename="mixed.docx",
+        storage_key="2026/03/31/mixed.docx",
+        file_id="file-mixed",
+    )
+
+    assert [chunk.chunk_index for chunk in chunks] == [0, 1, 2]
+    assert [chunk.chunk_id for chunk in chunks] == [
+        "file-mixed-chunk-0",
+        "file-mixed-chunk-1",
+        "file-mixed-chunk-2",
+    ]
+    assert "投保前请阅读责任说明。" in chunks[0].content
+    assert chunks[1].content.startswith("保障计划\n| 责任 | 说明 |")
+    assert "| 住院 | 赔付80% |" in chunks[1].content
+    assert chunks[2].content == "保障计划\n表格后的补充说明。"
+
+
+def test_build_table_chunks_splits_large_table_and_repeats_header() -> None:
+    """超长表格应按行分组切分，并在每个 chunk 中重复表头。"""
+    service = DocumentChunkService(chunk_size=70, chunk_overlap=20, convert_temp_dir=Path("."))
+    table_markdown = "\n".join(
+        [
+            "| 保障项目 | 说明 |",
+            "|---|---|",
+            "| 门诊 | 赔付比例80%，年度限额10000元 |",
+            "| 住院 | 赔付比例90%，年度限额30000元 |",
+            "| 手术 | 赔付比例95%，年度限额50000元 |",
+        ]
+    )
+
+    chunks = service._build_table_chunks(
+        table_markdown=table_markdown,
+        source_filename="table.docx",
+        storage_key="2026/03/31/table.docx",
+        file_id="file-table",
+        start_index=2,
+        heading_context="费率说明",
+    )
+
+    assert len(chunks) == 3
+    assert [chunk.chunk_index for chunk in chunks] == [2, 3, 4]
+    assert [chunk.chunk_id for chunk in chunks] == [
+        "file-table-chunk-2",
+        "file-table-chunk-3",
+        "file-table-chunk-4",
+    ]
+    for chunk in chunks:
+        assert chunk.content.startswith("费率说明\n| 保障项目 | 说明 |")
+        assert "|---|---|" in chunk.content
+
+
 def test_chunk_document_dispatches_doc_and_cleans_temp_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

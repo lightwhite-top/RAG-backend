@@ -12,6 +12,7 @@ from baozhi_rag.domain.term_dictionary import DomainTermDictionary, load_domain_
 class TermMatchResult:
     """单段文本的领域词匹配结果。"""
 
+    # 抽取并合并去重后的领域词项列表
     merged_terms: list[str]
 
 
