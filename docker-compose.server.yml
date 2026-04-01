@@ -6,7 +6,7 @@ services:
       app:
         condition: service_healthy
     ports:
-      - "80:80"
+      - "6888:80"
     volumes:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:

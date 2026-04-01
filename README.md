@@ -363,7 +363,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 
 服务器部署请优先使用 `docker-compose.server.yml`，该编排与本机联调版的主要区别是：
 
-- 仅对外暴露 `Nginx` 的 `80` 端口
+- 仅对外暴露 `Nginx` 的 `6888` 端口
 - `app`、`Elasticsearch`、`Milvus`、`MinIO` 只在容器内网通信
 - Nginx 已补充 SSE 代理参数，适配 `/chat/completions` 的流式输出
 
@@ -398,6 +398,12 @@ docker compose -f docker-compose.server.yml logs -f milvus
 docker compose -f docker-compose.server.yml down
 docker compose -f docker-compose.server.yml down -v
 ```
+
+部署完成后可通过以下地址访问：
+
+- `http://服务器IP:6888/`
+- `http://服务器IP:6888/docs`
+- `http://服务器IP:6888/health/live`
 
 如果服务器前面还会挂云负载均衡、CDN 或 HTTPS 网关，建议把 TLS 终止放在最外层；当前仓库内置的 Nginx 主要负责反向代理和 SSE 透传。
 
