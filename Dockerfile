@@ -2,12 +2,14 @@ FROM python:3.13-slim-bookworm
 
 ARG APT_MIRROR=https://mirrors.aliyun.com
 ARG PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple
+ARG UV_HTTP_TIMEOUT_SECONDS=300
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=${PYPI_MIRROR} \
     UV_DEFAULT_INDEX=${PYPI_MIRROR} \
+    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT_SECONDS} \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:${PATH}"
