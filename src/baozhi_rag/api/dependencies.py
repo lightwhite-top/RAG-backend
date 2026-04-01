@@ -10,6 +10,7 @@ from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
+from baozhi_rag.services.chat import ChatService
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchService
 from baozhi_rag.services.document_chunking import DocumentChunkService
@@ -54,4 +55,15 @@ def get_chunk_search_service(
         term_matcher=build_default_term_matcher(settings.domain_dictionary_path),
         store=HybridChunkStore.from_settings(settings),
         chunk_embedding_service=_build_chunk_embedding_service(settings),
+    )
+
+
+def get_chat_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ChatService:
+    """构造聊天服务。"""
+    return ChatService(
+        chat_client=AlibabaModelStudioClient.from_settings(settings),
+        chunk_search_service=get_chunk_search_service(settings),
+        system_prompt=settings.chat_system_prompt,
     )

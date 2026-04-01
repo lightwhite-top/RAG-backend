@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME
 
 
 class Settings(BaseSettings):
@@ -45,6 +48,36 @@ class Settings(BaseSettings):
         default="INFO",
         description="日志级别",
         validation_alias=AliasChoices("APP_LOG_LEVEL"),
+    )
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="允许跨域访问的来源列表，多个来源通过逗号分隔",
+        validation_alias=AliasChoices("CORS_ALLOW_ORIGINS"),
+    )
+    cors_allow_origin_regex: str | None = Field(
+        default=None,
+        description="允许跨域访问的来源正则表达式",
+        validation_alias=AliasChoices("CORS_ALLOW_ORIGIN_REGEX"),
+    )
+    cors_allow_credentials: bool = Field(
+        default=False,
+        description="是否允许跨域请求携带凭证",
+        validation_alias=AliasChoices("CORS_ALLOW_CREDENTIALS"),
+    )
+    cors_allow_methods: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        description="允许跨域访问的方法列表，多个方法通过逗号分隔",
+        validation_alias=AliasChoices("CORS_ALLOW_METHODS"),
+    )
+    cors_allow_headers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["*"],
+        description="允许跨域访问时携带的请求头列表，多个请求头通过逗号分隔",
+        validation_alias=AliasChoices("CORS_ALLOW_HEADERS"),
+    )
+    cors_expose_headers: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [REQUEST_ID_HEADER_NAME],
+        description="允许前端读取的响应头列表，多个响应头通过逗号分隔",
+        validation_alias=AliasChoices("CORS_EXPOSE_HEADERS"),
     )
     upload_root_dir: Path = Field(
         default=Path("data/uploads"),
@@ -141,6 +174,18 @@ class Settings(BaseSettings):
         description="预留的阿里云百炼聊天模型名称",
         validation_alias=AliasChoices("BAILIAN_CHAT_MODEL"),
     )
+    chat_system_prompt: str = Field(
+        default=(
+            "你是金融保险知识库问答助手。你只能基于提供的证据回答，"
+            "不得编造条款、保障责任、免责结论、理赔结论或确定性承诺。"
+            "如果证据不足，必须明确说明“当前检索结果不足以支持结论”，"
+            "并建议补充材料或转人工处理。回答请使用简洁中文，并在相关句子后追加 [1][2] 这类证据编号。"
+            "涉及理赔、承保、免责、保单解释时，要明确说明以正式合同条款、系统记录和人工审核结果为准。"
+        ),
+        description="聊天接口默认使用的系统提示词",
+        validation_alias=AliasChoices("CHAT_SYSTEM_PROMPT"),
+        min_length=1,
+    )
     chunk_embedding_model: str = Field(
         default="text-embedding-v4",
         description="chunk 向量化模型名称",
@@ -161,6 +206,34 @@ class Settings(BaseSettings):
         description="chunk 检索默认返回条数",
         validation_alias=AliasChoices("SEARCH_DEFAULT_SIZE"),
     )
+
+    @field_validator(
+        "cors_allow_origins",
+        "cors_allow_methods",
+        "cors_allow_headers",
+        "cors_expose_headers",
+        mode="before",
+    )
+    @classmethod
+    def parse_csv_list(cls, value: object) -> object:
+        """把 `.env` 中逗号分隔的配置解析为字符串列表。"""
+        if not isinstance(value, str):
+            return value
+
+        if not value.strip():
+            return []
+
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    @field_validator("cors_allow_origin_regex", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        """把空字符串正则配置归一化为 `None`。"""
+        if not isinstance(value, str):
+            return value
+
+        normalized_value = value.strip()
+        return normalized_value or None
 
 
 @lru_cache

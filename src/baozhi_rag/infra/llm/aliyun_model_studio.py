@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, cast
 
 from fastapi import status
@@ -142,6 +143,7 @@ class AlibabaModelStudioClient:
         embeddings: list[list[float]] = []
 
         for start in range(0, len(texts), self._embedding_batch_size):
+            # 这里按百炼单次批量限制切片，避免大批次请求直接被上游拒绝。
             batch = texts[start : start + self._embedding_batch_size]
             try:
                 response = client.embeddings.create(
@@ -213,6 +215,57 @@ class AlibabaModelStudioClient:
             raise AlibabaModelStudioInvocationError(msg)
         return content
 
+    def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+    ) -> Iterator[str]:
+        """调用百炼聊天模型执行流式对话补全。
+
+        参数:
+            messages: 标准化消息列表。
+            temperature: 可选采样温度。
+
+        返回:
+            逐段返回模型生成的文本增量。
+
+        异常:
+            AlibabaModelStudioConfigurationError: 当聊天模型未配置时抛出。
+            AlibabaModelStudioInvocationError: 当模型调用失败时抛出。
+        """
+        if not self._chat_model:
+            msg = "未配置百炼聊天模型"
+            raise AlibabaModelStudioConfigurationError(msg)
+
+        self._validate_api_key()
+        try:
+            response = self._get_client().chat.completions.create(
+                model=self._chat_model,
+                messages=[
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                    }
+                    for message in messages
+                ],
+                temperature=temperature,
+                stream=True,
+            )
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            msg = "调用百炼聊天模型失败"
+            raise AlibabaModelStudioInvocationError(msg) from exc
+
+        try:
+            for chunk in response:
+                # 不同 SDK 版本的流式 chunk 结构可能略有差异，统一在一个方法里做兼容提取。
+                delta_text = self._extract_stream_delta(chunk)
+                if delta_text:
+                    yield delta_text
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            msg = "读取百炼聊天模型流式结果失败"
+            raise AlibabaModelStudioInvocationError(msg) from exc
+
     def _get_client(self) -> Any:
         """延迟初始化 OpenAI 兼容客户端。"""
         if self._client is None:
@@ -248,3 +301,35 @@ class AlibabaModelStudioClient:
             msg = "百炼向量模型返回格式非法"
             raise AlibabaModelStudioInvocationError(msg)
         return [float(value) for value in raw_embedding]
+
+    @staticmethod
+    def _extract_stream_delta(chunk: Any) -> str:
+        """从流式 chunk 中提取文本增量。"""
+        choices = getattr(chunk, "choices", [])
+        if not choices:
+            return ""
+
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            return ""
+
+        content = getattr(delta, "content", None)
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            # 某些兼容实现会把内容拆成分段对象列表，这里统一拼回纯文本。
+            pieces: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text_value = item.get("text")
+                    if isinstance(text_value, str):
+                        pieces.append(text_value)
+                    continue
+
+                text_value = getattr(item, "text", None)
+                if isinstance(text_value, str):
+                    pieces.append(text_value)
+            return "".join(pieces)
+
+        return ""

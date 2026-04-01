@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -40,4 +41,13 @@ class ChatModelClient(Protocol):
         temperature: float | None = None,
     ) -> str:
         """执行一次聊天补全并返回文本结果。"""
+        ...
+
+    def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None = None,
+    ) -> Iterator[str]:
+        """执行一次流式聊天补全，并按顺序返回文本增量。"""
         ...

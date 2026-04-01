@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from baozhi_rag.api.routes import router
 from baozhi_rag.app.exception_handlers import register_exception_handlers
@@ -61,6 +62,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.dependency_overrides[get_settings] = lambda: current_settings
     register_exception_handlers(app)
+
+    if current_settings.cors_allow_origins or current_settings.cors_allow_origin_regex:
+        # 先注册 CORS，再注册 request_id 中间件，确保预检请求也能携带追踪头。
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=current_settings.cors_allow_origins,
+            allow_origin_regex=current_settings.cors_allow_origin_regex,
+            allow_credentials=current_settings.cors_allow_credentials,
+            allow_methods=current_settings.cors_allow_methods,
+            allow_headers=current_settings.cors_allow_headers,
+            expose_headers=current_settings.cors_expose_headers,
+        )
 
     @app.middleware("http")
     async def attach_request_id(

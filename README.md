@@ -112,6 +112,25 @@ Copy-Item .env.example .env
 - 文档地址：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/health/live`
 - 文件上传：`POST http://127.0.0.1:8000/files/upload`
+- RAG 聊天：`POST http://127.0.0.1:8000/chat/completions`
+
+## 跨域配置
+
+后端现在支持通过环境变量控制 CORS。只有在配置了 `CORS_ALLOW_ORIGINS` 或 `CORS_ALLOW_ORIGIN_REGEX` 时，应用才会启用跨域中间件。
+
+- `.env.example` 默认放开常见本机前端地址：`5173`、`3000`
+- 多个来源、方法或请求头使用英文逗号分隔
+- 默认会暴露 `X-Request-ID` 响应头，便于前端联调、日志检索和问题追踪
+- 如果前后端通过 Cookie 维持会话，需要把 `CORS_ALLOW_CREDENTIALS` 调整为 `true`
+
+示例：
+
+```powershell
+CORS_ALLOW_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+CORS_ALLOW_METHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
+CORS_ALLOW_HEADERS=Content-Type,Authorization,X-Request-ID
+CORS_EXPOSE_HEADERS=X-Request-ID
+```
 
 ## 常用命令
 
@@ -216,6 +235,74 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 }
 ```
 
+## RAG 聊天
+
+当前版本新增 `POST /chat/completions` 接口，用于基于知识库检索结果执行聊天补全，并支持 SSE 流式输出。
+
+- 请求体字段：`messages`
+- 可选字段：`retrieval_size`、`temperature`、`stream`
+- 检索策略：默认使用最后一条 `user` 消息作为检索查询
+- 风控约束：回答只允许基于召回证据生成；证据不足时会返回兜底提示
+- 非流式成功响应中的业务结果放在 `data` 字段
+- 流式响应类型：`text/event-stream`
+- 流式事件类型：`context`、`delta`、`done`
+
+非流式示例：
+
+```powershell
+curl -X POST "http://127.0.0.1:8000/chat/completions" `
+  -H "Content-Type: application/json" `
+  -d '{
+    "messages": [
+      {"role": "user", "content": "什么是免赔额"}
+    ],
+    "retrieval_size": 4
+  }'
+```
+
+流式示例：
+
+```powershell
+curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
+  -H "Content-Type: application/json" `
+  -d '{
+    "messages": [
+      {"role": "user", "content": "什么是免赔额"}
+    ],
+    "retrieval_size": 4,
+    "stream": true
+  }'
+```
+
+非流式响应示例：
+
+```json
+{
+  "state": "success",
+  "message": "聊天完成",
+  "data": {
+    "answer": "免赔额通常指理赔时需要由被保险人自行承担的部分。[1]",
+    "retrieval_query": "什么是免赔额",
+    "citation_count": 1,
+    "citations": [
+      {
+        "chunk_id": "chunk-1",
+        "file_id": "file-1",
+        "source_filename": "保险条款.docx",
+        "storage_key": "2026/03/31/file-1_保险条款.docx",
+        "chunk_index": 0,
+        "char_count": 20,
+        "content": "免赔额是指理赔时由被保险人自行承担的金额。",
+        "merged_terms": ["免赔额"],
+        "score": 0.98
+      }
+    ],
+    "finish_reason": "stop"
+  },
+  "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1"
+}
+```
+
 ## 成功响应规范
 
 当前版本统一采用以下成功响应外壳：
@@ -272,75 +359,53 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 - `message` 使用面向用户或调用方的可读提示
 - `request_id` 用于日志检索、审计追踪和问题定位
 
-## 本机检索基础设施
+## 服务器部署
 
-仓库提供了本机开发用的 `Milvus + Elasticsearch` 容器编排文件：`docker-compose.search.yml`。
-其中 Elasticsearch 会在构建时自动安装 IK 分词插件。
+服务器部署请优先使用 `docker-compose.server.yml`，该编排与本机联调版的主要区别是：
 
-- `Elasticsearch`：`http://127.0.0.1:9200`
-- `Milvus gRPC`：`127.0.0.1:19530`
-- `Milvus Health`：`http://127.0.0.1:9091/healthz`
-- `MinIO`：`http://127.0.0.1:9001`
+- 仅对外暴露 `Nginx` 的 `80` 端口
+- `app`、`Elasticsearch`、`Milvus`、`MinIO` 只在容器内网通信
+- Nginx 已补充 SSE 代理参数，适配 `/chat/completions` 的流式输出
 
-启动：
+部署步骤：
 
 ```powershell
-docker compose -f docker-compose.search.yml up -d
+cp .env.example .env
+vi .env
+docker compose -f docker-compose.server.yml up -d --build
 ```
 
-首次启动或改动了 Elasticsearch Dockerfile 后，建议先执行：
+建议至少确认以下环境变量已经填写：
+
+- `DASHSCOPE_API_KEY`
+- `BAILIAN_CHAT_MODEL`
+- `CHUNK_EMBEDDING_MODEL`
+- `CHUNK_EMBEDDING_DIMENSIONS`
+
+常用排查命令：
 
 ```powershell
-docker compose -f docker-compose.search.yml build elasticsearch
+docker compose -f docker-compose.server.yml ps
+docker compose -f docker-compose.server.yml logs -f nginx
+docker compose -f docker-compose.server.yml logs -f app
+docker compose -f docker-compose.server.yml logs -f elasticsearch
+docker compose -f docker-compose.server.yml logs -f milvus
 ```
 
-查看状态：
+停止与清理：
 
 ```powershell
-docker compose -f docker-compose.search.yml ps
-docker compose -f docker-compose.search.yml logs -f elasticsearch
-docker compose -f docker-compose.search.yml logs -f milvus
+docker compose -f docker-compose.server.yml down
+docker compose -f docker-compose.server.yml down -v
 ```
 
-停止：
+如果服务器前面还会挂云负载均衡、CDN 或 HTTPS 网关，建议把 TLS 终止放在最外层；当前仓库内置的 Nginx 主要负责反向代理和 SSE 透传。
 
-```powershell
-docker compose -f docker-compose.search.yml down
-```
+### tests 目录说明
 
-如果需要连同卷数据一起清空：
-
-```powershell
-docker compose -f docker-compose.search.yml down -v
-```
-
-当前应用要求同时准备 Elasticsearch 与 Milvus，复制 `.env.example` 后请确保本机检索基础设施可用：
-
-- `ES_URL=http://127.0.0.1:9200`
-- `ES_INDEX_NAME=document_chunks`
-- `ES_VERIFY_CERTS=false`
-- `MILVUS_URI=http://127.0.0.1:19530`
-- `MILVUS_DB_NAME=default`
-- `MILVUS_COLLECTION_NAME=document_chunk_vectors`
-
-要启用当前上传与检索链路，请确保已配置阿里云百炼向量化参数：
-
-- `DASHSCOPE_API_KEY=<你的百炼密钥>`
-- `CHUNK_EMBEDDING_MODEL=text-embedding-v4`
-- `CHUNK_EMBEDDING_DIMENSIONS=1024`
-
-说明：
-
-- 当前工程通过百炼 OpenAI 兼容接口统一封装 embedding 能力，后续接入聊天模型时可直接复用同一客户端。
-- ES 只承载文本和结构化检索字段，不再存储 `content_embedding`；其中 `content` 使用 IK 中文分词。
-- Milvus 承载 `content_embedding` 向量集合，若向量维度与当前配置不一致，需要重建对应集合。
-- 如果在接入 IK 前已经创建过 `document_chunks` 索引，需要删除旧索引并重建，才能让新的 analyzer 生效。
-
-说明：
-
-- 该编排仅面向本机开发与联调，不适用于生产环境。
-- Elasticsearch 为单节点并关闭安全认证，便于本地调试。
-- Milvus 采用官方 standalone 模式，并带上 `etcd` 与 `MinIO` 依赖容器。
+- `tests/` 保留在仓库中，用于本地开发、CI 和回归验证
+- 镜像构建时不会复制 `tests/`，因为 [.dockerignore](/e:/PracticalProject/BaozhiRAG/.dockerignore#L1) 已排除该目录
+- 运行容器不依赖 `tests/`，服务器上无需单独删除它
 
 ## 提交规范
 
