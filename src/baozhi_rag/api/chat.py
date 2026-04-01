@@ -55,8 +55,7 @@ def create_chat_completion(
     request_id = ensure_request_id(request)
     # 在 API 边界先完成 schema 到领域消息的转换，避免服务层感知 HTTP 模型。
     messages = [
-        ChatMessage(role=message.role, content=message.content)
-        for message in payload.messages
+        ChatMessage(role=message.role, content=message.content) for message in payload.messages
     ]
 
     if payload.stream:
