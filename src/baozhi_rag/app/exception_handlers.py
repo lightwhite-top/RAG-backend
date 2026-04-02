@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from http import HTTPStatus
 
@@ -150,6 +151,8 @@ def _log_exception(
     exc: Exception | None = None,
 ) -> None:
     """按统一格式记录异常日志。"""
+    detailed_message = _build_log_message(message=message, exc=exc)
+
     if exc is None:
         LOGGER.warning(
             "request_failed request_id=%s method=%s path=%s status_code=%s error_code=%s message=%s",
@@ -158,7 +161,7 @@ def _log_exception(
             request.url.path,
             status_code,
             error_code,
-            message,
+            detailed_message,
         )
         return
 
@@ -169,9 +172,86 @@ def _log_exception(
         request.url.path,
         status_code,
         error_code,
-        message,
+        detailed_message,
         exc_info=(type(exc), exc, exc.__traceback__),
     )
+
+
+def _build_log_message(*, message: str, exc: Exception | None) -> str:
+    """为日志消息附加根因摘要，避免只剩泛化错误提示。"""
+    if exc is None:
+        return message
+
+    cause_summary = _summarize_root_cause(exc)
+    if not cause_summary:
+        return message
+    return f"{message}; {cause_summary}"
+
+
+def _summarize_root_cause(exc: Exception) -> str:
+    """提取异常链最深层根因中的关键字段。"""
+    root_cause = _resolve_root_cause(exc)
+    if root_cause is None:
+        return ""
+
+    parts = [f"cause_type={type(root_cause).__name__}"]
+
+    status_code = getattr(root_cause, "status_code", None)
+    if status_code is not None:
+        parts.append(f"cause_status_code={status_code}")
+
+    error_code = getattr(root_cause, "code", None)
+    if error_code:
+        parts.append(f"cause_code={error_code}")
+
+    request_id = getattr(root_cause, "request_id", None)
+    if request_id:
+        parts.append(f"cause_request_id={request_id}")
+
+    raw_message = str(root_cause).strip()
+    if raw_message:
+        parts.append(f"cause_message={_truncate_log_text(raw_message)}")
+
+    body = getattr(root_cause, "body", None)
+    if body is not None:
+        parts.append(f"cause_body={_truncate_log_text(_serialize_log_value(body))}")
+
+    return " ".join(parts)
+
+
+def _resolve_root_cause(exc: Exception) -> Exception | None:
+    """沿异常链找到最深层根因。"""
+    current: Exception | None = exc
+    last_cause: Exception | None = None
+
+    for _ in range(8):
+        if current is None:
+            break
+        next_cause = current.__cause__ or current.__context__
+        if not isinstance(next_cause, Exception):
+            break
+        last_cause = next_cause
+        current = next_cause
+
+    return last_cause
+
+
+def _serialize_log_value(value: object) -> str:
+    """把异常 body 等复杂字段转换为可检索文本。"""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _truncate_log_text(value: str, *, max_length: int = 500) -> str:
+    """限制日志字段长度，避免错误体过长污染日志。"""
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[:max_length]}..."
 
 
 def _translate_validation_error(error: dict[str, object]) -> str:

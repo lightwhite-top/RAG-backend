@@ -243,9 +243,10 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 - 可选字段：`retrieval_size`、`temperature`、`stream`
 - 检索策略：默认使用最后一条 `user` 消息作为检索查询
 - 风控约束：回答只允许基于召回证据生成；证据不足时会返回兜底提示
-- 非流式成功响应中的业务结果放在 `data` 字段
+- 非流式响应优先消费 `data.assistant_message` 与 `data.trace`
+- `data.answer`、`data.citations`、`data.finish_reason` 等旧字段仍保留一段兼容期
 - 流式响应类型：`text/event-stream`
-- 流式事件类型：`context`、`delta`、`done`
+- 流式事件类型：`message.start`、`citation.add`、`message.delta`、`message.end`、`message.error`
 
 非流式示例：
 
@@ -281,11 +282,55 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
   "state": "success",
   "message": "聊天完成",
   "data": {
+    "assistant_message": {
+      "message_id": "9d3e0cbbe9f24c4a9fbeb26d61a11c8d",
+      "role": "assistant",
+      "plain_text": "免赔额通常指理赔时需要由被保险人自行承担的部分。",
+      "content_blocks": [
+        {
+          "block_id": "blk-1",
+          "block_type": "markdown",
+          "text": "免赔额通常指理赔时需要由被保险人自行承担的部分。",
+          "citation_ids": ["cit-1"],
+          "sequence": 1
+        }
+      ],
+      "citations": [
+        {
+          "id": "cit-1",
+          "chunk_id": "chunk-1",
+          "file_id": "file-1",
+          "source_filename": "保险条款.docx",
+          "storage_key": "2026/03/31/file-1_保险条款.docx",
+          "chunk_index": 0,
+          "char_count": 20,
+          "content": "免赔额是指理赔时由被保险人自行承担的金额。",
+          "snippet": "免赔额是指理赔时由被保险人自行承担的金额。",
+          "merged_terms": ["免赔额"],
+          "score": 0.98,
+          "heading_path": [],
+          "section_title": null,
+          "content_type": "paragraph",
+          "source_anchor": "chunk:0"
+        }
+      ],
+      "finish_reason": "stop"
+    },
+    "trace": {
+      "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1",
+      "original_query": "什么是免赔额",
+      "retrieval_query": "什么是免赔额",
+      "rewrite_applied": false,
+      "model": "qwen-plus",
+      "usage": null,
+      "latency_ms": 128
+    },
     "answer": "免赔额通常指理赔时需要由被保险人自行承担的部分。[1]",
     "retrieval_query": "什么是免赔额",
     "citation_count": 1,
     "citations": [
       {
+        "id": "cit-1",
         "chunk_id": "chunk-1",
         "file_id": "file-1",
         "source_filename": "保险条款.docx",
@@ -293,8 +338,13 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
         "chunk_index": 0,
         "char_count": 20,
         "content": "免赔额是指理赔时由被保险人自行承担的金额。",
+        "snippet": "免赔额是指理赔时由被保险人自行承担的金额。",
         "merged_terms": ["免赔额"],
-        "score": 0.98
+        "score": 0.98,
+        "heading_path": [],
+        "section_title": null,
+        "content_type": "paragraph",
+        "source_anchor": "chunk:0"
       }
     ],
     "finish_reason": "stop"
@@ -302,6 +352,14 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
   "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1"
 }
 ```
+
+流式事件说明：
+
+- `message.start`：声明消息开始，返回 `message_id`、`request_id`、查询链路与模型信息
+- `citation.add`：增量下发单条可展示的引用卡片
+- `message.delta`：返回正文增量，包含 `seq`、`offset` 与本次 `text`
+- `message.end`：返回最终 `assistant_message` 与 `trace`
+- `message.error`：当 SSE 已开始后发生异常时返回错误事件
 
 ## 成功响应规范
 
