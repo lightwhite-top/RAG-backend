@@ -54,7 +54,8 @@ case "${cmd}" in
     docker compose -f "${COMPOSE_FILE}" ps
     ;;
   rebuild)
-    docker compose -f "${COMPOSE_FILE}" up -d --build
+    docker compose -f "${COMPOSE_FILE}" build --progress=plain
+    docker compose -f "${COMPOSE_FILE}" up -d
     docker compose -f "${COMPOSE_FILE}" ps
     ;;
   logs)
@@ -72,7 +73,8 @@ case "${cmd}" in
     ;;
   deploy)
     git pull --ff-only
-    docker compose -f "${COMPOSE_FILE}" up -d --build
+    docker compose -f "${COMPOSE_FILE}" build --progress=plain
+    docker compose -f "${COMPOSE_FILE}" up -d
     docker compose -f "${COMPOSE_FILE}" ps
     ;;
   health)

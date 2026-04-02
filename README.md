@@ -430,7 +430,8 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 ```powershell
 cp .env.example .env
 vi .env
-docker compose -f docker-compose.server.yml up -d --build
+docker compose -f docker-compose.server.yml build --progress=plain
+docker compose -f docker-compose.server.yml up -d
 ```
 
 也可以使用仓库顶层脚本一键部署（脚本内命令为分开执行）：
@@ -446,6 +447,20 @@ chmod +x deploy_server.sh
 - `BAILIAN_CHAT_MODEL`
 - `CHUNK_EMBEDDING_MODEL`
 - `CHUNK_EMBEDDING_DIMENSIONS`
+
+服务端镜像构建默认会通过 `.env` 中的以下变量使用腾讯云镜像源，适合腾讯云服务器环境：
+
+- `APP_BUILD_APT_MIRROR=https://mirrors.cloud.tencent.com`
+- `APP_BUILD_PYPI_MIRROR=https://mirrors.cloud.tencent.com/pypi/simple`
+
+如果构建阶段在 `uv sync --frozen --no-dev --no-install-project` 卡住，可优先保留 `--progress=plain` 观察具体停留的包名；若怀疑镜像源同步不及时，可临时切换到官方源：
+
+```powershell
+APP_BUILD_APT_MIRROR=https://deb.debian.org
+APP_BUILD_PYPI_MIRROR=https://pypi.org/simple
+docker compose -f docker-compose.server.yml build --progress=plain
+docker compose -f docker-compose.server.yml up -d
+```
 
 常用排查命令：
 

@@ -21,6 +21,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 服务端部署默认走腾讯云镜像源；如需切换，可在 .env 中覆盖。
+        APT_MIRROR: ${APP_BUILD_APT_MIRROR:-https://mirrors.cloud.tencent.com}
+        PYPI_MIRROR: ${APP_BUILD_PYPI_MIRROR:-https://mirrors.cloud.tencent.com/pypi/simple}
     image: baozhi-rag-app:latest
     container_name: baozhi-rag-app
     env_file:
