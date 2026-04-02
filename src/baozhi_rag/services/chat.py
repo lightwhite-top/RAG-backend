@@ -299,7 +299,9 @@ class ChatService:
         original_query = self._resolve_retrieval_query(normalized_messages)
         retrieval_query = original_query
         hits = self._chunk_search_service.search(retrieval_query, retrieval_size)
-        citations = [self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)]
+        citations = [
+            self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
+        ]
 
         if not citations:
             return _PreparedChatCompletion(

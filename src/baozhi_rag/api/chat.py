@@ -457,9 +457,9 @@ def _build_assistant_message(
         fallback_text=resolved_plain_text,
         citations=citations,
     )
-    normalized_plain_text = resolved_plain_text or "\n\n".join(
-        block.text for block in block_items
-    ).strip()
+    normalized_plain_text = (
+        resolved_plain_text or "\n\n".join(block.text for block in block_items).strip()
+    )
     return ChatAssistantMessage(
         message_id=message_id,
         plain_text=normalized_plain_text,
