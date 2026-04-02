@@ -32,9 +32,11 @@ RUN sed -i \
 
 RUN pip install --no-cache-dir uv
 
-COPY pyproject.toml uv.lock README.md ./
+# 依赖层只受锁文件和项目元数据影响，避免 README 改动导致依赖重装。
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
