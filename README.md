@@ -242,7 +242,7 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 - 请求体字段：`messages`
 - 可选字段：`retrieval_size`、`temperature`、`stream`
 - 检索策略：默认使用最后一条 `user` 消息作为检索查询
-- 风控约束：回答只允许基于召回证据生成；证据不足时会返回兜底提示
+- 风控约束：命中证据时优先基于证据回答；未命中证据时仍会调用模型，但高风险问题必须明确说明当前无知识库依据，不能输出条款或理赔类确定性结论
 - 非流式响应优先消费 `data.assistant_message` 与 `data.trace`
 - `data.answer`、`data.citations`、`data.finish_reason` 等旧字段仍保留一段兼容期
 - 流式响应类型：`text/event-stream`
@@ -431,6 +431,13 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 cp .env.example .env
 vi .env
 docker compose -f docker-compose.server.yml up -d --build
+```
+
+也可以使用仓库顶层脚本一键部署（脚本内命令为分开执行）：
+
+```bash
+chmod +x deploy_server.sh
+./deploy_server.sh
 ```
 
 建议至少确认以下环境变量已经填写：

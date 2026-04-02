@@ -92,7 +92,6 @@ class _PreparedChatCompletion:
     retrieval_query: str
     citations: list[ChatCitation]
     model_messages: list[ChatMessage]
-    fallback_answer: str | None
     rewrite_applied: bool = False
 
 
@@ -149,34 +148,20 @@ class ChatService:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
         completion = self._prepare_completion(messages, retrieval_size)
-        if completion.fallback_answer is not None:
-            # 金融保险场景下证据为空时直接兜底，避免模型在无依据时继续生成。
-            plain_text, content_blocks = self._build_render_content(
-                completion.fallback_answer,
-                completion.citations,
-                finish_reason="context_exhausted",
-            )
-            return ChatCompletionResult(
-                answer=completion.fallback_answer,
-                plain_text=plain_text,
-                content_blocks=content_blocks,
-                original_query=completion.original_query,
-                retrieval_query=completion.retrieval_query,
-                citations=completion.citations,
-                finish_reason="context_exhausted",
-                rewrite_applied=completion.rewrite_applied,
-            )
-
         answer = self._chat_client.complete_chat(
             completion.model_messages,
             temperature=temperature,
         ).strip()
+        finish_reason = "stop"
         if not answer:
             answer = self._FALLBACK_ANSWER
+            if not completion.citations:
+                # 即使已经放开“无命中仍调用模型”，也要为模型空输出保留明确兜底。
+                finish_reason = "context_exhausted"
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
-            finish_reason="stop",
+            finish_reason=finish_reason,
         )
 
         return ChatCompletionResult(
@@ -186,7 +171,7 @@ class ChatService:
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
             citations=completion.citations,
-            finish_reason="stop",
+            finish_reason=finish_reason,
             rewrite_applied=completion.rewrite_applied,
         )
 
@@ -224,33 +209,6 @@ class ChatService:
             },
         )
 
-        if completion.fallback_answer is not None:
-            plain_text, content_blocks = self._build_render_content(
-                completion.fallback_answer,
-                completion.citations,
-                finish_reason="context_exhausted",
-            )
-            yield ChatStreamEvent(
-                event="delta",
-                data={"content": completion.fallback_answer},
-            )
-            yield ChatStreamEvent(
-                event="done",
-                data={
-                    "answer": completion.fallback_answer,
-                    "plain_text": plain_text,
-                    "content_blocks": [
-                        self._serialize_content_block(item) for item in content_blocks
-                    ],
-                    "original_query": completion.original_query,
-                    "retrieval_query": completion.retrieval_query,
-                    "citations": citations_payload,
-                    "finish_reason": "context_exhausted",
-                    "rewrite_applied": completion.rewrite_applied,
-                },
-            )
-            return
-
         answer_parts: list[str] = []
         for delta in self._chat_client.stream_chat(
             completion.model_messages,
@@ -261,11 +219,16 @@ class ChatService:
             answer_parts.append(delta)
             yield ChatStreamEvent(event="delta", data={"content": delta})
 
-        answer = "".join(answer_parts).strip() or self._FALLBACK_ANSWER
+        answer = "".join(answer_parts).strip()
+        finish_reason = "stop"
+        if not answer:
+            answer = self._FALLBACK_ANSWER
+            if not completion.citations:
+                finish_reason = "context_exhausted"
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
-            finish_reason="stop",
+            finish_reason=finish_reason,
         )
         yield ChatStreamEvent(
             event="done",
@@ -276,7 +239,7 @@ class ChatService:
                 "original_query": completion.original_query,
                 "retrieval_query": completion.retrieval_query,
                 "citations": citations_payload,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
                 "rewrite_applied": completion.rewrite_applied,
             },
         )
@@ -303,16 +266,6 @@ class ChatService:
             self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
         ]
 
-        if not citations:
-            return _PreparedChatCompletion(
-                original_query=original_query,
-                retrieval_query=retrieval_query,
-                citations=[],
-                model_messages=[],
-                fallback_answer=self._FALLBACK_ANSWER,
-                rewrite_applied=False,
-            )
-
         return _PreparedChatCompletion(
             original_query=original_query,
             retrieval_query=retrieval_query,
@@ -322,7 +275,6 @@ class ChatService:
                 retrieval_query=retrieval_query,
                 citations=citations,
             ),
-            fallback_answer=None,
             rewrite_applied=False,
         )
 
@@ -382,6 +334,9 @@ class ChatService:
         citations: list[ChatCitation],
     ) -> str:
         """把检索结果格式化为模型可消费的证据上下文。"""
+        if not citations:
+            return self._build_no_knowledge_context_prompt(retrieval_query=retrieval_query)
+
         sections = [f"用户当前问题：{retrieval_query}", "以下是可引用的知识库证据："]
 
         for index, citation in enumerate(citations, start=1):
@@ -399,6 +354,27 @@ class ChatService:
 
         sections.append("请只基于上述证据回答，不要引用未提供的外部知识。")
         return "\n\n".join(sections)
+
+    def _build_no_knowledge_context_prompt(self, *, retrieval_query: str) -> str:
+        """构造未命中知识库时的模型约束提示。"""
+        return "\n\n".join(
+            [
+                f"用户当前问题：{retrieval_query}",
+                "当前轮未检索到可引用的知识库证据。",
+                (
+                    "你仍然需要回答，但必须遵守以下约束："
+                    "对问候、身份说明、能力介绍、通用概念解释，可以直接给出简洁中文回答；"
+                    "对涉及具体产品条款、保障责任、免责、理赔、承保、金额计算等高风险问题，"
+                    "不得伪造依据或给出确定性承诺。"
+                ),
+                (
+                    "如果当前问题需要保单条款、业务系统记录或知识库材料支撑，"
+                    "必须明确说明“当前没有检索到可支撑结论的知识库材料”，"
+                    "只能提供一般性说明，并建议补充材料或转人工核实。"
+                ),
+                "当前没有证据可引用，不要输出 [1][2] 这类引用编号。",
+            ]
+        )
 
     def _build_citation(self, hit: ChunkSearchHit, *, index: int) -> ChatCitation:
         """把检索命中结果转换为聊天引用对象。"""
@@ -477,7 +453,7 @@ class ChatService:
         if not cleaned_answer:
             return "", []
 
-        if finish_reason != "stop" or not citations:
+        if finish_reason != "stop":
             return cleaned_answer, [
                 ChatContentBlock(
                     block_id="blk-1",
@@ -487,6 +463,9 @@ class ChatService:
                     sequence=1,
                 )
             ]
+
+        if not citations:
+            return self._build_uncited_render_content(cleaned_answer)
 
         raw_blocks = [
             block.strip()
@@ -543,6 +522,45 @@ class ChatService:
 
         plain_text = "\n\n".join(block.text for block in parsed_blocks).strip()
         return plain_text or cleaned_answer, parsed_blocks
+
+    def _build_uncited_render_content(
+        self,
+        answer: str,
+    ) -> tuple[str, list[ChatContentBlock]]:
+        """在没有引用证据时，仍按正常正文块输出模型回答。"""
+        raw_blocks = [
+            block.strip() for block in self._BLOCK_SPLIT_PATTERN.split(answer) if block.strip()
+        ]
+        parsed_blocks: list[ChatContentBlock] = []
+
+        for sequence, raw_block in enumerate(raw_blocks, start=1):
+            block_text = self._strip_citation_markers(raw_block).strip()
+            if not block_text:
+                continue
+            parsed_blocks.append(
+                ChatContentBlock(
+                    block_id=f"blk-{sequence}",
+                    block_type="markdown",
+                    text=block_text,
+                    citation_ids=[],
+                    sequence=sequence,
+                )
+            )
+
+        if not parsed_blocks:
+            stripped_answer = self._strip_citation_markers(answer).strip() or answer
+            return stripped_answer, [
+                ChatContentBlock(
+                    block_id="blk-1",
+                    block_type="markdown",
+                    text=stripped_answer,
+                    citation_ids=[],
+                    sequence=1,
+                )
+            ]
+
+        plain_text = "\n\n".join(block.text for block in parsed_blocks).strip()
+        return plain_text or answer, parsed_blocks
 
     def _resolve_block_citation_ids(
         self,
