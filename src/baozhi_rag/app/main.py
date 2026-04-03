@@ -5,15 +5,19 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from baozhi_rag.api.dependencies import get_current_user
 from baozhi_rag.api.routes import router
 from baozhi_rag.app.exception_handlers import register_exception_handlers
 from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.logging import configure_logging
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
+from baozhi_rag.domain.user import CurrentUser
+from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.schemas.common import SuccessResponse
@@ -44,6 +48,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             一个异步上下文管理器，在启动时初始化日志并在关闭时记录停机日志。
         """
         configure_logging(current_settings)
+        database_manager = DatabaseManager.from_settings(current_settings)
+        database_manager.ensure_ready()
+        database_manager.ensure_schema()
         AlibabaModelStudioClient.from_settings(current_settings).ensure_ready()
         HybridChunkStore.from_settings(current_settings).ensure_ready()
         LOGGER.info(
@@ -89,11 +96,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
 
     @app.get("/", response_model=SuccessResponse[ServiceInfoResponse], summary="服务信息")
-    def root(request: Request) -> SuccessResponse[ServiceInfoResponse]:
+    def root(
+        request: Request,
+        _: Annotated[CurrentUser, Depends(get_current_user)],
+    ) -> SuccessResponse[ServiceInfoResponse]:
         """返回服务基础信息，便于环境探活与调试。
 
         参数:
             request: 当前 HTTP 请求对象，用于附加 request_id。
+            _: 当前登录用户，仅用于在根路径上统一启用鉴权。
 
         返回:
             包含服务名、运行环境、版本号和文档地址的服务信息响应。

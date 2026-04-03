@@ -79,7 +79,7 @@ class ChatStreamEvent:
 class ChatChunkSearcher(Protocol):
     """聊天服务依赖的检索协议。"""
 
-    def search(self, query_text: str, size: int) -> list[ChunkSearchHit]:
+    def search(self, query_text: str, size: int, *, viewer_user_id: str = "") -> list[ChunkSearchHit]:
         """按查询文本返回相关 chunk。"""
         ...
 
@@ -133,6 +133,7 @@ class ChatService:
         *,
         retrieval_size: int,
         temperature: float | None = None,
+        viewer_user_id: str = "",
     ) -> ChatCompletionResult:
         """执行一次带检索增强的非流式聊天补全。
 
@@ -147,7 +148,7 @@ class ChatService:
         异常:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
-        completion = self._prepare_completion(messages, retrieval_size)
+        completion = self._prepare_completion(messages, retrieval_size, viewer_user_id=viewer_user_id)
         answer = self._chat_client.complete_chat(
             completion.model_messages,
             temperature=temperature,
@@ -181,6 +182,7 @@ class ChatService:
         *,
         retrieval_size: int,
         temperature: float | None = None,
+        viewer_user_id: str = "",
     ) -> Iterator[ChatStreamEvent]:
         """执行一次带检索增强的流式聊天补全。
 
@@ -195,7 +197,7 @@ class ChatService:
         异常:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
-        completion = self._prepare_completion(messages, retrieval_size)
+        completion = self._prepare_completion(messages, retrieval_size, viewer_user_id=viewer_user_id)
         citations_payload = [self._serialize_citation(item) for item in completion.citations]
 
         # 先把检索上下文透出给调用方，便于前端同步展示证据和审计信息。
@@ -248,6 +250,8 @@ class ChatService:
         self,
         messages: list[ChatMessage],
         retrieval_size: int,
+        *,
+        viewer_user_id: str = "",
     ) -> _PreparedChatCompletion:
         """完成消息校验、检索和模型提示构造。"""
         if not messages:
@@ -261,7 +265,11 @@ class ChatService:
         # 当前最稳定的检索查询是最后一条用户追问，而不是整段会话拼接文本。
         original_query = self._resolve_retrieval_query(normalized_messages)
         retrieval_query = original_query
-        hits = self._chunk_search_service.search(retrieval_query, retrieval_size)
+        hits = self._chunk_search_service.search(
+            retrieval_query,
+            retrieval_size,
+            viewer_user_id=viewer_user_id,
+        )
         citations = [
             self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
         ]
@@ -587,3 +595,8 @@ class ChatService:
         """移除正文中的引用编号标记，保留纯展示文本。"""
         stripped = self._CITATION_PATTERN.sub("", text)
         return re.sub(r"[ \t]{2,}", " ", stripped)
+
+
+
+
+

@@ -89,8 +89,12 @@ class DocumentChunk:
     char_count: int
     # 上传时的原始文件名
     source_filename: str
-    # 文件在本地存储中的相对路径
+    # 文件在对象存储中的对象键
     storage_key: str
+    # 上传该文件的用户 ID
+    uploader_user_id: str = ""
+    # 文件可见性范围
+    visibility_scope: str = ""
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=list)
     # 向量化
@@ -103,6 +107,8 @@ class DocumentChunk:
             "file_id": self.file_id,
             "source_filename": self.source_filename,
             "storage_key": self.storage_key,
+            "uploader_user_id": self.uploader_user_id,
+            "visibility_scope": self.visibility_scope,
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
             "content": self.content,
@@ -982,3 +988,4 @@ class DocumentChunkService:
             )
 
         return "\n".join(wrapped_lines)
+

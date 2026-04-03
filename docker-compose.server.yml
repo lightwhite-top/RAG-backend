@@ -34,6 +34,20 @@ services:
       APP_DEBUG: "false"
       UPLOAD_ROOT_DIR: /app/data/uploads
       DOC_CONVERT_TEMP_DIR: /app/data/tmp/converted
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-baozhi_rag}
+      MYSQL_USERNAME: ${MYSQL_USERNAME:-baozhi}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-baozhi123456}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-jwt-secret-before-production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_ACCESS_TOKEN_EXPIRE_DAYS: ${JWT_ACCESS_TOKEN_EXPIRE_DAYS:-7}
+      OSS_REGION: ${OSS_REGION:-cn-hangzhou}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}
+      OSS_BUCKET_NAME: ${OSS_BUCKET_NAME}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET}
+      OSS_OBJECT_PREFIX: ${OSS_OBJECT_PREFIX:-knowledge-files}
       ES_URL: http://elasticsearch:9200
       ES_VERIFY_CERTS: "false"
       MILVUS_URI: http://milvus:19530
@@ -42,6 +56,8 @@ services:
     volumes:
       - app_data:/app/data
     depends_on:
+      mysql:
+        condition: service_healthy
       elasticsearch:
         condition: service_healthy
       milvus:
@@ -56,6 +72,32 @@ services:
       timeout: 10s
       retries: 10
       start_period: 40s
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    container_name: baozhi-rag-mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-baozhi_rag}
+      MYSQL_USER: ${MYSQL_USERNAME:-baozhi}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-baozhi123456}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
     restart: unless-stopped
 
   elasticsearch:
@@ -161,7 +203,12 @@ services:
 
 volumes:
   app_data:
+  mysql_data:
   elasticsearch_data:
   milvus_etcd_data:
   milvus_minio_data:
   milvus_data:
+
+
+
+

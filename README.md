@@ -111,6 +111,9 @@ Copy-Item .env.example .env
 
 - 文档地址：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/health/live`
+- 发送注册验证码：`POST http://127.0.0.1:8000/auth/register/code`
+- 用户注册：`POST http://127.0.0.1:8000/auth/register`
+- 用户登录：`POST http://127.0.0.1:8000/auth/login`
 - 文件上传：`POST http://127.0.0.1:8000/files/upload`
 - RAG 聊天：`POST http://127.0.0.1:8000/chat/completions`
 
@@ -156,9 +159,112 @@ just clean
 just run pytest -k health
 ```
 
+## 用户认证与用户管理
+
+当前版本已接入基于 `MySQL + JWT` 的用户体系。
+
+- 公开接口：`/auth/register/code`、`/auth/register`、`/auth/login`、`/health/live`、`/docs`、`/openapi.json`、`/redoc`
+- 受保护接口：根路径 `/`、`/files/upload`、`/search/chunks`、`/chat/completions`、`/auth/me`、`/auth/password`
+- 管理员接口：`/admin/users`
+- 登录标识固定为邮箱
+- 注册流程默认采用“先发邮箱验证码，再提交注册”的两步校验模式
+- JWT 默认有效期为 7 天
+- 当前版本不提供 `logout`，前端删除本地 token 即视为退出
+
+认证与注册邮箱验证码相关配置已写入 [.env.example](/e:/PracticalProject/BaozhiRAG/.env.example)。部署前至少需要补齐以下变量：
+
+```powershell
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=baozhi_rag
+MYSQL_USERNAME=baozhi
+MYSQL_PASSWORD=baozhi123456
+JWT_SECRET_KEY=replace-with-a-long-random-secret
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_DAYS=7
+OSS_REGION=cn-hangzhou
+OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
+OSS_BUCKET_NAME=your-bucket-name
+OSS_ACCESS_KEY_ID=your-access-key-id
+OSS_ACCESS_KEY_SECRET=your-access-key-secret
+OSS_OBJECT_PREFIX=knowledge-files
+REGISTRATION_CODE_SECRET=replace-with-a-long-random-registration-code-secret
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=notice@example.com
+SMTP_PASSWORD=replace-with-smtp-password
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+SMTP_FROM_EMAIL=notice@example.com
+SMTP_FROM_NAME=Baozhi RAG Service
+```
+
+其中注册验证码邮件的发件地址由 `SMTP_FROM_EMAIL` 决定，发件人展示名称由 `SMTP_FROM_NAME` 决定。
+
+登录成功后，请在业务请求头中携带：
+
+```text
+Authorization: Bearer <access_token>
+```
+
+### 认证接口
+
+- `POST /auth/register/code`
+  - 字段：`email`
+  - 返回：`expires_in`、`resend_after`
+  - 作用：向注册邮箱发送验证码邮件
+- `POST /auth/register`
+  - 字段：`email`、`password`、`username`、`verification_code`
+  - 默认创建 `user` 角色
+- `POST /auth/login`
+  - 字段：`email`、`password`
+  - 返回：`access_token`、`token_type`、`expires_in`、`expires_at`、`user`
+- `GET /auth/me`
+  - 返回当前登录用户信息
+- `PATCH /auth/me`
+  - 仅允许修改当前用户的 `username`
+- `PATCH /auth/password`
+  - 字段：`current_password`、`new_password`
+
+### 管理员接口
+
+- `GET /admin/users`
+- `GET /admin/users/{user_id}`
+- `POST /admin/users`
+- `PATCH /admin/users/{user_id}`
+- `DELETE /admin/users/{user_id}`
+
+管理员账号不会由应用自动创建，需要部署阶段手工插入数据库。推荐先生成 Argon2 密码哈希：
+
+```powershell
+uv run python -c "from pwdlib import PasswordHash; print(PasswordHash.recommended().hash('Admin12345'))"
+```
+
+然后执行 SQL：
+
+```sql
+INSERT INTO users (
+  id,
+  email,
+  username,
+  password_hash,
+  role,
+  created_at,
+  updated_at
+) VALUES (
+  'replace_with_uuid_hex',
+  'admin@example.com',
+  'admin_user',
+  'replace_with_argon2_hash',
+  'admin',
+  UTC_TIMESTAMP(),
+  UTC_TIMESTAMP()
+);
+```
+
 ## 文件上传
 
-当前版本提供 Word 文件上传、领域词增强、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
+当前版本提供 Word 文件上传、阿里云 OSS 原文持久化、用户级文件元数据管理、领域词增强、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
@@ -171,6 +277,11 @@ just run pytest -k health
 - 失败响应示例：`{"state": "error", "code": "unsupported_document_type", "message": "暂不支持的文件格式: .txt", "request_id": "7f6f4f9f..."}` 
 - 切块增强字段：`merged_terms`
 - 上传后会强制执行百炼 embedding，为 `chunk` 补充 `content_embedding`
+- 上传后的原始文件会持久化到阿里云 OSS，本地 `UPLOAD_ROOT_DIR` 仅作为临时解析目录
+- 管理员上传文件默认全员可检索；普通用户上传文件仅上传者本人可检索
+- 同一用户、同一文件名、内容相同：提示“文件重复入库”
+- 同一用户、同一文件名、内容不同：按最新版本覆盖旧文件
+- 同一用户、内容相同但文件名不同：提示“文件内容重复入库，已更新标题”
 - 上传后会自动写入 ES 文档索引与 Milvus 向量集合
 
 示例：
@@ -181,7 +292,8 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
   -F "files=@example.docx"
 ```
 
-上传目录通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`。
+`UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前只作为本地临时工作目录。
+阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
 默认领域词典文件位于 `src/baozhi_rag/domain/default_domain_terms.txt`，自定义扩展词典可通过 `DOMAIN_DICTIONARY_PATH` 配置。
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
@@ -196,11 +308,12 @@ Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NA
 - 查询参数：`q`
 - 可选参数：`size`
 - 默认返回条数：`SEARCH_DEFAULT_SIZE`
-- ES 检索字段：`content`、`merged_terms`
+- ES 检索字段：`content`、`merged_terms`、`uploader_user_id`、`visibility_scope`
   - `content` 使用 `ik_max_word` 建索引，`ik_smart` 做查询分析
-- Milvus 检索字段：`content_embedding`
+- Milvus 检索字段：`content_embedding`，并结合 `uploader_user_id`、`visibility_scope` 执行权限过滤
 - 结果融合策略：基于 ES 和 Milvus 的 Reciprocal Rank Fusion
 - 成功响应中的业务结果放在 `data` 字段
+- 检索权限规则：`visibility_scope = global` 的文件所有用户可见，`visibility_scope = owner_only` 的文件仅上传者本人可见
 
 示例：
 
@@ -422,7 +535,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 服务器部署请优先使用 `docker-compose.server.yml`，该编排与本机联调版的主要区别是：
 
 - 仅对外暴露 `Nginx` 的 `6888` 端口
-- `app`、`Elasticsearch`、`Milvus`、`MinIO` 只在容器内网通信
+- `app`、`MySQL`、`Elasticsearch`、`Milvus`、`MinIO` 只在容器内网通信
 - Nginx 已补充 SSE 代理参数，适配 `/chat/completions` 的流式输出
 
 部署步骤：
@@ -443,6 +556,14 @@ chmod +x deploy_server.sh
 
 建议至少确认以下环境变量已经填写：
 
+- `MYSQL_DATABASE`
+- `MYSQL_USERNAME`
+- `MYSQL_PASSWORD`
+- `MYSQL_ROOT_PASSWORD`
+- `JWT_SECRET_KEY`
+- `OSS_BUCKET_NAME`
+- `OSS_ACCESS_KEY_ID`
+- `OSS_ACCESS_KEY_SECRET`
 - `DASHSCOPE_API_KEY`
 - `BAILIAN_CHAT_MODEL`
 - `CHUNK_EMBEDDING_MODEL`
@@ -468,6 +589,7 @@ docker compose -f docker-compose.server.yml up -d
 docker compose -f docker-compose.server.yml ps
 docker compose -f docker-compose.server.yml logs -f nginx
 docker compose -f docker-compose.server.yml logs -f app
+docker compose -f docker-compose.server.yml logs -f mysql
 docker compose -f docker-compose.server.yml logs -f elasticsearch
 docker compose -f docker-compose.server.yml logs -f milvus
 ```
@@ -505,3 +627,8 @@ docs(readme): 补充启动说明
 
 详细协作约定见 `docs/development.md`。
 项目级代理与协作约定见 `AGENTS.md`。
+
+
+
+
+

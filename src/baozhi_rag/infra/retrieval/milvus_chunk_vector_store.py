@@ -74,6 +74,8 @@ class MilvusChunkVectorStore:
 
     _PRIMARY_FIELD_NAME = "chunk_id"
     _FILE_ID_FIELD_NAME = "file_id"
+    _UPLOADER_USER_ID_FIELD_NAME = "uploader_user_id"
+    _VISIBILITY_SCOPE_FIELD_NAME = "visibility_scope"
     _VECTOR_FIELD_NAME = "content_embedding"
     _VECTOR_INDEX_NAME = "content_embedding_idx"
     _VECTOR_INDEX_TYPE = "AUTOINDEX"
@@ -88,18 +90,7 @@ class MilvusChunkVectorStore:
         collection_name: str,
         embedding_dimensions: int,
     ) -> None:
-        """初始化 Milvus 向量存储适配器。
-
-        参数:
-            uri: Milvus 服务地址。
-            token: Milvus 认证令牌；未启用认证时可为空。
-            db_name: 目标数据库名称。
-            collection_name: chunk 向量集合名称。
-            embedding_dimensions: 向量维度，用于定义集合 schema。
-
-        返回:
-            None。
-        """
+        """初始化 Milvus 向量存储适配器。"""
         self._uri = uri
         self._token = token
         self._db_name = db_name
@@ -110,14 +101,7 @@ class MilvusChunkVectorStore:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> MilvusChunkVectorStore:
-        """基于应用配置创建 Milvus 向量存储适配器。
-
-        参数:
-            settings: 当前应用配置对象。
-
-        返回:
-            已按配置装配完成的 Milvus 向量存储实例。
-        """
+        """基于应用配置创建 Milvus 向量存储适配器。"""
         return cls(
             uri=settings.milvus_uri,
             token=settings.milvus_token,
@@ -127,14 +111,7 @@ class MilvusChunkVectorStore:
         )
 
     def ensure_collection(self) -> None:
-        """确保向量集合存在且已加载。
-
-        返回:
-            None。
-
-        异常:
-            MilvusIndexError: 当集合创建、索引创建或加载失败时抛出。
-        """
+        """确保向量集合存在且已加载。"""
         if self._collection_ready:
             return
 
@@ -157,37 +134,18 @@ class MilvusChunkVectorStore:
         self._collection_ready = True
 
     def ensure_ready(self) -> None:
-        """启动期就绪校验：确保客户端可创建且集合可存在/可创建。
-
-        返回:
-            None。
-
-        异常:
-            MilvusDependencyError: 当客户端依赖或初始化失败时抛出。
-            MilvusIndexError: 当集合初始化失败时抛出。
-        """
+        """启动期就绪校验：确保客户端可创建且集合可存在/可创建。"""
         try:
             self._get_client()
         except MilvusStoreError:
             raise
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
-            msg = "初始化 Milvus 客户端失败"
-            raise MilvusDependencyError(msg) from exc
+            raise MilvusDependencyError("初始化 Milvus 客户端失败") from exc
 
         self.ensure_collection()
 
     def index_chunks(self, chunks: list[DocumentChunk]) -> int:
-        """将 chunk 向量批量写入 Milvus。
-
-        参数:
-            chunks: 已完成向量化的 chunk 列表。
-
-        返回:
-            实际写入的 chunk 数量。
-
-        异常:
-            MilvusIndexError: 当批量写入失败时抛出。
-        """
+        """将 chunk 向量批量写入 Milvus。"""
         if not chunks:
             return 0
 
@@ -199,22 +157,11 @@ class MilvusChunkVectorStore:
                 data=entities,
             )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
-            msg = "批量写入 Milvus chunk 向量失败"
-            raise MilvusIndexError(msg) from exc
+            raise MilvusIndexError("批量写入 Milvus chunk 向量失败") from exc
         return len(chunks)
 
     def delete_chunks_by_file_id(self, file_id: str) -> None:
-        """删除指定文件的全部向量实体。
-
-        参数:
-            file_id: 需要删除的文件唯一标识。
-
-        返回:
-            None。
-
-        异常:
-            MilvusIndexError: 当删除失败时抛出。
-        """
+        """删除指定文件的全部向量实体。"""
         self.ensure_collection()
         try:
             self._get_client().delete(
@@ -222,39 +169,35 @@ class MilvusChunkVectorStore:
                 filter=self._build_file_id_filter(file_id),
             )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
-            msg = f"删除 Milvus chunk 向量失败: {file_id}"
-            raise MilvusIndexError(msg) from exc
+            raise MilvusIndexError(f"删除 Milvus chunk 向量失败: {file_id}") from exc
 
-    def search(self, query_embedding: list[float], size: int) -> list[MilvusVectorSearchHit]:
-        """执行向量相似度检索。
-
-        参数:
-            query_embedding: 查询文本对应的向量表示。
-            size: 期望返回的命中数量。
-
-        返回:
-            Milvus 返回的向量检索命中列表。
-
-        异常:
-            MilvusSearchError: 当查询向量为空或检索失败时抛出。
-        """
+    def search(
+        self,
+        query_embedding: list[float],
+        size: int,
+        *,
+        viewer_user_id: str = "",
+    ) -> list[MilvusVectorSearchHit]:
+        """执行向量相似度检索。"""
         if not query_embedding:
-            msg = "查询向量不能为空"
-            raise MilvusSearchError(msg)
+            raise MilvusSearchError("查询向量不能为空")
 
         self.ensure_collection()
+        search_kwargs: dict[str, object] = {
+            "collection_name": self._collection_name,
+            "data": [query_embedding],
+            "limit": size,
+            "anns_field": self._VECTOR_FIELD_NAME,
+            "output_fields": [self._FILE_ID_FIELD_NAME],
+            "search_params": {"metric_type": "COSINE", "params": {}},
+        }
+        if viewer_user_id:
+            search_kwargs["filter"] = self._build_visibility_filter(viewer_user_id)
+
         try:
-            response = self._get_client().search(
-                collection_name=self._collection_name,
-                data=[query_embedding],
-                limit=size,
-                anns_field=self._VECTOR_FIELD_NAME,
-                output_fields=[self._FILE_ID_FIELD_NAME],
-                search_params={"metric_type": "COSINE", "params": {}},
-            )
+            response = self._get_client().search(**search_kwargs)
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
-            msg = "执行 Milvus 向量检索失败"
-            raise MilvusSearchError(msg) from exc
+            raise MilvusSearchError("执行 Milvus 向量检索失败") from exc
 
         return self._parse_search_result(response)
 
@@ -267,8 +210,9 @@ class MilvusChunkVectorStore:
     def _create_client(self) -> Any:
         """创建 Milvus 客户端实例。"""
         if MILVUS_CLIENT_CLASS is None:
-            msg = "未安装 pymilvus 依赖，无法启用 Milvus 向量存储"
-            raise MilvusDependencyError(msg) from MILVUS_IMPORT_ERROR
+            raise MilvusDependencyError(
+                "未安装 pymilvus 依赖，无法启用 Milvus 向量存储"
+            ) from MILVUS_IMPORT_ERROR
 
         kwargs: dict[str, object] = {"uri": self._uri, "db_name": self._db_name}
         if self._token:
@@ -278,8 +222,9 @@ class MilvusChunkVectorStore:
     def _build_schema(self) -> Any:
         """构造 Milvus 集合 schema。"""
         if MILVUS_CLIENT_CLASS is None or MILVUS_DATA_TYPE is None:
-            msg = "未安装 pymilvus 依赖，无法构造 Milvus schema"
-            raise MilvusDependencyError(msg) from MILVUS_IMPORT_ERROR
+            raise MilvusDependencyError(
+                "未安装 pymilvus 依赖，无法构造 Milvus schema"
+            ) from MILVUS_IMPORT_ERROR
 
         schema = MILVUS_CLIENT_CLASS.create_schema(
             auto_id=False,
@@ -297,6 +242,16 @@ class MilvusChunkVectorStore:
             max_length=128,
         )
         schema.add_field(
+            field_name=self._UPLOADER_USER_ID_FIELD_NAME,
+            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            max_length=128,
+        )
+        schema.add_field(
+            field_name=self._VISIBILITY_SCOPE_FIELD_NAME,
+            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            max_length=32,
+        )
+        schema.add_field(
             field_name=self._VECTOR_FIELD_NAME,
             datatype=MILVUS_DATA_TYPE.FLOAT_VECTOR,
             dim=self._embedding_dimensions,
@@ -306,8 +261,9 @@ class MilvusChunkVectorStore:
     def _build_index_params(self) -> Any:
         """构造 Milvus 向量索引参数。"""
         if MILVUS_CLIENT_CLASS is None:
-            msg = "未安装 pymilvus 依赖，无法构造 Milvus 索引参数"
-            raise MilvusDependencyError(msg) from MILVUS_IMPORT_ERROR
+            raise MilvusDependencyError(
+                "未安装 pymilvus 依赖，无法构造 Milvus 索引参数"
+            ) from MILVUS_IMPORT_ERROR
 
         index_params = MILVUS_CLIENT_CLASS.prepare_index_params()
         index_params.add_index(
@@ -341,12 +297,13 @@ class MilvusChunkVectorStore:
     def _build_entity(self, chunk: DocumentChunk) -> dict[str, object]:
         """把单个 chunk 转换为 Milvus 实体。"""
         if chunk.content_embedding is None:
-            msg = f"chunk 缺少向量，无法写入 Milvus: {chunk.chunk_id}"
-            raise MilvusIndexError(msg)
+            raise MilvusIndexError(f"chunk 缺少向量，无法写入 Milvus: {chunk.chunk_id}")
 
         return {
             self._PRIMARY_FIELD_NAME: chunk.chunk_id,
             self._FILE_ID_FIELD_NAME: chunk.file_id,
+            self._UPLOADER_USER_ID_FIELD_NAME: chunk.uploader_user_id,
+            self._VISIBILITY_SCOPE_FIELD_NAME: chunk.visibility_scope,
             self._VECTOR_FIELD_NAME: chunk.content_embedding,
         }
 
@@ -384,3 +341,12 @@ class MilvusChunkVectorStore:
         """构造按文件标识删除的 Milvus 过滤表达式。"""
         escaped_file_id = file_id.replace("\\", "\\\\").replace('"', '\\"')
         return f'file_id == "{escaped_file_id}"'
+
+    @staticmethod
+    def _build_visibility_filter(viewer_user_id: str) -> str:
+        """构造按可见性过滤的 Milvus 表达式。"""
+        escaped_user_id = viewer_user_id.replace("\\", "\\\\").replace('"', '\\"')
+        return (
+            'visibility_scope == "global" '
+            f'or uploader_user_id == "{escaped_user_id}"'
+        )

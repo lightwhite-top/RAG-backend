@@ -281,14 +281,7 @@ class ElasticsearchChunkStore:
 
     @classmethod
     def build_search_query(cls, request: ChunkSearchRequest) -> dict[str, object]:
-        """构造结合全文与领域词的 ES 词法查询。
-
-        参数:
-            request: 当前检索请求，包含查询文本与 `merged_terms`。
-
-        返回:
-            可直接传给 Elasticsearch 的查询 DSL。
-        """
+        """构造结合全文、领域词与用户可见性的 ES 词法查询。"""
         should_queries: list[dict[str, object]] = [
             {
                 "match": {
@@ -299,6 +292,7 @@ class ElasticsearchChunkStore:
                 }
             }
         ]
+        filter_queries: list[dict[str, object]] = []
 
         if request.merged_terms:
             should_queries.append(
@@ -310,10 +304,24 @@ class ElasticsearchChunkStore:
                 }
             )
 
+        if request.viewer_user_id:
+            filter_queries.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"term": {"visibility_scope": "global"}},
+                            {"term": {"uploader_user_id": request.viewer_user_id}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
+
         return {
             "bool": {
                 "should": should_queries,
                 "minimum_should_match": 1,
+                "filter": filter_queries,
             }
         }
 
@@ -370,6 +378,8 @@ class ElasticsearchChunkStore:
             "file_id": {"type": "keyword"},
             "source_filename": {"type": "keyword"},
             "storage_key": {"type": "keyword"},
+            "uploader_user_id": {"type": "keyword"},
+            "visibility_scope": {"type": "keyword"},
             "chunk_index": {"type": "integer"},
             "char_count": {"type": "integer"},
             "content": {
@@ -393,6 +403,8 @@ class ElasticsearchChunkStore:
             "file_id",
             "source_filename",
             "storage_key",
+            "uploader_user_id",
+            "visibility_scope",
             "chunk_index",
             "char_count",
             "content",
@@ -433,6 +445,8 @@ class ElasticsearchChunkStore:
             file_id=str(source.get("file_id", "")),
             source_filename=str(source.get("source_filename", "")),
             storage_key=str(source.get("storage_key", "")),
+            uploader_user_id=str(source.get("uploader_user_id", "")),
+            visibility_scope=str(source.get("visibility_scope", "")),
             chunk_index=int(source.get("chunk_index", 0)),
             char_count=int(source.get("char_count", 0)),
             content=str(source.get("content", "")),
@@ -446,3 +460,7 @@ def _as_string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
+
+
+
+

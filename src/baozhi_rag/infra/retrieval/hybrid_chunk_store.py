@@ -76,7 +76,13 @@ class HybridVectorStore(Protocol):
         """按文件标识删除向量。"""
         ...
 
-    def search(self, query_embedding: list[float], size: int) -> list[MilvusVectorSearchHit]:
+    def search(
+        self,
+        query_embedding: list[float],
+        size: int,
+        *,
+        viewer_user_id: str = "",
+    ) -> list[MilvusVectorSearchHit]:
         """执行向量检索。"""
         ...
 
@@ -255,7 +261,11 @@ class HybridChunkStore(ChunkSearchStore):
             # 文档检索
             lexical_hits = self._document_store.search(request)
             # 向量检索
-            semantic_hits = self._vector_store.search(request.query_embedding, request.size)
+            semantic_hits = self._vector_store.search(
+                request.query_embedding,
+                request.size,
+                viewer_user_id=request.viewer_user_id,
+            )
 
             # 结果融合：使用 RRF 算法对词法检索结果和向量检索结果进行融合排序，并补全文档载荷
             return self._fuse_hits(
@@ -349,3 +359,5 @@ class HybridChunkStore(ChunkSearchStore):
             当前排名对应的 RRF 分值。
         """
         return 1.0 / (self._RRF_K + rank)
+
+

@@ -14,7 +14,10 @@ class UploadedFileItem(BaseModel):
     original_filename: str = Field(description="原始文件名")
     content_type: str = Field(description="文件内容类型")
     size: int = Field(description="文件字节数")
-    storage_key: str = Field(description="相对存储路径")
+    storage_key: str = Field(description="OSS 对象键")
+    storage_provider: str = Field(description="文件存储提供商")
+    deduplicated: bool = Field(description="本次是否命中重复入库")
+    replaced: bool = Field(description="本次是否覆盖了旧版本")
     chunk_count: int = Field(description="切块数量")
     uploaded_at: datetime = Field(description="上传完成时间")
 

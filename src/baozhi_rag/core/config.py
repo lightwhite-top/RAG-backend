@@ -5,8 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote_plus
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME
@@ -209,6 +210,161 @@ class Settings(BaseSettings):
         description="chunk 检索默认返回条数",
         validation_alias=AliasChoices("SEARCH_DEFAULT_SIZE"),
     )
+    mysql_host: str = Field(
+        default="127.0.0.1",
+        description="MySQL 主机地址",
+        validation_alias=AliasChoices("MYSQL_HOST"),
+    )
+    mysql_port: int = Field(
+        default=3306,
+        description="MySQL 端口",
+        validation_alias=AliasChoices("MYSQL_PORT"),
+    )
+    mysql_database: str = Field(
+        default="baozhi_rag",
+        description="MySQL 数据库名称",
+        validation_alias=AliasChoices("MYSQL_DATABASE"),
+    )
+    mysql_username: str = Field(
+        default="root",
+        description="MySQL 用户名",
+        validation_alias=AliasChoices("MYSQL_USERNAME"),
+    )
+    mysql_password: str = Field(
+        default="",
+        description="MySQL 密码",
+        validation_alias=AliasChoices("MYSQL_PASSWORD"),
+    )
+    jwt_secret_key: str = Field(
+        default="change-me",
+        description="JWT 签名密钥",
+        validation_alias=AliasChoices("JWT_SECRET_KEY"),
+        min_length=1,
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT 签名算法",
+        validation_alias=AliasChoices("JWT_ALGORITHM"),
+        min_length=1,
+    )
+    jwt_access_token_expire_days: int = Field(
+        default=7,
+        description="JWT 访问令牌有效期（天）",
+        validation_alias=AliasChoices("JWT_ACCESS_TOKEN_EXPIRE_DAYS"),
+        ge=1,
+    )
+    smtp_host: str | None = Field(
+        default=None,
+        description="SMTP 服务器地址",
+        validation_alias=AliasChoices("SMTP_HOST"),
+    )
+    smtp_port: int = Field(
+        default=587,
+        description="SMTP 服务器端口",
+        validation_alias=AliasChoices("SMTP_PORT"),
+        ge=1,
+        le=65535,
+    )
+    smtp_username: str | None = Field(
+        default=None,
+        description="SMTP 登录用户名",
+        validation_alias=AliasChoices("SMTP_USERNAME"),
+    )
+    smtp_password: str | None = Field(
+        default=None,
+        description="SMTP 登录密码",
+        validation_alias=AliasChoices("SMTP_PASSWORD"),
+    )
+    smtp_use_tls: bool = Field(
+        default=True,
+        description="是否对 SMTP 明文连接启用 STARTTLS",
+        validation_alias=AliasChoices("SMTP_USE_TLS"),
+    )
+    smtp_use_ssl: bool = Field(
+        default=False,
+        description="是否直接使用 SMTPS 连接",
+        validation_alias=AliasChoices("SMTP_USE_SSL"),
+    )
+    smtp_from_email: str | None = Field(
+        default=None,
+        description="注册验证码邮件发件地址",
+        validation_alias=AliasChoices("SMTP_FROM_EMAIL"),
+    )
+    smtp_from_name: str = Field(
+        default="Baozhi RAG Service",
+        description="注册验证码邮件发件人名称",
+        validation_alias=AliasChoices("SMTP_FROM_NAME"),
+    )
+    smtp_timeout_seconds: float = Field(
+        default=10.0,
+        description="SMTP 连接与发送超时时间（秒）",
+        validation_alias=AliasChoices("SMTP_TIMEOUT_SECONDS"),
+        gt=0,
+    )
+    registration_code_secret: str = Field(
+        default="change-me-registration-code-secret",
+        description="注册验证码摘要签名密钥",
+        validation_alias=AliasChoices("REGISTRATION_CODE_SECRET"),
+        min_length=1,
+    )
+    registration_code_length: int = Field(
+        default=6,
+        description="注册验证码长度",
+        validation_alias=AliasChoices("REGISTRATION_CODE_LENGTH"),
+        ge=4,
+        le=8,
+    )
+    registration_code_expire_minutes: int = Field(
+        default=10,
+        description="注册验证码有效期（分钟）",
+        validation_alias=AliasChoices("REGISTRATION_CODE_EXPIRE_MINUTES"),
+        ge=1,
+        le=60,
+    )
+    registration_code_resend_interval_seconds: int = Field(
+        default=60,
+        description="注册验证码重发冷却时间（秒）",
+        validation_alias=AliasChoices("REGISTRATION_CODE_RESEND_INTERVAL_SECONDS"),
+        ge=0,
+        le=3600,
+    )
+    registration_code_max_attempts: int = Field(
+        default=5,
+        description="单个验证码允许的最大错误尝试次数",
+        validation_alias=AliasChoices("REGISTRATION_CODE_MAX_ATTEMPTS"),
+        ge=1,
+        le=10,
+    )
+    oss_region: str = Field(
+        default="cn-hangzhou",
+        description="阿里云 OSS 所属地域",
+        validation_alias=AliasChoices("OSS_REGION"),
+    )
+    oss_endpoint: str = Field(
+        default="https://oss-cn-hangzhou.aliyuncs.com",
+        description="阿里云 OSS 访问域名",
+        validation_alias=AliasChoices("OSS_ENDPOINT"),
+    )
+    oss_bucket_name: str = Field(
+        default="",
+        description="阿里云 OSS Bucket 名称",
+        validation_alias=AliasChoices("OSS_BUCKET_NAME"),
+    )
+    oss_access_key_id: str = Field(
+        default="",
+        description="阿里云 OSS AccessKey ID",
+        validation_alias=AliasChoices("OSS_ACCESS_KEY_ID"),
+    )
+    oss_access_key_secret: str = Field(
+        default="",
+        description="阿里云 OSS AccessKey Secret",
+        validation_alias=AliasChoices("OSS_ACCESS_KEY_SECRET"),
+    )
+    oss_object_prefix: str = Field(
+        default="knowledge-files",
+        description="阿里云 OSS 对象统一前缀",
+        validation_alias=AliasChoices("OSS_OBJECT_PREFIX"),
+    )
 
     @field_validator(
         "cors_allow_origins",
@@ -237,6 +393,30 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @model_validator(mode="after")
+    def validate_email_delivery_settings(self) -> Settings:
+        """校验邮件发送配置中互斥的连接模式。"""
+        if self.smtp_use_tls and self.smtp_use_ssl:
+            raise ValueError("SMTP_USE_TLS 与 SMTP_USE_SSL 不能同时为 true")
+        return self
+
+    @property
+    def mysql_url(self) -> str:
+        """基于配置构造 SQLAlchemy 使用的 MySQL 连接串。"""
+        quoted_username = quote_plus(self.mysql_username)
+        quoted_password = quote_plus(self.mysql_password)
+        quoted_database = quote_plus(self.mysql_database)
+        return (
+            "mysql+pymysql://"
+            f"{quoted_username}:{quoted_password}@{self.mysql_host}:{self.mysql_port}/"
+            f"{quoted_database}?charset=utf8mb4"
+        )
+
+    @property
+    def normalized_oss_object_prefix(self) -> str:
+        """返回清理首尾斜杠后的 OSS 对象前缀。"""
+        return self.oss_object_prefix.strip().strip("/")
 
 
 @lru_cache

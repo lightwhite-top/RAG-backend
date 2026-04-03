@@ -12,10 +12,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from baozhi_rag.api.dependencies import get_chat_service
+from baozhi_rag.api.dependencies import get_chat_service, get_current_user
 from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
+from baozhi_rag.domain.user import CurrentUser
 from baozhi_rag.schemas.chat import (
     ChatAssistantMessage,
     ChatCitationItem,
@@ -43,6 +44,7 @@ def create_chat_completion(
     payload: ChatCompletionRequest,
     service: Annotated[ChatService, Depends(get_chat_service)],
     settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> SuccessResponse[ChatCompletionResponse] | StreamingResponse:
     """执行带检索增强的聊天补全，支持普通返回和 SSE 流式返回。
 
@@ -75,6 +77,7 @@ def create_chat_completion(
                 messages,
                 retrieval_size=payload.retrieval_size,
                 temperature=payload.temperature,
+                viewer_user_id=current_user.id,
             )
         )
         first_event = next(stream_iterator)
@@ -100,6 +103,7 @@ def create_chat_completion(
         messages,
         retrieval_size=payload.retrieval_size,
         temperature=payload.temperature,
+        viewer_user_id=current_user.id,
     )
     citations = _build_citation_items(result.citations)
     message_id = uuid4().hex
@@ -585,3 +589,8 @@ def _encode_sse_event(event: str, data: dict[str, object]) -> str:
     """把单个事件编码为 SSE 文本块。"""
     serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {serialized}\n\n"
+
+
+
+
+
