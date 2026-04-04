@@ -45,6 +45,7 @@ class SendRegistrationCodeResult:
     """注册验证码发送成功后的返回结果。"""
 
     expires_in_seconds: int
+    expires_at: datetime
     resend_interval_seconds: int
 
 
@@ -120,6 +121,7 @@ class AuthService:
 
         return SendRegistrationCodeResult(
             expires_in_seconds=self._registration_code_manager.policy.expire_minutes * 60,
+            expires_at=code_record.expires_at,
             resend_interval_seconds=self._registration_code_manager.policy.resend_interval_seconds,
         )
 

@@ -214,7 +214,7 @@ Authorization: Bearer <access_token>
 
 - `POST /auth/register/code`
   - 字段：`email`
-  - 返回：`expires_in`、`resend_after`
+  - 返回：`expires_in`、`expires_at`、`resend_after`
   - 作用：向注册邮箱发送验证码邮件
 - `POST /auth/register`
   - 字段：`email`、`password`、`username`、`verification_code`

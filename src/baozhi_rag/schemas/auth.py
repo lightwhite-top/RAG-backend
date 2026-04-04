@@ -52,6 +52,7 @@ class SendRegistrationCodeResponseData(BaseModel):
     """发送注册验证码成功后的响应数据。"""
 
     expires_in: int = Field(description="验证码剩余有效秒数")
+    expires_at: datetime = Field(description="验证码到期时间")
     resend_after: int = Field(description="再次发送前需等待的秒数")
 
 

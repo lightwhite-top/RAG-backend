@@ -42,6 +42,7 @@ def send_registration_code(
         request_id=ensure_request_id(request),
         data=SendRegistrationCodeResponseData(
             expires_in=result.expires_in_seconds,
+            expires_at=result.expires_at,
             resend_after=result.resend_interval_seconds,
         ),
     )
