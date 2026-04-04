@@ -90,17 +90,21 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
             task_models = session.scalars(stmt).all()
             return [self._to_domain(task_model) for task_model in task_models]
 
-    def update_requested_filename(
+    def update_submission_context(
         self,
         task_id: str,
+        *,
         requested_filename: str,
+        source_storage_key: str | None = None,
     ) -> KnowledgeUploadTask | None:
-        """更新任务最近一次请求使用的标题。"""
+        """更新任务最近一次提交使用的标题与源文件位置。"""
         with self._session_factory() as session:
             task_model = session.get(KnowledgeUploadTaskModel, task_id)
             if task_model is None:
                 return None
             task_model.requested_filename = requested_filename
+            if source_storage_key is not None:
+                task_model.source_storage_key = source_storage_key
             task_model.updated_at = datetime.now(UTC)
             session.commit()
             session.refresh(task_model)
@@ -323,7 +327,7 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
             uploader_role=task.uploader_role,
             raw_sha256=task.raw_sha256,
             content_sha256=task.content_sha256,
-            blob_key=task.blob_key,
+            source_storage_key=task.source_storage_key,
             requested_filename=task.requested_filename,
             content_type=task.content_type,
             size=task.size,
@@ -354,7 +358,7 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
             uploader_user_id=task_model.uploader_user_id,
             uploader_role=task_model.uploader_role,
             raw_sha256=task_model.raw_sha256,
-            blob_key=task_model.blob_key,
+            source_storage_key=task_model.source_storage_key,
             requested_filename=task_model.requested_filename,
             content_type=task_model.content_type,
             size=task_model.size,

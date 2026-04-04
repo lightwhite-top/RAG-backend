@@ -12,7 +12,6 @@ from typing import Any, cast
 from docx import Document
 
 from baozhi_rag.domain.knowledge_file import KnowledgeFile, KnowledgeFileListPage
-from baozhi_rag.domain.knowledge_file_blob import KnowledgeFileBlob
 from baozhi_rag.domain.knowledge_file_errors import (
     KnowledgeFileConflictError,
     KnowledgeUploadTaskRetryNotAllowedError,
@@ -182,22 +181,6 @@ class InMemoryKnowledgeFileRepository:
         )
 
 
-class InMemoryBlobRepository:
-    """blob 仓储测试替身。"""
-
-    def __init__(self) -> None:
-        self._blobs: dict[str, KnowledgeFileBlob] = {}
-
-    def create_blob(self, blob: KnowledgeFileBlob) -> KnowledgeFileBlob:
-        if blob.raw_sha256 in self._blobs:
-            raise KnowledgeFileConflictError("原始文件 blob 记录冲突")
-        self._blobs[blob.raw_sha256] = blob
-        return blob
-
-    def get_blob_by_raw_sha256(self, raw_sha256: str) -> KnowledgeFileBlob | None:
-        return self._blobs.get(raw_sha256)
-
-
 class InMemoryUploadTaskRepository:
     """上传任务仓储测试替身。"""
 
@@ -248,15 +231,24 @@ class InMemoryUploadTaskRepository:
         tasks.sort(key=lambda item: (item.created_at, item.id), reverse=True)
         return tasks[:limit]
 
-    def update_requested_filename(
+    def update_submission_context(
         self,
         task_id: str,
+        *,
         requested_filename: str,
+        source_storage_key: str | None = None,
     ) -> KnowledgeUploadTask | None:
         task = self._tasks.get(task_id)
         if task is None:
             return None
-        updated = replace(task, requested_filename=requested_filename, updated_at=datetime.now(UTC))
+        updated = replace(
+            task,
+            requested_filename=requested_filename,
+            source_storage_key=(
+                source_storage_key if source_storage_key is not None else task.source_storage_key
+            ),
+            updated_at=datetime.now(UTC),
+        )
         self._tasks[task_id] = updated
         return updated
 
@@ -452,10 +444,6 @@ class FakeObjectStore:
         self.objects.pop(storage_key, None)
         self.deleted_keys.append(storage_key)
 
-    def download_file(self, *, storage_key: str, local_path: Path) -> None:
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(self.objects[storage_key])
-
 
 class RecordingChunkStore:
     """索引存储测试替身。"""
@@ -495,7 +483,8 @@ class FakeEmbeddingClient:
 
 def test_submit_files_reuses_same_task_for_same_raw_hash(tmp_path: Path) -> None:
     """同一用户重复提交完全相同原始文件时应复用同一任务。"""
-    service, _, _, blob_repository, task_repository, _ = _build_runtime(tmp_path)
+    service, _, _, task_repository, _ = _build_runtime(tmp_path)
+    local_store = LocalFileStore(tmp_path)
     user = _build_user(UserRole.USER)
     content = _build_docx_bytes("完全相同内容", author="A")
 
@@ -515,16 +504,20 @@ def test_submit_files_reuses_same_task_for_same_raw_hash(tmp_path: Path) -> None
     )[0]
 
     assert first_task.id == second_task.id
-    assert len(blob_repository._blobs) == 1
     assert task_repository.get_task_by_id(first_task.id) is not None
     persisted_task = task_repository.get_task_by_id(first_task.id)
     assert persisted_task is not None
     assert persisted_task.requested_filename == "保险条款-重传.docx"
+    assert persisted_task.source_storage_key == second_task.source_storage_key
+    assert persisted_task.source_storage_key != first_task.source_storage_key
+    assert local_store.exists(persisted_task.source_storage_key) is True
+    assert local_store.exists(first_task.source_storage_key) is False
 
 
 def test_processor_uses_latest_filename_when_same_raw_file_resubmitted(tmp_path: Path) -> None:
     """处理中再次提交相同原始文件时，最终标题应以最新文件名为准。"""
-    service, processor, object_store, _, task_repository, file_repository = _build_runtime(tmp_path)
+    service, processor, object_store, task_repository, file_repository = _build_runtime(tmp_path)
+    local_store = LocalFileStore(tmp_path)
     user = _build_user(UserRole.USER)
     content = _build_docx_bytes("原始内容", author="A")
 
@@ -535,13 +528,13 @@ def test_processor_uses_latest_filename_when_same_raw_file_resubmitted(tmp_path:
             request_id="request-1",
         )
     )[0]
-    asyncio.run(
+    second_task = asyncio.run(
         service.submit_files(
             [_build_async_input("新标题.docx", content)],
             current_user=user,
             request_id="request-2",
         )
-    )
+    )[0]
 
     processed = processor.process_next_task("worker-1")
     final_task = task_repository.get_task_by_id(first_task.id)
@@ -553,12 +546,14 @@ def test_processor_uses_latest_filename_when_same_raw_file_resubmitted(tmp_path:
     assert persisted_file.original_filename == "新标题.docx"
     assert persisted_file.storage_key.startswith("knowledge-files/user-1/")
     assert persisted_file.storage_key in object_store.uploaded_keys
-    assert first_task.blob_key != persisted_file.storage_key
+    assert second_task.source_storage_key != persisted_file.storage_key
+    assert local_store.exists(second_task.source_storage_key) is False
 
 
 def test_processor_reuses_existing_content_for_different_binary_same_text(tmp_path: Path) -> None:
     """同内容不同二进制上传应命中内容去重，不生成第二条文件记录。"""
-    service, processor, _, _, task_repository, file_repository = _build_runtime(tmp_path)
+    service, processor, _, task_repository, file_repository = _build_runtime(tmp_path)
+    local_store = LocalFileStore(tmp_path)
     user = _build_user(UserRole.USER)
 
     first_task = asyncio.run(
@@ -589,11 +584,14 @@ def test_processor_reuses_existing_content_for_different_binary_same_text(tmp_pa
     assert first_final.file_id == second_final.file_id
     only_file = next(iter(file_repository._files.values()))
     assert only_file.original_filename == "新标题.docx"
+    assert local_store.exists(first_task.source_storage_key) is False
+    assert local_store.exists(second_task.source_storage_key) is False
 
 
 def test_failed_replacement_keeps_old_file_unchanged(tmp_path: Path) -> None:
     """同名不同内容上传若新任务失败，旧文件记录应保持不变。"""
-    service, processor, object_store, _, task_repository, file_repository = _build_runtime(tmp_path)
+    service, processor, object_store, task_repository, file_repository = _build_runtime(tmp_path)
+    local_store = LocalFileStore(tmp_path)
     user = _build_user(UserRole.USER)
 
     first_task = asyncio.run(
@@ -633,11 +631,57 @@ def test_failed_replacement_keeps_old_file_unchanged(tmp_path: Path) -> None:
     assert persisted_file.content_sha256
     assert len(file_repository._files) == 1
     assert any(key.startswith("knowledge-files/user-1/") for key in object_store.deleted_keys)
+    assert local_store.exists(second_task.source_storage_key) is True
+
+
+def test_retry_after_failure_reuses_preserved_local_source_file(tmp_path: Path) -> None:
+    """失败任务重试时应继续复用失败前保留的本地源文件。"""
+    service, _, object_store, task_repository, file_repository = _build_runtime(tmp_path)
+    local_store = LocalFileStore(tmp_path)
+    user = _build_user(UserRole.USER)
+
+    task = asyncio.run(
+        service.submit_files(
+            [_build_async_input("保险条款.docx", _build_docx_bytes("可重试内容", author="A"))],
+            current_user=user,
+            request_id="request-1",
+        )
+    )[0]
+
+    failing_processor = _build_processor(
+        tmp_path,
+        task_repository=task_repository,
+        file_repository=file_repository,
+        object_store=object_store,
+        chunk_store=RecordingChunkStore(fail_on_index=True),
+    )
+    assert failing_processor.process_next_task("worker-1") is True
+    failed_task = task_repository.get_task_by_id(task.id)
+    assert failed_task is not None
+    assert failed_task.status is KnowledgeUploadTaskStatus.FAILED
+    assert local_store.exists(task.source_storage_key) is True
+
+    retried_task = service.retry_task(task_id=task.id, current_user=user)
+    assert retried_task.status is KnowledgeUploadTaskStatus.QUEUED
+    assert retried_task.source_storage_key == task.source_storage_key
+
+    success_processor = _build_processor(
+        tmp_path,
+        task_repository=task_repository,
+        file_repository=file_repository,
+        object_store=object_store,
+        chunk_store=RecordingChunkStore(),
+    )
+    assert success_processor.process_next_task("worker-2") is True
+    succeeded_task = task_repository.get_task_by_id(task.id)
+    assert succeeded_task is not None
+    assert succeeded_task.status is KnowledgeUploadTaskStatus.SUCCEEDED
+    assert local_store.exists(task.source_storage_key) is False
 
 
 def test_retry_task_requeues_failed_task(tmp_path: Path) -> None:
     """失败任务应允许重新入队。"""
-    service, _, _, _, task_repository, _ = _build_runtime(tmp_path)
+    service, _, _, task_repository, _ = _build_runtime(tmp_path)
     user = _build_user(UserRole.USER)
     content = _build_docx_bytes("失败重试内容", author="A")
     task = asyncio.run(
@@ -674,23 +718,18 @@ def _build_runtime(
     KnowledgeUploadService,
     KnowledgeUploadProcessor,
     FakeObjectStore,
-    InMemoryBlobRepository,
     InMemoryUploadTaskRepository,
     InMemoryKnowledgeFileRepository,
 ]:
     temp_file_store = LocalFileStore(tmp_path)
     object_store = FakeObjectStore()
-    blob_repository = InMemoryBlobRepository()
     task_repository = InMemoryUploadTaskRepository()
     file_repository = InMemoryKnowledgeFileRepository()
     chunk_store = RecordingChunkStore()
     service = KnowledgeUploadService(
         file_upload_service=FileUploadService(temp_file_store),
         temp_file_store=temp_file_store,
-        object_store=object_store,
-        blob_repository=blob_repository,
         task_repository=task_repository,
-        raw_object_prefix="knowledge-files/raw",
         ingest_version="v1",
     )
     processor = _build_processor(
@@ -700,7 +739,7 @@ def _build_runtime(
         object_store=object_store,
         chunk_store=chunk_store,
     )
-    return service, processor, object_store, blob_repository, task_repository, file_repository
+    return service, processor, object_store, task_repository, file_repository
 
 
 def _build_processor(

@@ -36,7 +36,7 @@ class KnowledgeUploadTask:
     uploader_user_id: str
     uploader_role: str
     raw_sha256: str
-    blob_key: str
+    source_storage_key: str
     requested_filename: str
     content_type: str
     size: int

@@ -44,12 +44,14 @@ class KnowledgeUploadTaskRepository(Protocol):
     ) -> list[KnowledgeUploadTask]:
         """按用户倒序列出最近任务。"""
 
-    def update_requested_filename(
+    def update_submission_context(
         self,
         task_id: str,
+        *,
         requested_filename: str,
+        source_storage_key: str | None = None,
     ) -> KnowledgeUploadTask | None:
-        """更新任务最近一次请求使用的标题。"""
+        """更新任务最近一次提交使用的标题与源文件位置。"""
 
     def claim_next_task(
         self,

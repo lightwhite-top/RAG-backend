@@ -16,11 +16,10 @@ from typing import Protocol
 from uuid import uuid4
 
 from baozhi_rag.domain.knowledge_file import FileStorageProvider, FileVisibilityScope, KnowledgeFile
-from baozhi_rag.domain.knowledge_file_blob import KnowledgeFileBlob
-from baozhi_rag.domain.knowledge_file_blob_repository import KnowledgeFileBlobRepository
 from baozhi_rag.domain.knowledge_file_errors import (
     KnowledgeFileConflictError,
     KnowledgeUploadTaskNotFoundError,
+    KnowledgeUploadTaskSourceMissingError,
 )
 from baozhi_rag.domain.knowledge_file_repository import KnowledgeFileRepository
 from baozhi_rag.domain.knowledge_upload_task import (
@@ -52,9 +51,6 @@ class UploadTaskObjectStoreProtocol(Protocol):
     def delete(self, storage_key: str) -> None:
         """删除对象存储中的文件。"""
 
-    def download_file(self, *, storage_key: str, local_path: Path) -> None:
-        """把对象存储文件下载到本地路径。"""
-
 
 @dataclass(frozen=True, slots=True)
 class UploadTaskProcessResult:
@@ -78,19 +74,13 @@ class KnowledgeUploadService:
         *,
         file_upload_service: FileUploadService,
         temp_file_store: LocalFileStore,
-        object_store: UploadTaskObjectStoreProtocol,
-        blob_repository: KnowledgeFileBlobRepository,
         task_repository: KnowledgeUploadTaskRepository,
-        raw_object_prefix: str,
         ingest_version: str,
     ) -> None:
         """初始化上传任务服务。"""
         self._file_upload_service = file_upload_service
         self._temp_file_store = temp_file_store
-        self._object_store = object_store
-        self._blob_repository = blob_repository
         self._task_repository = task_repository
-        self._raw_object_prefix = raw_object_prefix.strip().strip("/")
         self._ingest_version = ingest_version.strip() or "v1"
 
     async def submit_files(
@@ -103,6 +93,8 @@ class KnowledgeUploadService:
         """接收文件并创建或复用上传任务。"""
         staged_files = await self._file_upload_service.stage_async_files(files)
         results: list[KnowledgeUploadTask] = []
+        retained_storage_keys: set[str] = set()
+        superseded_storage_keys: list[str] = []
 
         try:
             for staged_file in staged_files:
@@ -112,19 +104,26 @@ class KnowledgeUploadService:
                     self._ingest_version,
                 )
                 if existing_task is not None:
-                    updated_task = self._task_repository.update_requested_filename(
+                    next_source_storage_key: str | None = None
+                    if existing_task.status in {
+                        KnowledgeUploadTaskStatus.QUEUED,
+                        KnowledgeUploadTaskStatus.FAILED,
+                    }:
+                        next_source_storage_key = staged_file.temp_storage_key
+                        retained_storage_keys.add(next_source_storage_key)
+                        superseded_storage_keys.append(existing_task.source_storage_key)
+                    updated_task = self._task_repository.update_submission_context(
                         existing_task.id,
-                        staged_file.original_filename,
+                        requested_filename=staged_file.original_filename,
+                        source_storage_key=next_source_storage_key,
                     )
                     results.append(updated_task or existing_task)
                     continue
 
-                blob = self._ensure_blob(staged_file)
                 task = self._build_task(
                     request_id=request_id,
                     current_user=current_user,
                     staged_file=staged_file,
-                    blob=blob,
                 )
                 try:
                     persisted_task = self._task_repository.create_task(task)
@@ -137,16 +136,32 @@ class KnowledgeUploadService:
                     )
                     if existing_task is None:
                         raise
+                    next_source_storage_key = (
+                        staged_file.temp_storage_key
+                        if existing_task.status
+                        in {
+                            KnowledgeUploadTaskStatus.QUEUED,
+                            KnowledgeUploadTaskStatus.FAILED,
+                        }
+                        else None
+                    )
+                    if next_source_storage_key is not None:
+                        retained_storage_keys.add(next_source_storage_key)
+                        superseded_storage_keys.append(existing_task.source_storage_key)
                     persisted_task = (
-                        self._task_repository.update_requested_filename(
+                        self._task_repository.update_submission_context(
                             existing_task.id,
-                            staged_file.original_filename,
+                            requested_filename=staged_file.original_filename,
+                            source_storage_key=next_source_storage_key,
                         )
                         or existing_task
                     )
+                else:
+                    retained_storage_keys.add(task.source_storage_key)
                 results.append(persisted_task)
         finally:
-            self._cleanup_staged_files(staged_files)
+            self._cleanup_redundant_staged_files(staged_files, retained_storage_keys)
+            self._cleanup_storage_keys(superseded_storage_keys)
 
         return results
 
@@ -177,52 +192,12 @@ class KnowledgeUploadService:
             raise KnowledgeUploadTaskNotFoundError()
         return task
 
-    def _ensure_blob(self, staged_file: StagedUploadFileResult) -> KnowledgeFileBlob:
-        """确保原始文件 blob 已存在。"""
-        raw_sha256 = str(staged_file.sha256)
-        existing_blob = self._blob_repository.get_blob_by_raw_sha256(raw_sha256)
-        if existing_blob is not None:
-            return existing_blob
-
-        temp_storage_key = str(staged_file.temp_storage_key)
-        temp_file_path = self._temp_file_store.resolve_path(temp_storage_key)
-        blob = self._build_blob(staged_file)
-        self._object_store.upload_file(local_path=temp_file_path, storage_key=blob.storage_key)
-
-        try:
-            return self._blob_repository.create_blob(blob)
-        except KnowledgeFileConflictError:
-            existing_blob = self._blob_repository.get_blob_by_raw_sha256(raw_sha256)
-            if existing_blob is None:
-                raise
-            return existing_blob
-
-    def _build_blob(self, staged_file: StagedUploadFileResult) -> KnowledgeFileBlob:
-        """基于暂存文件构造 blob 记录。"""
-        now = datetime.now(UTC)
-        raw_sha256 = str(staged_file.sha256)
-        original_filename = str(staged_file.original_filename)
-        safe_filename = FileUploadService.sanitize_filename(original_filename)
-        suffix = Path(safe_filename).suffix.lower()
-        storage_key = self._build_blob_storage_key(raw_sha256=raw_sha256, suffix=suffix)
-        return KnowledgeFileBlob(
-            id=uuid4().hex,
-            raw_sha256=raw_sha256,
-            content_type=str(staged_file.content_type),
-            size=int(staged_file.size),
-            storage_provider=FileStorageProvider.ALIYUN_OSS,
-            storage_key=storage_key,
-            created_at=now,
-            updated_at=now,
-        )
-
     def _build_task(
         self,
         *,
         request_id: str,
         current_user: CurrentUser,
         staged_file: StagedUploadFileResult,
-        blob: KnowledgeFileBlob,
     ) -> KnowledgeUploadTask:
         """构造新上传任务。"""
         now = datetime.now(UTC)
@@ -231,8 +206,8 @@ class KnowledgeUploadService:
             request_id=request_id,
             uploader_user_id=current_user.id,
             uploader_role=current_user.role.value,
-            raw_sha256=blob.raw_sha256,
-            blob_key=blob.storage_key,
+            raw_sha256=staged_file.sha256,
+            source_storage_key=staged_file.temp_storage_key,
             requested_filename=str(staged_file.original_filename),
             content_type=str(staged_file.content_type),
             size=int(staged_file.size),
@@ -256,21 +231,23 @@ class KnowledgeUploadService:
             completed_at=None,
         )
 
-    def _build_blob_storage_key(self, *, raw_sha256: str, suffix: str) -> str:
-        """构造原始 blob 的对象键。"""
-        extension = suffix if suffix.startswith(".") else ""
-        parts = [
-            part
-            for part in [self._raw_object_prefix, raw_sha256[:2], f"{raw_sha256}{extension}"]
-            if part
-        ]
-        return "/".join(parts)
-
-    def _cleanup_staged_files(self, staged_files: Sequence[StagedUploadFileResult]) -> None:
-        """清理接口请求生成的临时文件。"""
+    def _cleanup_redundant_staged_files(
+        self,
+        staged_files: Sequence[StagedUploadFileResult],
+        retained_storage_keys: set[str],
+    ) -> None:
+        """清理本次提交中未被任务接管的冗余临时文件。"""
         for staged_file in reversed(staged_files):
+            if staged_file.temp_storage_key in retained_storage_keys:
+                continue
             with suppress(Exception):
                 self._temp_file_store.delete(str(staged_file.temp_storage_key))
+
+    def _cleanup_storage_keys(self, storage_keys: Sequence[str]) -> None:
+        """清理已被新提交通知替换的旧源文件。"""
+        for storage_key in reversed(storage_keys):
+            with suppress(Exception):
+                self._temp_file_store.delete(storage_key)
 
 
 class KnowledgeUploadProcessor:
@@ -326,8 +303,8 @@ class KnowledgeUploadProcessor:
         )
         heartbeat_thread.start()
 
-        local_storage_key = self._build_worker_storage_key(task)
-        local_file_path = self._temp_file_store.resolve_path(local_storage_key)
+        local_file_path = self._temp_file_store.resolve_path(task.source_storage_key)
+        should_cleanup_source_file = False
 
         try:
             self._task_repository.update_task_progress(
@@ -335,11 +312,14 @@ class KnowledgeUploadProcessor:
                 worker_id=worker_id,
                 stage=KnowledgeUploadTaskStage.PARSING,
             )
-            self._object_store.download_file(storage_key=task.blob_key, local_path=local_file_path)
+            if not local_file_path.exists():
+                raise KnowledgeUploadTaskSourceMissingError(
+                    f"上传任务源文件不存在: {task.source_storage_key}"
+                )
             preview_chunks = self._chunk_service.chunk_document(
                 file_path=local_file_path,
                 source_filename=task.requested_filename,
-                storage_key=task.blob_key,
+                storage_key=task.source_storage_key,
                 file_id=task.id,
             )
             content_sha256 = self._build_content_sha256(preview_chunks)
@@ -369,6 +349,7 @@ class KnowledgeUploadProcessor:
                 title_updated=process_result.title_updated,
                 completed_at=datetime.now(UTC),
             )
+            should_cleanup_source_file = True
             for cleanup_file_id in process_result.cleanup_file_ids:
                 with suppress(Exception):
                     self._chunk_store.delete_chunks_by_file_id(cleanup_file_id)
@@ -394,8 +375,9 @@ class KnowledgeUploadProcessor:
         finally:
             stop_event.set()
             heartbeat_thread.join(timeout=max(self._heartbeat_interval_seconds, 1.0))
-            with suppress(Exception):
-                self._temp_file_store.delete(local_storage_key)
+            if should_cleanup_source_file:
+                with suppress(Exception):
+                    self._temp_file_store.delete(task.source_storage_key)
 
     def _resolve_task_result(
         self,
@@ -481,8 +463,8 @@ class KnowledgeUploadProcessor:
         uploaded_final_object = False
         indexed = False
         try:
-            # 原始 blob 继续承担去重与重试下载职责，最终知识文件则固定写入用户目录，
-            # 这样检索返回与审计链路都能稳定落在 `knowledge-files/<user_id>/...` 下。
+            # 原始上传文件直接在本地源目录完成解析，OSS 只承接最终知识文件对象，
+            # 这样既避免“先上传再回下载”的带宽往返，也能保持检索与审计对象键稳定。
             self._object_store.upload_file(
                 local_path=local_file_path,
                 storage_key=candidate_file.storage_key,
@@ -694,12 +676,6 @@ class KnowledgeUploadProcessor:
         if task.uploader_role == UserRole.ADMIN.value:
             return FileVisibilityScope.GLOBAL
         return FileVisibilityScope.OWNER_ONLY
-
-    def _build_worker_storage_key(self, task: KnowledgeUploadTask) -> str:
-        """构造 worker 下载原始文件时使用的临时路径。"""
-        safe_filename = FileUploadService.sanitize_filename(task.requested_filename)
-        date_path = datetime.now(UTC).strftime("%Y/%m/%d")
-        return f"_worker/{date_path}/{task.id}_{safe_filename}"
 
     def _heartbeat_loop(
         self,

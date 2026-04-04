@@ -454,12 +454,6 @@ class Settings(BaseSettings):
         """返回清理首尾斜杠后的 OSS 对象前缀。"""
         return self.oss_object_prefix.strip().strip("/")
 
-    @property
-    def normalized_raw_oss_object_prefix(self) -> str:
-        """返回用于原始 blob 持久化的 OSS 前缀。"""
-        normalized_prefix = self.normalized_oss_object_prefix
-        return "/".join(part for part in [normalized_prefix, "raw"] if part)
-
 
 @lru_cache
 def get_settings() -> Settings:

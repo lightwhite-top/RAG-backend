@@ -47,6 +47,14 @@ class KnowledgeUploadTaskRetryNotAllowedError(KnowledgeFileError):
     default_status_code = status.HTTP_409_CONFLICT
 
 
+class KnowledgeUploadTaskSourceMissingError(KnowledgeFileError):
+    """上传任务依赖的本地源文件不存在。"""
+
+    default_message = "上传任务源文件不存在，请重新上传"
+    default_error_code = "knowledge_upload_task_source_missing"
+    default_status_code = status.HTTP_409_CONFLICT
+
+
 class ObjectStorageError(KnowledgeFileError):
     """对象存储调用失败。"""
 

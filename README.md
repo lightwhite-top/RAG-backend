@@ -270,7 +270,7 @@ INSERT INTO users (
 
 ## 文件上传
 
-当前版本把文件上传改为“提交任务 + 后台处理”模式，提供 Word 文件上传、阿里云 OSS 原文持久化、用户级文件元数据管理、原始文件与内容双层去重、后台切块向量化、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
+当前版本把文件上传改为“提交任务 + 后台处理”模式，提供 Word 文件上传、本地源文件暂存与异步处理、用户级文件元数据管理、原始文件与内容双层去重、后台切块向量化、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
@@ -281,12 +281,12 @@ INSERT INTO users (
 - 下游依赖或系统故障返回 `5xx`
 - 成功响应示例：`{"state": "success", "message": "上传任务已创建", "data": {"file_count": 1, "tasks": []}, "request_id": "7f6f4f9f..."}` 
 - 失败响应示例：`{"state": "error", "code": "unsupported_document_type", "message": "暂不支持的文件格式: .txt", "request_id": "7f6f4f9f..."}` 
-- 上传后的原始文件会持久化到阿里云 OSS，本地 `UPLOAD_ROOT_DIR` 仅作为临时接收和 worker 下载目录
-- 最终知识文件对象会落到 `knowledge-files/<用户id>/<file_id>/<文件名>`，原始去重 blob 仍保留在 `knowledge-files/raw/...`
-- `POST /files/upload` 只负责接收文件、计算原始哈希、登记任务和复用重复任务
+- 上传后的原始文件会先保留在本地 `UPLOAD_ROOT_DIR`，由后台 worker 直接读取这份源文件完成解析与入库
+- 最终知识文件对象会落到 `knowledge-files/<用户id>/<file_id>/<文件名>`，OSS 不再承担原始文件中转下载职责
+- `POST /files/upload` 只负责接收文件、计算原始哈希、登记任务和复用重复任务；不会再把原始文件先传 OSS 再回下载
 - 解析、去重、向量化、ES/Milvus 写入全部由后台 worker 异步完成
 - 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态
-- 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件
+- 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件；前提是本地源文件仍在当前节点保留
 - 可通过 `GET /files/global` 分页查询管理员上传的全局文件
 - 可通过 `GET /files/mine` 分页查询当前用户自己上传的文件
 - 可通过 `DELETE /files/{file_id}` 删除当前用户自己上传的知识文件
@@ -299,7 +299,7 @@ INSERT INTO users (
 - 同一用户、同一文件名、内容不同：任务完成后按最新版本覆盖旧文件
 - 同一用户、内容相同但文件名不同：任务完成后只更新标题，不重复入库
 - 上传后会自动写入 ES 文档索引与 Milvus 向量集合
-- 删除知识文件时会同步移除数据库文件记录、检索 chunk 与最终知识文件对象；共享的原始去重 blob 继续保留，用于审计与历史任务重试
+- 删除知识文件时会同步移除数据库文件记录、检索 chunk 与最终知识文件对象
 
 示例：
 
@@ -309,7 +309,7 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
   -F "files=@example.docx"
 ```
 
-`UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前只作为本地临时工作目录。
+`UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前同时承担上传源文件保留目录与 worker 本地处理目录。当前实现默认面向单机或固定节点处理模型，不适合无共享存储的跨节点抢占式消费。
 阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
 异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。

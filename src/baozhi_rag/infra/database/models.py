@@ -194,7 +194,9 @@ class KnowledgeUploadTaskModel(Base):
     uploader_role: Mapped[str] = mapped_column(String(16), nullable=False)
     raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    blob_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    # 继续复用历史列名 `blob_key`，避免现网库表在未执行迁移时无法启动；
+    # 领域层已把该字段统一解释为本地源文件的 storage_key。
+    source_storage_key: Mapped[str] = mapped_column("blob_key", String(512), nullable=False)
     requested_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
