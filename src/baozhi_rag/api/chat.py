@@ -589,8 +589,3 @@ def _encode_sse_event(event: str, data: dict[str, object]) -> str:
     """把单个事件编码为 SSE 文本块。"""
     serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {serialized}\n\n"
-
-
-
-
-

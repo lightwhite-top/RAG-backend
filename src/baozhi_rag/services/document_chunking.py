@@ -988,4 +988,3 @@ class DocumentChunkService:
             )
 
         return "\n".join(wrapped_lines)
-

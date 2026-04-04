@@ -127,4 +127,3 @@ class AliyunOssFileStore:
                 "未安装 alibabacloud-oss-v2 依赖"
             ) from ALIYUN_OSS_IMPORT_ERROR
         return cast(Any, ALIYUN_OSS_MODULE)
-

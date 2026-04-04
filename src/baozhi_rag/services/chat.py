@@ -79,7 +79,9 @@ class ChatStreamEvent:
 class ChatChunkSearcher(Protocol):
     """聊天服务依赖的检索协议。"""
 
-    def search(self, query_text: str, size: int, *, viewer_user_id: str = "") -> list[ChunkSearchHit]:
+    def search(
+        self, query_text: str, size: int, *, viewer_user_id: str = ""
+    ) -> list[ChunkSearchHit]:
         """按查询文本返回相关 chunk。"""
         ...
 
@@ -148,7 +150,9 @@ class ChatService:
         异常:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
-        completion = self._prepare_completion(messages, retrieval_size, viewer_user_id=viewer_user_id)
+        completion = self._prepare_completion(
+            messages, retrieval_size, viewer_user_id=viewer_user_id
+        )
         answer = self._chat_client.complete_chat(
             completion.model_messages,
             temperature=temperature,
@@ -197,7 +201,9 @@ class ChatService:
         异常:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
-        completion = self._prepare_completion(messages, retrieval_size, viewer_user_id=viewer_user_id)
+        completion = self._prepare_completion(
+            messages, retrieval_size, viewer_user_id=viewer_user_id
+        )
         citations_payload = [self._serialize_citation(item) for item in completion.citations]
 
         # 先把检索上下文透出给调用方，便于前端同步展示证据和审计信息。
@@ -595,8 +601,3 @@ class ChatService:
         """移除正文中的引用编号标记，保留纯展示文本。"""
         stripped = self._CITATION_PATTERN.sub("", text)
         return re.sub(r"[ \t]{2,}", " ", stripped)
-
-
-
-
-

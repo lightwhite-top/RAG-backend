@@ -196,5 +196,3 @@ class FileUploadService:
         """生成本地临时文件路径。"""
         date_path = staged_at.strftime("%Y/%m/%d")
         return f"_tmp/{date_path}/{stage_id}_{filename}"
-
-

@@ -460,7 +460,3 @@ def _as_string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
-
-
-
-

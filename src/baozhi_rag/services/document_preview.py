@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -29,6 +31,8 @@ from baozhi_rag.services.file_upload import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
 class ObjectFileStore(Protocol):
     """对象存储协议。"""
 
@@ -103,8 +107,8 @@ class DocumentPreviewService:
         """上传文件并完成去重、切块、向量化与入库。"""
         staged_files = self._file_upload_service.stage_files(files)
         completed_actions: list[object] = []
-
         completed_results: list[ChunkedFileResult] = []
+
         try:
             for staged_file in staged_files:
                 result, action = self._process_staged_file(
@@ -130,22 +134,26 @@ class DocumentPreviewService:
         current_user: CurrentUser,
     ) -> tuple[ChunkedFileResult, object | None]:
         """根据去重规则处理单个暂存文件。"""
+        preview_chunks = self._build_preview_chunks(staged_file)
+        content_sha256 = self._build_content_sha256(preview_chunks)
         existing_same_name = self._knowledge_file_repository.get_file_by_user_and_filename(
             current_user.id,
             staged_file.original_filename,
         )
         existing_same_content = self._knowledge_file_repository.get_file_by_user_and_sha256(
             current_user.id,
-            staged_file.sha256,
+            content_sha256,
         )
 
-        if existing_same_name is not None and existing_same_name.sha256 == staged_file.sha256:
+        if existing_same_name is not None and existing_same_name.sha256 == content_sha256:
             return self._build_duplicate_result(existing_same_name), None
 
         if existing_same_name is not None:
             return self._replace_existing_file(
                 existing_file=existing_same_name,
                 staged_file=staged_file,
+                preview_chunks=preview_chunks,
+                content_sha256=content_sha256,
                 current_user=current_user,
             )
 
@@ -155,12 +163,19 @@ class DocumentPreviewService:
                 staged_file=staged_file,
             )
 
-        return self._create_new_file(staged_file=staged_file, current_user=current_user)
+        return self._create_new_file(
+            staged_file=staged_file,
+            preview_chunks=preview_chunks,
+            content_sha256=content_sha256,
+            current_user=current_user,
+        )
 
     def _create_new_file(
         self,
         *,
         staged_file: StagedUploadFileResult,
+        preview_chunks: list[DocumentChunk],
+        content_sha256: str,
         current_user: CurrentUser,
     ) -> tuple[ChunkedFileResult, _NewUploadAction]:
         """处理全新文件上传。"""
@@ -168,8 +183,13 @@ class DocumentPreviewService:
             staged_file=staged_file,
             current_user=current_user,
             original_filename=staged_file.original_filename,
+            content_sha256=content_sha256,
         )
-        chunks = self._upload_and_index_new_file(staged_file=staged_file, knowledge_file=knowledge_file)
+        chunks = self._upload_and_index_new_file(
+            staged_file=staged_file,
+            knowledge_file=knowledge_file,
+            preview_chunks=preview_chunks,
+        )
         try:
             persisted_file = self._knowledge_file_repository.create_file(
                 replace(knowledge_file, chunk_count=len(chunks))
@@ -193,6 +213,8 @@ class DocumentPreviewService:
         *,
         existing_file: KnowledgeFile,
         staged_file: StagedUploadFileResult,
+        preview_chunks: list[DocumentChunk],
+        content_sha256: str,
         current_user: CurrentUser,
     ) -> tuple[ChunkedFileResult, _ReplacementAction]:
         """处理同名不同内容的覆盖更新。"""
@@ -200,10 +222,12 @@ class DocumentPreviewService:
             staged_file=staged_file,
             current_user=current_user,
             original_filename=staged_file.original_filename,
+            content_sha256=content_sha256,
         )
         chunks = self._upload_and_index_new_file(
             staged_file=staged_file,
             knowledge_file=replacement_file,
+            preview_chunks=preview_chunks,
         )
         try:
             persisted_file = self._knowledge_file_repository.replace_file(
@@ -264,8 +288,9 @@ class DocumentPreviewService:
         *,
         staged_file: StagedUploadFileResult,
         knowledge_file: KnowledgeFile,
+        preview_chunks: list[DocumentChunk],
     ) -> list[DocumentChunk]:
-        """执行 OSS 上传、切块、向量化与索引写入。"""
+        """执行 OSS 上传、向量化与索引写入。"""
         temp_file_path = self._temp_file_store.resolve_path(staged_file.temp_storage_key)
         uploaded_to_oss = False
         indexed = False
@@ -276,8 +301,8 @@ class DocumentPreviewService:
                 storage_key=knowledge_file.storage_key,
             )
             uploaded_to_oss = True
-            chunks = self._build_chunks(
-                temp_file_path=temp_file_path,
+            chunks = self._materialize_chunks(
+                preview_chunks=preview_chunks,
                 knowledge_file=knowledge_file,
             )
             self._chunk_store.ensure_index()
@@ -293,26 +318,48 @@ class DocumentPreviewService:
                     self._object_store.delete(knowledge_file.storage_key)
             raise
 
-    def _build_chunks(
+    def _build_preview_chunks(self, staged_file: StagedUploadFileResult) -> list[DocumentChunk]:
+        """基于暂存文件生成用于去重判定的预览 chunk。"""
+        temp_file_path = self._temp_file_store.resolve_path(staged_file.temp_storage_key)
+        return self._chunk_service.chunk_document(
+            file_path=temp_file_path,
+            source_filename=staged_file.original_filename,
+            storage_key=staged_file.temp_storage_key,
+            file_id=staged_file.stage_id,
+        )
+
+    def _build_content_sha256(self, preview_chunks: list[DocumentChunk]) -> str:
+        """基于解析后的文档内容计算稳定哈希。"""
+        payload = [
+            {
+                "chunk_index": chunk.chunk_index,
+                "char_count": chunk.char_count,
+                "content": chunk.content,
+                "merged_terms": chunk.merged_terms,
+            }
+            for chunk in preview_chunks
+        ]
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _materialize_chunks(
         self,
         *,
-        temp_file_path: Path,
+        preview_chunks: list[DocumentChunk],
         knowledge_file: KnowledgeFile,
     ) -> list[DocumentChunk]:
-        """基于暂存文件构造带权限元数据的 chunk 列表。"""
-        raw_chunks = self._chunk_service.chunk_document(
-            file_path=temp_file_path,
-            source_filename=knowledge_file.original_filename,
-            storage_key=knowledge_file.storage_key,
-            file_id=knowledge_file.id,
-        )
+        """把预览 chunk 转换为最终入库 chunk。"""
         scoped_chunks = [
             replace(
                 chunk,
+                file_id=knowledge_file.id,
+                chunk_id=f"{knowledge_file.id}-chunk-{chunk.chunk_index}",
+                source_filename=knowledge_file.original_filename,
+                storage_key=knowledge_file.storage_key,
                 uploader_user_id=knowledge_file.uploader_user_id,
                 visibility_scope=knowledge_file.visibility_scope.value,
             )
-            for chunk in raw_chunks
+            for chunk in preview_chunks
         ]
         return self._chunk_embedding_service.embed_chunks(scoped_chunks)
 
@@ -322,6 +369,7 @@ class DocumentPreviewService:
         staged_file: StagedUploadFileResult,
         current_user: CurrentUser,
         original_filename: str,
+        content_sha256: str,
     ) -> KnowledgeFile:
         """基于暂存结果构造新的文件元数据对象。"""
         uploaded_at = datetime.now(UTC)
@@ -332,7 +380,7 @@ class DocumentPreviewService:
             original_filename=original_filename,
             content_type=staged_file.content_type,
             size=staged_file.size,
-            sha256=staged_file.sha256,
+            sha256=content_sha256,
             storage_provider=FileStorageProvider.ALIYUN_OSS,
             storage_key=self._build_storage_key(
                 uploader_user_id=current_user.id,
@@ -353,7 +401,11 @@ class DocumentPreviewService:
         safe_filename: str,
     ) -> str:
         """构造 OSS 对象键。"""
-        parts = [part for part in [self._oss_object_prefix, uploader_user_id, file_id, safe_filename] if part]
+        parts = [
+            part
+            for part in [self._oss_object_prefix, uploader_user_id, file_id, safe_filename]
+            if part
+        ]
         return "/".join(parts)
 
     def _resolve_visibility_scope(self, current_user: CurrentUser) -> FileVisibilityScope:
@@ -440,16 +492,3 @@ class DocumentPreviewService:
         for staged_file in reversed(staged_files):
             with suppress(Exception):
                 self._temp_file_store.delete(staged_file.temp_storage_key)
-
-
-
-
-
-
-
-
-
-
-
-
-

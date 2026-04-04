@@ -346,7 +346,4 @@ class MilvusChunkVectorStore:
     def _build_visibility_filter(viewer_user_id: str) -> str:
         """构造按可见性过滤的 Milvus 表达式。"""
         escaped_user_id = viewer_user_id.replace("\\", "\\\\").replace('"', '\\"')
-        return (
-            'visibility_scope == "global" '
-            f'or uploader_user_id == "{escaped_user_id}"'
-        )
+        return f'visibility_scope == "global" or uploader_user_id == "{escaped_user_id}"'

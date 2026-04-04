@@ -359,5 +359,3 @@ class HybridChunkStore(ChunkSearchStore):
             当前排名对应的 RRF 分值。
         """
         return 1.0 / (self._RRF_K + rank)
-
-
