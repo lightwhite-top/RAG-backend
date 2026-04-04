@@ -115,6 +115,9 @@ Copy-Item .env.example .env
 - 用户注册：`POST http://127.0.0.1:8000/auth/register`
 - 用户登录：`POST http://127.0.0.1:8000/auth/login`
 - 文件上传：`POST http://127.0.0.1:8000/files/upload`
+- 上传任务列表：`GET http://127.0.0.1:8000/files/upload-tasks`
+- 上传任务详情：`GET http://127.0.0.1:8000/files/upload-tasks/{task_id}`
+- 重试上传任务：`POST http://127.0.0.1:8000/files/upload-tasks/{task_id}/retry`
 - RAG 聊天：`POST http://127.0.0.1:8000/chat/completions`
 
 ## 跨域配置
@@ -264,24 +267,30 @@ INSERT INTO users (
 
 ## 文件上传
 
-当前版本提供 Word 文件上传、阿里云 OSS 原文持久化、用户级文件元数据管理、领域词增强、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
+当前版本把文件上传改为“提交任务 + 后台处理”模式，提供 Word 文件上传、阿里云 OSS 原文持久化、用户级文件元数据管理、原始文件与内容双层去重、后台切块向量化、ES 文档入库、Milvus 向量入库与 chunk 混合检索闭环。
 
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`
-- 成功时返回 `200 OK`
+- 成功时返回 `202 Accepted`
 - 业务输入错误返回 `4xx`
 - 下游依赖或系统故障返回 `5xx`
-- 成功响应示例：`{"state": "success", "message": "文件上传成功", "data": {"file_count": 1, "files": []}, "request_id": "7f6f4f9f..."}` 
+- 成功响应示例：`{"state": "success", "message": "上传任务已创建", "data": {"file_count": 1, "tasks": []}, "request_id": "7f6f4f9f..."}` 
 - 失败响应示例：`{"state": "error", "code": "unsupported_document_type", "message": "暂不支持的文件格式: .txt", "request_id": "7f6f4f9f..."}` 
-- 切块增强字段：`merged_terms`
-- 上传后会强制执行百炼 embedding，为 `chunk` 补充 `content_embedding`
-- 上传后的原始文件会持久化到阿里云 OSS，本地 `UPLOAD_ROOT_DIR` 仅作为临时解析目录
+- 上传后的原始文件会持久化到阿里云 OSS，本地 `UPLOAD_ROOT_DIR` 仅作为临时接收和 worker 下载目录
+- 最终知识文件对象会落到 `knowledge-files/<用户id>/<file_id>/<文件名>`，原始去重 blob 仍保留在 `knowledge-files/raw/...`
+- `POST /files/upload` 只负责接收文件、计算原始哈希、登记任务和复用重复任务
+- 解析、去重、向量化、ES/Milvus 写入全部由后台 worker 异步完成
+- 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态
+- 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件
+- 去重分为两层：
+  - `raw_sha256`：解决同一大文件重复提交、重复重传、双击上传
+  - `content_sha256`：解决“二进制不同但正文相同”的重复入库
 - 管理员上传文件默认全员可检索；普通用户上传文件仅上传者本人可检索
-- 同一用户、同一文件名、内容相同：提示“文件重复入库”
-- 同一用户、同一文件名、内容不同：按最新版本覆盖旧文件
-- 同一用户、内容相同但文件名不同：提示“文件内容重复入库，已更新标题”
+- 同一用户、同一文件名、内容相同：任务完成后标记为重复入库
+- 同一用户、同一文件名、内容不同：任务完成后按最新版本覆盖旧文件
+- 同一用户、内容相同但文件名不同：任务完成后只更新标题，不重复入库
 - 上传后会自动写入 ES 文档索引与 Milvus 向量集合
 
 示例：
@@ -294,7 +303,8 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 `UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前只作为本地临时工作目录。
 阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
-切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR` 配置。
+切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
+异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
 默认领域词典文件位于 `src/baozhi_rag/domain/default_domain_terms.txt`，自定义扩展词典可通过 `DOMAIN_DICTIONARY_PATH` 配置。
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置。
@@ -335,7 +345,7 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
         "chunk_id": "chunk-1",
         "file_id": "file-1",
         "source_filename": "保险条款.docx",
-        "storage_key": "2026/03/28/file-1_保险条款.docx",
+        "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
         "chunk_index": 0,
         "char_count": 24,
         "content": "本条款包含免赔额和保险责任说明。",
@@ -414,7 +424,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
           "chunk_id": "chunk-1",
           "file_id": "file-1",
           "source_filename": "保险条款.docx",
-          "storage_key": "2026/03/31/file-1_保险条款.docx",
+          "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
           "chunk_index": 0,
           "char_count": 20,
           "content": "免赔额是指理赔时由被保险人自行承担的金额。",
@@ -447,7 +457,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
         "chunk_id": "chunk-1",
         "file_id": "file-1",
         "source_filename": "保险条款.docx",
-        "storage_key": "2026/03/31/file-1_保险条款.docx",
+        "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
         "chunk_index": 0,
         "char_count": 20,
         "content": "免赔额是指理赔时由被保险人自行承担的金额。",

@@ -10,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -23,6 +24,7 @@ from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
+_SOFFICE_CONVERT_LOCK = Lock()
 
 
 class SegmentType(Enum):
@@ -124,6 +126,7 @@ class DocumentChunkService:
         chunk_size: int,
         chunk_overlap: int,
         convert_temp_dir: Path,
+        doc_convert_timeout_seconds: int = 120,
         term_matcher: MaximumMatchingTermMatcher | None = None,
     ) -> None:
         """初始化切块服务。
@@ -132,6 +135,7 @@ class DocumentChunkService:
             chunk_size: 单个切块的目标最大字符数。
             chunk_overlap: 相邻切块之间保留的重叠字符数。
             convert_temp_dir: `.doc` 转 `.docx` 时使用的临时目录。
+            doc_convert_timeout_seconds: `soffice` 转换超时时间，单位为秒。
             term_matcher: 领域词匹配器；未传时使用默认金融保险词典。
 
         返回:
@@ -146,10 +150,14 @@ class DocumentChunkService:
         if chunk_overlap < 0 or chunk_overlap >= chunk_size:
             msg = "doc_chunk_overlap 必须在 0 和 chunk_size 之间"
             raise ValueError(msg)
+        if doc_convert_timeout_seconds <= 0:
+            msg = "doc_convert_timeout_seconds 必须大于 0"
+            raise ValueError(msg)
 
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._convert_temp_dir = convert_temp_dir
+        self._doc_convert_timeout_seconds = doc_convert_timeout_seconds
         self._term_matcher = term_matcher or build_default_term_matcher()
 
     def chunk_document(
@@ -331,22 +339,27 @@ class DocumentChunkService:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            result = subprocess.run(
-                [
-                    "soffice",
-                    "--headless",
-                    "--convert-to",
-                    "docx",
-                    "--outdir",
-                    str(output_dir),
-                    str(file_path),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with _SOFFICE_CONVERT_LOCK:
+                result = subprocess.run(
+                    [
+                        "soffice",
+                        "--headless",
+                        "--convert-to",
+                        "docx",
+                        "--outdir",
+                        str(output_dir),
+                        str(file_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self._doc_convert_timeout_seconds,
+                )
         except FileNotFoundError as exc:
             msg = "未找到 soffice，无法解析 .doc 文件"
+            raise DocumentConversionError(msg) from exc
+        except subprocess.TimeoutExpired as exc:
+            msg = "文档格式转换超时，请检查文件是否损坏或尝试手动转为 .docx 后重新上传"
             raise DocumentConversionError(msg) from exc
 
         converted_path = output_dir / f"{file_path.stem}.docx"

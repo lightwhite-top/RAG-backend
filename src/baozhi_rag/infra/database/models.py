@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -38,6 +38,20 @@ class Base(DeclarativeBase):
     """ORM 基类。"""
 
 
+def mysql_table_options() -> dict[str, str]:
+    """返回统一的 MySQL 建表选项。
+
+    返回:
+        固定为 `utf8mb4` 与 `utf8mb4_unicode_ci` 的建表参数，用于避免
+        新表跟随库默认排序规则创建后，与既有表的字符串主键/外键不兼容。
+    """
+    return {
+        "mysql_engine": "InnoDB",
+        "mysql_charset": "utf8mb4",
+        "mysql_collate": "utf8mb4_unicode_ci",
+    }
+
+
 class UserModel(Base):
     """用户表。"""
 
@@ -45,6 +59,7 @@ class UserModel(Base):
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
         UniqueConstraint("username", name="uq_users_username"),
+        mysql_table_options(),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -66,6 +81,7 @@ class RegistrationVerificationCodeModel(Base):
             "email",
             "sent_at",
         ),
+        mysql_table_options(),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -85,14 +101,25 @@ class KnowledgeFileModel(Base):
     __table_args__ = (
         UniqueConstraint(
             "uploader_user_id",
-            "original_filename",
-            name="uq_knowledge_files_uploader_filename",
+            "content_sha256",
+            name="uq_knowledge_files_uploader_content_sha256",
         ),
         Index(
-            "ix_knowledge_files_uploader_sha256",
+            "ix_knowledge_files_uploader_filename",
             "uploader_user_id",
-            "sha256",
+            "original_filename",
         ),
+        Index(
+            "ix_knowledge_files_uploader_raw_sha256",
+            "uploader_user_id",
+            "raw_sha256",
+        ),
+        Index(
+            "ix_knowledge_files_uploader_content_sha256",
+            "uploader_user_id",
+            "content_sha256",
+        ),
+        mysql_table_options(),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -104,10 +131,87 @@ class KnowledgeFileModel(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     storage_provider: Mapped[str] = mapped_column(String(32), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
     visibility_scope: Mapped[str] = mapped_column(String(32), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class KnowledgeFileBlobModel(Base):
+    """原始上传文件 blob 表。"""
+
+    __tablename__ = "knowledge_file_blobs"
+    __table_args__ = (
+        UniqueConstraint("raw_sha256", name="uq_knowledge_file_blobs_raw_sha256"),
+        mysql_table_options(),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class KnowledgeUploadTaskModel(Base):
+    """知识文件上传任务表。"""
+
+    __tablename__ = "knowledge_upload_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "uploader_user_id",
+            "raw_sha256",
+            "ingest_version",
+            name="uq_knowledge_upload_tasks_uploader_raw_ingest",
+        ),
+        Index(
+            "ix_knowledge_upload_tasks_status_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_knowledge_upload_tasks_uploader_created_at",
+            "uploader_user_id",
+            "created_at",
+        ),
+        mysql_table_options(),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    uploader_user_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    uploader_role: Mapped[str] = mapped_column(String(16), nullable=False)
+    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    blob_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    requested_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    ingest_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deduplicated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    replaced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    title_updated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

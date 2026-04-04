@@ -9,7 +9,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol
 from uuid import uuid4
 
 from fastapi import status
@@ -53,6 +53,22 @@ class FileUploadInput:
     stream: BinaryIO
 
 
+class AsyncBinaryReader(Protocol):
+    """异步二进制读取协议。"""
+
+    async def read(self, size: int = -1) -> bytes:
+        """读取指定大小的字节内容。"""
+
+
+@dataclass(frozen=True, slots=True)
+class AsyncFileUploadInput:
+    """服务层使用的异步上传文件输入。"""
+
+    filename: str
+    content_type: str | None
+    stream: AsyncBinaryReader
+
+
 @dataclass(frozen=True, slots=True)
 class StagedUploadFileResult:
     """本地临时暂存文件结果。"""
@@ -87,6 +103,8 @@ class UploadedFileResult:
 class FileUploadService:
     """负责把上传文件暂存到本地临时目录并计算哈希。"""
 
+    _READ_CHUNK_SIZE = 1024 * 1024
+
     def __init__(self, file_store: LocalFileStore) -> None:
         """初始化文件上传服务。"""
         self._file_store = file_store
@@ -114,10 +132,32 @@ class FileUploadService:
         """兼容旧调用方的暂存入口。"""
         return self.stage_files(files)
 
+    async def stage_async_files(
+        self,
+        files: list[AsyncFileUploadInput],
+    ) -> list[StagedUploadFileResult]:
+        """异步批量暂存文件并在失败时回滚临时文件。"""
+        stored_keys: list[str] = []
+        results: list[StagedUploadFileResult] = []
+
+        try:
+            for file_input in files:
+                result = await self._stage_single_async_file(file_input)
+                stored_keys.append(result.temp_storage_key)
+                results.append(result)
+        except FileUploadError:
+            self._rollback(stored_keys)
+            raise
+        except OSError as exc:
+            self._rollback(stored_keys)
+            raise FileStorageError("文件保存失败") from exc
+
+        return results
+
     def _stage_single_file(self, file_input: FileUploadInput) -> StagedUploadFileResult:
         """暂存单个上传文件并计算内容哈希。"""
         original_filename = self._validate_filename(file_input.filename)
-        safe_filename = self._sanitize_filename(original_filename)
+        safe_filename = self.sanitize_filename(original_filename)
         stage_id = uuid4().hex
         staged_at = datetime.now(UTC)
         temp_storage_key = self._build_temp_storage_key(staged_at, stage_id, safe_filename)
@@ -129,7 +169,50 @@ class FileUploadService:
             sha256_hasher = hashlib.sha256()
             size = 0
             with destination.open("wb") as target:
-                while chunk := file_input.stream.read(1024 * 1024):
+                while chunk := file_input.stream.read(self._READ_CHUNK_SIZE):
+                    sha256_hasher.update(chunk)
+                    size += len(chunk)
+                    target.write(chunk)
+        except OSError as exc:
+            raise FileStorageError(f"保存文件失败: {original_filename}") from exc
+
+        result = StagedUploadFileResult(
+            stage_id=stage_id,
+            original_filename=original_filename,
+            safe_filename=safe_filename,
+            content_type=file_input.content_type or "application/octet-stream",
+            size=size,
+            sha256=sha256_hasher.hexdigest(),
+            temp_storage_key=temp_storage_key,
+            staged_at=staged_at,
+        )
+        LOGGER.info(
+            "file_stage_success filename=%s size=%s sha256=%s temp_storage_key=%s",
+            result.original_filename,
+            result.size,
+            result.sha256,
+            result.temp_storage_key,
+        )
+        return result
+
+    async def _stage_single_async_file(
+        self,
+        file_input: AsyncFileUploadInput,
+    ) -> StagedUploadFileResult:
+        """异步暂存单个上传文件并计算原始内容哈希。"""
+        original_filename = self._validate_filename(file_input.filename)
+        safe_filename = self.sanitize_filename(original_filename)
+        stage_id = uuid4().hex
+        staged_at = datetime.now(UTC)
+        temp_storage_key = self._build_temp_storage_key(staged_at, stage_id, safe_filename)
+        destination = self._file_store.resolve_path(temp_storage_key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            sha256_hasher = hashlib.sha256()
+            size = 0
+            with destination.open("wb") as target:
+                while chunk := await file_input.stream.read(self._READ_CHUNK_SIZE):
                     sha256_hasher.update(chunk)
                     size += len(chunk)
                     target.write(chunk)
@@ -178,7 +261,8 @@ class FileUploadService:
 
         return normalized
 
-    def _sanitize_filename(self, filename: str) -> str:
+    @staticmethod
+    def sanitize_filename(filename: str) -> str:
         """清理文件名中的危险字符，保留可读性。"""
         normalized = unicodedata.normalize("NFKC", filename)
         sanitized = "".join(

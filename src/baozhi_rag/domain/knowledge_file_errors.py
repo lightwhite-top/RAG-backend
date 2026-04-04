@@ -31,6 +31,22 @@ class KnowledgeFileConflictError(KnowledgeFileError):
     default_status_code = status.HTTP_409_CONFLICT
 
 
+class KnowledgeUploadTaskNotFoundError(KnowledgeFileError):
+    """上传任务不存在。"""
+
+    default_message = "上传任务不存在"
+    default_error_code = "knowledge_upload_task_not_found"
+    default_status_code = status.HTTP_404_NOT_FOUND
+
+
+class KnowledgeUploadTaskRetryNotAllowedError(KnowledgeFileError):
+    """上传任务当前状态不允许重试。"""
+
+    default_message = "当前任务状态不允许重试"
+    default_error_code = "knowledge_upload_task_retry_not_allowed"
+    default_status_code = status.HTTP_409_CONFLICT
+
+
 class ObjectStorageError(KnowledgeFileError):
     """对象存储调用失败。"""
 

@@ -29,10 +29,16 @@ class KnowledgeFile:
     original_filename: str
     content_type: str
     size: int
-    sha256: str
     storage_provider: FileStorageProvider
     storage_key: str
     visibility_scope: FileVisibilityScope
     chunk_count: int
     uploaded_at: datetime
     updated_at: datetime
+    raw_sha256: str = ""
+    content_sha256: str = ""
+
+    @property
+    def sha256(self) -> str:
+        """兼容旧调用方，返回内容级哈希。"""
+        return self.content_sha256

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -100,6 +101,36 @@ class AliyunOssFileStore:
             )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             raise ObjectStorageError(f"删除 OSS 对象失败: {storage_key}") from exc
+
+    def download_file(self, *, storage_key: str, local_path: Path) -> None:
+        """把 OSS 对象下载到本地路径。"""
+        oss_module = self._get_oss_module()
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        body: Any | None = None
+        try:
+            response = self._get_client().get_object(
+                cast(
+                    Any,
+                    oss_module.GetObjectRequest(
+                        bucket=self._bucket_name,
+                        key=storage_key,
+                    ),
+                )
+            )
+            body = getattr(response, "body", response)
+            with local_path.open("wb") as file_obj:
+                if hasattr(body, "read"):
+                    while chunk := body.read(1024 * 1024):
+                        file_obj.write(chunk)
+                else:
+                    file_obj.write(bytes(body))
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            raise ObjectStorageError(f"下载 OSS 对象失败: {storage_key}") from exc
+        finally:
+            if body is not None and hasattr(body, "close"):
+                with suppress(Exception):
+                    body.close()
 
     def _get_client(self) -> Any:
         """延迟初始化 OSS 客户端。"""

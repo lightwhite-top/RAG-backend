@@ -66,10 +66,18 @@ class SqlAlchemyKnowledgeFileRepository:
         sha256: str,
     ) -> KnowledgeFile | None:
         """按上传者和内容哈希查询文件。"""
+        return self.get_file_by_user_and_content_sha256(uploader_user_id, sha256)
+
+    def get_file_by_user_and_content_sha256(
+        self,
+        uploader_user_id: str,
+        content_sha256: str,
+    ) -> KnowledgeFile | None:
+        """按上传者和内容哈希查询文件。"""
         with self._session_factory() as session:
             stmt = select(KnowledgeFileModel).where(
                 KnowledgeFileModel.uploader_user_id == uploader_user_id,
-                KnowledgeFileModel.sha256 == sha256,
+                KnowledgeFileModel.content_sha256 == content_sha256,
             )
             file_model = session.scalar(stmt)
             return self._to_domain(file_model) if file_model is not None else None
@@ -94,6 +102,8 @@ class SqlAlchemyKnowledgeFileRepository:
         content_type: str | None = None,
         size: int | None = None,
         sha256: str | None = None,
+        raw_sha256: str | None = None,
+        content_sha256: str | None = None,
         storage_provider: FileStorageProvider | None = None,
         storage_key: str | None = None,
         visibility_scope: FileVisibilityScope | None = None,
@@ -111,8 +121,12 @@ class SqlAlchemyKnowledgeFileRepository:
                 file_model.content_type = content_type
             if size is not None:
                 file_model.size = size
-            if sha256 is not None:
-                file_model.sha256 = sha256
+            # `sha256` 为兼容旧调用方的别名，语义等同于内容哈希。
+            normalized_content_sha256 = content_sha256 or sha256
+            if raw_sha256 is not None:
+                file_model.raw_sha256 = raw_sha256
+            if normalized_content_sha256 is not None:
+                file_model.content_sha256 = normalized_content_sha256
             if storage_provider is not None:
                 file_model.storage_provider = storage_provider.value
             if storage_key is not None:
@@ -169,8 +183,14 @@ class SqlAlchemyKnowledgeFileRepository:
     def _raise_conflict_error(self, exc: IntegrityError) -> None:
         """将数据库唯一约束冲突翻译为领域错误。"""
         message = str(exc.orig).lower()
-        if "uq_knowledge_files_uploader_filename" in message or "original_filename" in message:
+        if (
+            "uq_knowledge_files_uploader_filename" in message
+            or "ix_knowledge_files_uploader_filename" in message
+            or "original_filename" in message
+        ):
             raise KnowledgeFileConflictError("同一用户的同名文件记录冲突") from exc
+        if "uq_knowledge_files_uploader_content_sha256" in message or "content_sha256" in message:
+            raise KnowledgeFileConflictError("同一用户的同内容文件记录冲突") from exc
         raise KnowledgeFileConflictError() from exc
 
     def _to_model(self, file: KnowledgeFile) -> KnowledgeFileModel:
@@ -181,7 +201,8 @@ class SqlAlchemyKnowledgeFileRepository:
             original_filename=file.original_filename,
             content_type=file.content_type,
             size=file.size,
-            sha256=file.sha256,
+            raw_sha256=file.raw_sha256,
+            content_sha256=file.content_sha256 or file.sha256,
             storage_provider=file.storage_provider.value,
             storage_key=file.storage_key,
             visibility_scope=file.visibility_scope.value,
@@ -198,11 +219,12 @@ class SqlAlchemyKnowledgeFileRepository:
             original_filename=file_model.original_filename,
             content_type=file_model.content_type,
             size=file_model.size,
-            sha256=file_model.sha256,
             storage_provider=FileStorageProvider(file_model.storage_provider),
             storage_key=file_model.storage_key,
             visibility_scope=FileVisibilityScope(file_model.visibility_scope),
             chunk_count=file_model.chunk_count,
             uploaded_at=file_model.uploaded_at,
             updated_at=file_model.updated_at,
+            raw_sha256=file_model.raw_sha256,
+            content_sha256=file_model.content_sha256,
         )

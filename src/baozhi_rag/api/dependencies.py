@@ -8,14 +8,22 @@ from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from baozhi_rag.core.config import Settings, get_settings
+from baozhi_rag.domain.knowledge_file_blob_repository import KnowledgeFileBlobRepository
 from baozhi_rag.domain.knowledge_file_repository import KnowledgeFileRepository
+from baozhi_rag.domain.knowledge_upload_task_repository import KnowledgeUploadTaskRepository
 from baozhi_rag.domain.registration_verification_repository import (
     RegistrationVerificationRepository,
 )
 from baozhi_rag.domain.user import CurrentUser, UserRole
 from baozhi_rag.domain.user_errors import AuthenticationRequiredError, PermissionDeniedError
 from baozhi_rag.domain.user_repository import UserRepository
+from baozhi_rag.infra.database.knowledge_file_blob_repository import (
+    SqlAlchemyKnowledgeFileBlobRepository,
+)
 from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowledgeFileRepository
+from baozhi_rag.infra.database.knowledge_upload_task_repository import (
+    SqlAlchemyKnowledgeUploadTaskRepository,
+)
 from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.database.registration_verification_repository import (
     SqlAlchemyRegistrationVerificationRepository,
@@ -37,6 +45,7 @@ from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.term_matching import build_default_term_matcher
+from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 from baozhi_rag.services.user_admin import UserAdminService
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -75,6 +84,20 @@ def get_registration_verification_repository(
     return SqlAlchemyRegistrationVerificationRepository(database_manager.session_factory)
 
 
+def get_knowledge_file_blob_repository(
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> KnowledgeFileBlobRepository:
+    """构造原始文件 blob 仓储。"""
+    return SqlAlchemyKnowledgeFileBlobRepository(database_manager.session_factory)
+
+
+def get_knowledge_upload_task_repository(
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> KnowledgeUploadTaskRepository:
+    """构造上传任务仓储。"""
+    return SqlAlchemyKnowledgeUploadTaskRepository(database_manager.session_factory)
+
+
 def get_local_temp_file_store(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> LocalFileStore:
@@ -109,6 +132,7 @@ def get_document_preview_service(
             chunk_size=settings.doc_chunk_size,
             chunk_overlap=settings.doc_chunk_overlap,
             convert_temp_dir=settings.doc_convert_temp_dir,
+            doc_convert_timeout_seconds=settings.doc_convert_timeout_seconds,
             term_matcher=term_matcher,
         ),
         temp_file_store=temp_file_store,
@@ -117,6 +141,31 @@ def get_document_preview_service(
         chunk_store=chunk_store,
         chunk_embedding_service=chunk_embedding_service,
         oss_object_prefix=settings.normalized_oss_object_prefix,
+    )
+
+
+def get_knowledge_upload_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+    temp_file_store: Annotated[LocalFileStore, Depends(get_local_temp_file_store)],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
+    blob_repository: Annotated[
+        KnowledgeFileBlobRepository,
+        Depends(get_knowledge_file_blob_repository),
+    ],
+    task_repository: Annotated[
+        KnowledgeUploadTaskRepository,
+        Depends(get_knowledge_upload_task_repository),
+    ],
+) -> KnowledgeUploadService:
+    """构造知识文件异步上传任务服务。"""
+    return KnowledgeUploadService(
+        file_upload_service=FileUploadService(temp_file_store),
+        temp_file_store=temp_file_store,
+        object_store=object_store,
+        blob_repository=blob_repository,
+        task_repository=task_repository,
+        raw_object_prefix=settings.normalized_raw_oss_object_prefix,
+        ingest_version=settings.upload_ingest_version,
     )
 
 

@@ -100,6 +100,42 @@ class Settings(BaseSettings):
         description="旧版 Word 转换临时目录",
         validation_alias=AliasChoices("DOC_CONVERT_TEMP_DIR"),
     )
+    doc_convert_timeout_seconds: int = Field(
+        default=120,
+        description="旧版 Word 转换超时时间（秒）",
+        validation_alias=AliasChoices("DOC_CONVERT_TIMEOUT_SECONDS"),
+        ge=1,
+    )
+    upload_ingest_version: str = Field(
+        default="v1",
+        description="上传任务 ingest 版本，用于控制重复文件重新处理",
+        validation_alias=AliasChoices("UPLOAD_INGEST_VERSION"),
+        min_length=1,
+    )
+    upload_worker_concurrency: int = Field(
+        default=1,
+        description="后台上传 worker 并发数",
+        validation_alias=AliasChoices("UPLOAD_WORKER_CONCURRENCY"),
+        ge=1,
+    )
+    upload_worker_poll_interval_seconds: float = Field(
+        default=1.0,
+        description="后台上传 worker 轮询间隔（秒）",
+        validation_alias=AliasChoices("UPLOAD_WORKER_POLL_INTERVAL_SECONDS"),
+        gt=0,
+    )
+    upload_task_lease_seconds: int = Field(
+        default=180,
+        description="上传任务租约时长（秒）",
+        validation_alias=AliasChoices("UPLOAD_TASK_LEASE_SECONDS"),
+        ge=1,
+    )
+    upload_task_heartbeat_interval_seconds: float = Field(
+        default=30.0,
+        description="上传任务心跳刷新间隔（秒）",
+        validation_alias=AliasChoices("UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS"),
+        gt=0,
+    )
     domain_dictionary_path: Path | None = Field(
         default=None,
         description="金融保险领域词典文件路径，按行存储词项",
@@ -417,6 +453,12 @@ class Settings(BaseSettings):
     def normalized_oss_object_prefix(self) -> str:
         """返回清理首尾斜杠后的 OSS 对象前缀。"""
         return self.oss_object_prefix.strip().strip("/")
+
+    @property
+    def normalized_raw_oss_object_prefix(self) -> str:
+        """返回用于原始 blob 持久化的 OSS 前缀。"""
+        normalized_prefix = self.normalized_oss_object_prefix
+        return "/".join(part for part in [normalized_prefix, "raw"] if part)
 
 
 @lru_cache

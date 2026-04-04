@@ -380,7 +380,6 @@ class DocumentPreviewService:
             original_filename=original_filename,
             content_type=staged_file.content_type,
             size=staged_file.size,
-            sha256=content_sha256,
             storage_provider=FileStorageProvider.ALIYUN_OSS,
             storage_key=self._build_storage_key(
                 uploader_user_id=current_user.id,
@@ -391,6 +390,8 @@ class DocumentPreviewService:
             chunk_count=0,
             uploaded_at=uploaded_at,
             updated_at=uploaded_at,
+            raw_sha256=staged_file.sha256,
+            content_sha256=content_sha256,
         )
 
     def _build_storage_key(

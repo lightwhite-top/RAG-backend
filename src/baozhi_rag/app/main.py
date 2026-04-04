@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,12 +19,21 @@ from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.logging import configure_logging
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
 from baozhi_rag.domain.user import CurrentUser
+from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowledgeFileRepository
+from baozhi_rag.infra.database.knowledge_upload_task_repository import (
+    SqlAlchemyKnowledgeUploadTaskRepository,
+)
 from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
+from baozhi_rag.infra.storage.local_file_store import LocalFileStore
 from baozhi_rag.schemas.common import SuccessResponse
 from baozhi_rag.schemas.system import ServiceInfoResponse
+from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
+from baozhi_rag.services.document_chunking import DocumentChunkService
+from baozhi_rag.services.term_matching import build_default_term_matcher
+from baozhi_rag.services.upload_tasks import KnowledgeUploadProcessor, KnowledgeUploadWorker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,15 +63,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_manager = DatabaseManager.from_settings(current_settings)
         database_manager.ensure_ready()
         database_manager.ensure_schema()
-        AliyunOssFileStore.from_settings(current_settings).ensure_ready()
-        AlibabaModelStudioClient.from_settings(current_settings).ensure_ready()
-        HybridChunkStore.from_settings(current_settings).ensure_ready()
+        object_store = AliyunOssFileStore.from_settings(current_settings)
+        object_store.ensure_ready()
+        bailian_client = AlibabaModelStudioClient.from_settings(current_settings)
+        bailian_client.ensure_ready()
+        chunk_store = HybridChunkStore.from_settings(current_settings)
+        chunk_store.ensure_ready()
+
+        worker_tasks: list[asyncio.Task[None]] = []
+        worker_instance_id = uuid4().hex[:8]
+        for worker_index in range(current_settings.upload_worker_concurrency):
+            processor = KnowledgeUploadProcessor(
+                temp_file_store=LocalFileStore(current_settings.upload_root_dir),
+                object_store=object_store,
+                final_object_prefix=current_settings.normalized_oss_object_prefix,
+                task_repository=SqlAlchemyKnowledgeUploadTaskRepository(
+                    database_manager.session_factory
+                ),
+                knowledge_file_repository=SqlAlchemyKnowledgeFileRepository(
+                    database_manager.session_factory
+                ),
+                chunk_service=DocumentChunkService(
+                    chunk_size=current_settings.doc_chunk_size,
+                    chunk_overlap=current_settings.doc_chunk_overlap,
+                    convert_temp_dir=current_settings.doc_convert_temp_dir,
+                    doc_convert_timeout_seconds=current_settings.doc_convert_timeout_seconds,
+                    term_matcher=build_default_term_matcher(
+                        current_settings.domain_dictionary_path
+                    ),
+                ),
+                chunk_store=chunk_store,
+                chunk_embedding_service=ChunkEmbeddingService(bailian_client),
+                lease_seconds=current_settings.upload_task_lease_seconds,
+                heartbeat_interval_seconds=current_settings.upload_task_heartbeat_interval_seconds,
+            )
+            worker = KnowledgeUploadWorker(
+                processor=processor,
+                worker_id=f"{worker_instance_id}-{worker_index}",
+                poll_interval_seconds=current_settings.upload_worker_poll_interval_seconds,
+            )
+            worker_task = asyncio.create_task(worker.run())
+            worker_task.set_name(f"knowledge-upload-worker-{worker_index}")
+            worker_tasks.append(worker_task)
+
         LOGGER.info(
             "service_startup env=%s version=%s",
             current_settings.app_env,
             current_settings.version,
         )
         yield
+        for worker_task in worker_tasks:
+            worker_task.cancel()
+        if worker_tasks:
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
         LOGGER.info("service_shutdown")
 
     app = FastAPI(
