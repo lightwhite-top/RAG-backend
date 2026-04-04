@@ -25,6 +25,7 @@ uv.lock.bak
 .env
 .sisyphus/
 .claude/
+.codex/
 data/
 docs/
 tests/
