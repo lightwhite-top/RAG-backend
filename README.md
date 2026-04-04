@@ -117,6 +117,7 @@ Copy-Item .env.example .env
 - 文件上传：`POST http://127.0.0.1:8000/files/upload`
 - 全局文件列表：`GET http://127.0.0.1:8000/files/global`
 - 我的文件列表：`GET http://127.0.0.1:8000/files/mine`
+- 删除文件：`DELETE http://127.0.0.1:8000/files/{file_id}`
 - 上传任务列表：`GET http://127.0.0.1:8000/files/upload-tasks`
 - 上传任务详情：`GET http://127.0.0.1:8000/files/upload-tasks/{task_id}`
 - 重试上传任务：`POST http://127.0.0.1:8000/files/upload-tasks/{task_id}/retry`
@@ -288,6 +289,7 @@ INSERT INTO users (
 - 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件
 - 可通过 `GET /files/global` 分页查询管理员上传的全局文件
 - 可通过 `GET /files/mine` 分页查询当前用户自己上传的文件
+- 可通过 `DELETE /files/{file_id}` 删除当前用户自己上传的知识文件
 - 两个列表接口都会返回分页信息，以及可直接用于前端渲染的临时文件地址 `file_url`
 - 去重分为两层：
   - `raw_sha256`：解决同一大文件重复提交、重复重传、双击上传
@@ -297,6 +299,7 @@ INSERT INTO users (
 - 同一用户、同一文件名、内容不同：任务完成后按最新版本覆盖旧文件
 - 同一用户、内容相同但文件名不同：任务完成后只更新标题，不重复入库
 - 上传后会自动写入 ES 文档索引与 Milvus 向量集合
+- 删除知识文件时会同步移除数据库文件记录、检索 chunk 与最终知识文件对象；共享的原始去重 blob 继续保留，用于审计与历史任务重试
 
 示例：
 

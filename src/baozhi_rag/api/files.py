@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Path, Query, Request, UploadFile, status
 
 from baozhi_rag.api.dependencies import (
     get_current_user,
+    get_knowledge_file_delete_service,
     get_knowledge_file_query_service,
     get_knowledge_upload_service,
 )
@@ -23,6 +24,7 @@ from baozhi_rag.schemas.files import (
     UploadTaskListResponseData,
 )
 from baozhi_rag.services.file_upload import AsyncFileUploadInput
+from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import (
     KnowledgeFileListItemResult,
     KnowledgeFileListResult,
@@ -185,6 +187,26 @@ def retry_upload_task(
         message="上传任务已重新入队",
         request_id=request_id,
         data=_to_upload_task_item(task),
+    )
+
+
+@router.delete(
+    "/{file_id}",
+    response_model=SuccessResponse[None],
+    summary="删除我的文件",
+)
+def delete_my_file(
+    request: Request,
+    file_id: Annotated[str, Path(description="文件 ID")],
+    service: Annotated[KnowledgeFileDeleteService, Depends(get_knowledge_file_delete_service)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> SuccessResponse[None]:
+    """删除当前用户自己上传的知识文件。"""
+    request_id = ensure_request_id(request)
+    service.delete_file(file_id=file_id, current_user=current_user)
+    return SuccessResponse[None].success(
+        message="删除文件成功",
+        request_id=request_id,
     )
 
 

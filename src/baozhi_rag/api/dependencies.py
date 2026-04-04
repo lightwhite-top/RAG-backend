@@ -44,6 +44,7 @@ from baozhi_rag.services.chunk_search import ChunkSearchService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
+from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
@@ -181,6 +182,22 @@ def get_knowledge_file_query_service(
     return KnowledgeFileQueryService(
         knowledge_file_repository=knowledge_file_repository,
         file_url_builder=object_store,
+    )
+
+
+def get_knowledge_file_delete_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+    knowledge_file_repository: Annotated[
+        KnowledgeFileRepository,
+        Depends(get_knowledge_file_repository),
+    ],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
+) -> KnowledgeFileDeleteService:
+    """构造知识文件删除服务。"""
+    return KnowledgeFileDeleteService(
+        knowledge_file_repository=knowledge_file_repository,
+        chunk_store=HybridChunkStore.from_settings(settings),
+        object_store=object_store,
     )
 
 
