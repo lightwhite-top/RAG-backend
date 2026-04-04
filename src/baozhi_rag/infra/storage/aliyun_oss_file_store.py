@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
@@ -121,17 +122,41 @@ class AliyunOssFileStore:
             )
             body = getattr(response, "body", response)
             with local_path.open("wb") as file_obj:
-                if hasattr(body, "read"):
-                    while chunk := body.read(1024 * 1024):
-                        file_obj.write(chunk)
-                else:
-                    file_obj.write(bytes(body))
+                for chunk in self._iter_download_chunks(body=body):
+                    file_obj.write(chunk)
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             raise ObjectStorageError(f"下载 OSS 对象失败: {storage_key}") from exc
         finally:
             if body is not None and hasattr(body, "close"):
                 with suppress(Exception):
                     body.close()
+
+    def _iter_download_chunks(self, *, body: Any) -> Iterator[bytes]:
+        """把 OSS 响应体统一转换为可写入文件的字节块。
+
+        参数:
+            body: OSS SDK 返回的响应体，可能实现 `iter_bytes()`、`read()` 或直接可转为 `bytes`。
+
+        返回:
+            逐块产出的二进制内容，供下载流程顺序写入本地文件。
+
+        异常:
+            TypeError: 当响应体既不支持读取接口，也无法转换为 `bytes` 时向上抛出。
+        """
+        if hasattr(body, "iter_bytes"):
+            # OSS v2 的 StreamBodyReader.read() 不接受分块大小参数，流式下载必须走 iter_bytes()。
+            for chunk in cast(Any, body.iter_bytes()):
+                if chunk:
+                    yield bytes(chunk)
+            return
+
+        if hasattr(body, "read"):
+            data = cast(Any, body.read)()
+            if data:
+                yield bytes(data)
+            return
+
+        yield bytes(body)
 
     def build_presigned_get_url(
         self,
