@@ -206,4 +206,3 @@ class SqlAlchemyKnowledgeFileRepository:
             uploaded_at=file_model.uploaded_at,
             updated_at=file_model.updated_at,
         )
-
