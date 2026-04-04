@@ -20,6 +20,7 @@ from baozhi_rag.domain.user import CurrentUser
 from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
+from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
 from baozhi_rag.schemas.common import SuccessResponse
 from baozhi_rag.schemas.system import ServiceInfoResponse
 
@@ -51,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_manager = DatabaseManager.from_settings(current_settings)
         database_manager.ensure_ready()
         database_manager.ensure_schema()
+        AliyunOssFileStore.from_settings(current_settings).ensure_ready()
         AlibabaModelStudioClient.from_settings(current_settings).ensure_ready()
         HybridChunkStore.from_settings(current_settings).ensure_ready()
         LOGGER.info(
@@ -124,3 +126,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
