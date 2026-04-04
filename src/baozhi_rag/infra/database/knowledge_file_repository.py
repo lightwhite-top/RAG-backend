@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from baozhi_rag.domain.knowledge_file import (
     FileStorageProvider,
     FileVisibilityScope,
     KnowledgeFile,
+    KnowledgeFileListPage,
 )
 from baozhi_rag.domain.knowledge_file_errors import (
     KnowledgeFileConflictError,
@@ -93,6 +95,33 @@ class SqlAlchemyKnowledgeFileRepository:
 
         file_map = {file_model.id: self._to_domain(file_model) for file_model in file_models}
         return [file_map[file_id] for file_id in file_ids if file_id in file_map]
+
+    def list_global_files(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询全局可见文件。"""
+        return self._list_files_page(
+            page=page,
+            page_size=page_size,
+            predicates=(KnowledgeFileModel.visibility_scope == FileVisibilityScope.GLOBAL.value,),
+        )
+
+    def list_user_files(
+        self,
+        *,
+        uploader_user_id: str,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询指定用户上传的文件。"""
+        return self._list_files_page(
+            page=page,
+            page_size=page_size,
+            predicates=(KnowledgeFileModel.uploader_user_id == uploader_user_id,),
+        )
 
     def update_file(
         self,
@@ -192,6 +221,28 @@ class SqlAlchemyKnowledgeFileRepository:
         if "uq_knowledge_files_uploader_content_sha256" in message or "content_sha256" in message:
             raise KnowledgeFileConflictError("同一用户的同内容文件记录冲突") from exc
         raise KnowledgeFileConflictError() from exc
+
+    def _list_files_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        predicates: tuple[ColumnElement[bool], ...],
+    ) -> KnowledgeFileListPage:
+        """按给定过滤条件执行分页查询。"""
+        with self._session_factory() as session:
+            base_stmt = select(KnowledgeFileModel).where(*predicates)
+            count_stmt = select(func.count()).select_from(KnowledgeFileModel).where(*predicates)
+            paged_stmt = (
+                base_stmt.order_by(
+                    KnowledgeFileModel.updated_at.desc(), KnowledgeFileModel.id.desc()
+                )
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            items = [self._to_domain(item) for item in session.scalars(paged_stmt).all()]
+            total = int(session.scalar(count_stmt) or 0)
+            return KnowledgeFileListPage(items=items, total=total, page=page, page_size=page_size)
 
     def _to_model(self, file: KnowledgeFile) -> KnowledgeFileModel:
         """把领域对象转换为 ORM 模型。"""

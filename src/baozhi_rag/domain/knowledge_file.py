@@ -42,3 +42,13 @@ class KnowledgeFile:
     def sha256(self) -> str:
         """兼容旧调用方，返回内容级哈希。"""
         return self.content_sha256
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeFileListPage:
+    """知识文件分页查询结果。"""
+
+    items: list[KnowledgeFile]
+    total: int
+    page: int
+    page_size: int

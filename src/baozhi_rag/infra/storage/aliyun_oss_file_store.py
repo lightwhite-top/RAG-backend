@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -131,6 +132,33 @@ class AliyunOssFileStore:
             if body is not None and hasattr(body, "close"):
                 with suppress(Exception):
                     body.close()
+
+    def build_presigned_get_url(
+        self,
+        *,
+        storage_key: str,
+        expires_seconds: int = 900,
+    ) -> str:
+        """为指定对象生成短时可访问的 GET 预签名地址。"""
+        oss_module = self._get_oss_module()
+        try:
+            result = self._get_client().presign(
+                cast(
+                    Any,
+                    oss_module.GetObjectRequest(
+                        bucket=self._bucket_name,
+                        key=storage_key,
+                    ),
+                ),
+                expires=timedelta(seconds=expires_seconds),
+            )
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            raise ObjectStorageError(f"生成 OSS 预签名地址失败: {storage_key}") from exc
+
+        url = str(getattr(result, "url", "")).strip()
+        if not url:
+            raise ObjectStorageError(f"生成 OSS 预签名地址失败: {storage_key}")
+        return url
 
     def _get_client(self) -> Any:
         """延迟初始化 OSS 客户端。"""

@@ -4,22 +4,80 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
 
-from baozhi_rag.api.dependencies import get_current_user, get_knowledge_upload_service
+from baozhi_rag.api.dependencies import (
+    get_current_user,
+    get_knowledge_file_query_service,
+    get_knowledge_upload_service,
+)
 from baozhi_rag.core.request_context import ensure_request_id
 from baozhi_rag.domain.knowledge_upload_task import KnowledgeUploadTask
 from baozhi_rag.domain.user import CurrentUser
 from baozhi_rag.schemas.common import SuccessResponse
 from baozhi_rag.schemas.files import (
     FileUploadSubmitResponseData,
+    KnowledgeFileItem,
+    KnowledgeFileListResponseData,
     UploadTaskItem,
     UploadTaskListResponseData,
 )
 from baozhi_rag.services.file_upload import AsyncFileUploadInput
+from baozhi_rag.services.knowledge_file_query import (
+    KnowledgeFileListItemResult,
+    KnowledgeFileListResult,
+    KnowledgeFileQueryService,
+)
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 
 router = APIRouter(prefix="/files", tags=["files"])
+
+
+@router.get(
+    "/global",
+    response_model=SuccessResponse[KnowledgeFileListResponseData],
+    summary="分页查询全局文件",
+)
+def list_global_files(
+    request: Request,
+    service: Annotated[KnowledgeFileQueryService, Depends(get_knowledge_file_query_service)],
+    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, description="每页数量")] = 20,
+) -> SuccessResponse[KnowledgeFileListResponseData]:
+    """分页查询管理员上传的全局文件。"""
+    result = service.list_global_files(page=page, page_size=page_size)
+    return SuccessResponse[KnowledgeFileListResponseData].success(
+        message="获取全局文件列表成功",
+        request_id=ensure_request_id(request),
+        data=KnowledgeFileListResponseData(
+            items=[_to_knowledge_file_item(item) for item in result.items]
+        ),
+        meta=_build_page_meta(result),
+    )
+
+
+@router.get(
+    "/mine",
+    response_model=SuccessResponse[KnowledgeFileListResponseData],
+    summary="分页查询我的文件",
+)
+def list_my_files(
+    request: Request,
+    service: Annotated[KnowledgeFileQueryService, Depends(get_knowledge_file_query_service)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+    page: Annotated[int, Query(ge=1, description="页码")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, description="每页数量")] = 20,
+) -> SuccessResponse[KnowledgeFileListResponseData]:
+    """分页查询当前用户自己上传的文件。"""
+    result = service.list_my_files(current_user=current_user, page=page, page_size=page_size)
+    return SuccessResponse[KnowledgeFileListResponseData].success(
+        message="获取我的文件列表成功",
+        request_id=ensure_request_id(request),
+        data=KnowledgeFileListResponseData(
+            items=[_to_knowledge_file_item(item) for item in result.items]
+        ),
+        meta=_build_page_meta(result),
+    )
 
 
 @router.post(
@@ -150,3 +208,30 @@ def _to_upload_task_item(task: KnowledgeUploadTask) -> UploadTaskItem:
         updated_at=task.updated_at,
         completed_at=task.completed_at,
     )
+
+
+def _to_knowledge_file_item(item: KnowledgeFileListItemResult) -> KnowledgeFileItem:
+    """把文件列表结果转换为接口模型。"""
+    return KnowledgeFileItem(
+        file_id=item.file_id,
+        uploader_user_id=item.uploader_user_id,
+        original_filename=item.original_filename,
+        content_type=item.content_type,
+        size=item.size,
+        storage_key=item.storage_key,
+        file_url=item.file_url,
+        storage_provider=item.storage_provider,
+        visibility_scope=item.visibility_scope,
+        chunk_count=item.chunk_count,
+        uploaded_at=item.uploaded_at,
+        updated_at=item.updated_at,
+    )
+
+
+def _build_page_meta(result: KnowledgeFileListResult) -> dict[str, int]:
+    """构造统一分页元信息。"""
+    return {
+        "page": result.page,
+        "page_size": result.page_size,
+        "total": result.total,
+    }

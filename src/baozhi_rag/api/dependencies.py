@@ -44,6 +44,7 @@ from baozhi_rag.services.chunk_search import ChunkSearchService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
+from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 from baozhi_rag.services.user_admin import UserAdminService
@@ -166,6 +167,20 @@ def get_knowledge_upload_service(
         task_repository=task_repository,
         raw_object_prefix=settings.normalized_raw_oss_object_prefix,
         ingest_version=settings.upload_ingest_version,
+    )
+
+
+def get_knowledge_file_query_service(
+    knowledge_file_repository: Annotated[
+        KnowledgeFileRepository,
+        Depends(get_knowledge_file_repository),
+    ],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
+) -> KnowledgeFileQueryService:
+    """构造知识文件列表查询服务。"""
+    return KnowledgeFileQueryService(
+        knowledge_file_repository=knowledge_file_repository,
+        file_url_builder=object_store,
     )
 
 

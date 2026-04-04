@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from baozhi_rag.domain.knowledge_file import FileStorageProvider, FileVisibilityScope, KnowledgeFile
+from baozhi_rag.domain.knowledge_file import (
+    FileStorageProvider,
+    FileVisibilityScope,
+    KnowledgeFile,
+    KnowledgeFileListPage,
+)
 
 
 class KnowledgeFileRepository(Protocol):
@@ -39,6 +44,23 @@ class KnowledgeFileRepository(Protocol):
 
     def get_files_by_ids(self, file_ids: list[str]) -> list[KnowledgeFile]:
         """批量查询文件元数据。"""
+
+    def list_global_files(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询全局可见文件。"""
+
+    def list_user_files(
+        self,
+        *,
+        uploader_user_id: str,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询指定用户上传的文件。"""
 
     def update_file(
         self,

@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from docx import Document
 
-from baozhi_rag.domain.knowledge_file import KnowledgeFile
+from baozhi_rag.domain.knowledge_file import KnowledgeFile, KnowledgeFileListPage
 from baozhi_rag.domain.knowledge_file_blob import KnowledgeFileBlob
 from baozhi_rag.domain.knowledge_file_errors import (
     KnowledgeFileConflictError,
@@ -92,6 +92,20 @@ class InMemoryKnowledgeFileRepository:
     def get_files_by_ids(self, file_ids: list[str]) -> list[KnowledgeFile]:
         return [self._files[file_id] for file_id in file_ids if file_id in self._files]
 
+    def list_global_files(self, *, page: int, page_size: int) -> KnowledgeFileListPage:
+        items = [file for file in self._sorted_files() if file.visibility_scope.value == "global"]
+        return self._build_page(items=items, page=page, page_size=page_size)
+
+    def list_user_files(
+        self,
+        *,
+        uploader_user_id: str,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        items = [file for file in self._sorted_files() if file.uploader_user_id == uploader_user_id]
+        return self._build_page(items=items, page=page, page_size=page_size)
+
     def update_file(self, file_id: str, **kwargs: object) -> KnowledgeFile | None:
         file = self._files.get(file_id)
         if file is None:
@@ -143,6 +157,29 @@ class InMemoryKnowledgeFileRepository:
                 and file.content_sha256 == candidate.content_sha256
             ):
                 raise KnowledgeFileConflictError("同一用户的同内容文件记录冲突")
+
+    def _sorted_files(self) -> list[KnowledgeFile]:
+        return sorted(
+            self._files.values(),
+            key=lambda item: (item.updated_at, item.id),
+            reverse=True,
+        )
+
+    def _build_page(
+        self,
+        *,
+        items: list[KnowledgeFile],
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        start = (page - 1) * page_size
+        end = start + page_size
+        return KnowledgeFileListPage(
+            items=items[start:end],
+            total=len(items),
+            page=page,
+            page_size=page_size,
+        )
 
 
 class InMemoryBlobRepository:

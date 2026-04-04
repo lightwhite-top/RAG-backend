@@ -115,6 +115,8 @@ Copy-Item .env.example .env
 - 用户注册：`POST http://127.0.0.1:8000/auth/register`
 - 用户登录：`POST http://127.0.0.1:8000/auth/login`
 - 文件上传：`POST http://127.0.0.1:8000/files/upload`
+- 全局文件列表：`GET http://127.0.0.1:8000/files/global`
+- 我的文件列表：`GET http://127.0.0.1:8000/files/mine`
 - 上传任务列表：`GET http://127.0.0.1:8000/files/upload-tasks`
 - 上传任务详情：`GET http://127.0.0.1:8000/files/upload-tasks/{task_id}`
 - 重试上传任务：`POST http://127.0.0.1:8000/files/upload-tasks/{task_id}/retry`
@@ -284,6 +286,9 @@ INSERT INTO users (
 - 解析、去重、向量化、ES/Milvus 写入全部由后台 worker 异步完成
 - 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态
 - 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件
+- 可通过 `GET /files/global` 分页查询管理员上传的全局文件
+- 可通过 `GET /files/mine` 分页查询当前用户自己上传的文件
+- 两个列表接口都会返回分页信息，以及可直接用于前端渲染的临时文件地址 `file_url`
 - 去重分为两层：
   - `raw_sha256`：解决同一大文件重复提交、重复重传、双击上传
   - `content_sha256`：解决“二进制不同但正文相同”的重复入库
