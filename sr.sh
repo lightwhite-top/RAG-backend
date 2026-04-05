@@ -5,6 +5,12 @@ set -Eeuo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.server.yml"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:6888/health/live}"
+export APP_ENV="${APP_ENV:-production}"
+ENV_FILE_ARGS=(--env-file "${PROJECT_DIR}/.env")
+
+if [[ -f "${PROJECT_DIR}/.env.${APP_ENV}" ]]; then
+  ENV_FILE_ARGS+=(--env-file "${PROJECT_DIR}/.env.${APP_ENV}")
+fi
 
 usage() {
   cat <<'EOF'
@@ -41,41 +47,45 @@ service="${2:-}"
 cd "${PROJECT_DIR}"
 require_prerequisites
 
+docker_compose() {
+  docker compose "${ENV_FILE_ARGS[@]}" -f "${COMPOSE_FILE}" "$@"
+}
+
 case "${cmd}" in
   start)
-    docker compose -f "${COMPOSE_FILE}" up -d
-    docker compose -f "${COMPOSE_FILE}" ps
+    docker_compose up -d
+    docker_compose ps
     ;;
   stop)
-    docker compose -f "${COMPOSE_FILE}" down
+    docker_compose down
     ;;
   restart)
-    docker compose -f "${COMPOSE_FILE}" restart
-    docker compose -f "${COMPOSE_FILE}" ps
+    docker_compose restart
+    docker_compose ps
     ;;
   rebuild)
-    docker compose -f "${COMPOSE_FILE}" build --progress=plain
-    docker compose -f "${COMPOSE_FILE}" up -d
-    docker compose -f "${COMPOSE_FILE}" ps
+    docker_compose build --progress=plain
+    docker_compose up -d
+    docker_compose ps
     ;;
   logs)
     if [[ -n "${service}" ]]; then
-      docker compose -f "${COMPOSE_FILE}" logs -f "${service}"
+      docker_compose logs -f "${service}"
     else
-      docker compose -f "${COMPOSE_FILE}" logs -f
+      docker_compose logs -f
     fi
     ;;
   ps)
-    docker compose -f "${COMPOSE_FILE}" ps
+    docker_compose ps
     ;;
   pull)
     git pull --ff-only
     ;;
   deploy)
     git pull --ff-only
-    docker compose -f "${COMPOSE_FILE}" build --progress=plain
-    docker compose -f "${COMPOSE_FILE}" up -d
-    docker compose -f "${COMPOSE_FILE}" ps
+    docker_compose build --progress=plain
+    docker_compose up -d
+    docker_compose ps
     ;;
   health)
     curl -i "${HEALTH_URL}"

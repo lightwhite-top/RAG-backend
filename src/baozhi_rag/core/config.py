@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -18,7 +19,6 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="",
-        env_file=".env",
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         extra="ignore",
@@ -455,11 +455,94 @@ class Settings(BaseSettings):
         return self.oss_object_prefix.strip().strip("/")
 
 
+def _normalize_app_env_for_env_file(app_env: str | None) -> str | None:
+    """把运行环境标识归一化为环境文件后缀。
+
+    参数:
+        app_env: 原始运行环境标识，可能来自进程环境变量或 `.env`。
+
+    返回:
+        可用于拼接 `.env.<name>` 的标准化环境名；无法识别时返回 `None`。
+    """
+    if app_env is None:
+        return None
+
+    normalized_value = app_env.strip().lower()
+    if not normalized_value:
+        return None
+
+    alias_map = {
+        "dev": "development",
+        "prod": "production",
+    }
+    return alias_map.get(normalized_value, normalized_value)
+
+
+def _read_app_env_from_base_env_file(env_file: Path) -> str | None:
+    """从基础环境文件中读取 `APP_ENV` 选择器。
+
+    参数:
+        env_file: 需要读取的基础环境文件路径。
+
+    返回:
+        基础环境文件中声明的 `APP_ENV`；未声明或文件不存在时返回 `None`。
+    """
+    if not env_file.is_file():
+        return None
+
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, raw_value = line.split("=", 1)
+        if key.strip() != "APP_ENV":
+            continue
+
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value.strip() or None
+
+    return None
+
+
+def resolve_settings_env_files(base_env_file: str | Path = ".env") -> tuple[str, ...]:
+    """解析当前进程应叠加加载的环境文件列表。
+
+    参数:
+        base_env_file: 基础环境文件路径，通常为项目根目录下的 `.env`。
+
+    返回:
+        需要按顺序加载的环境文件元组；首项为基础环境文件，后续项为
+        `.env.<APP_ENV>` 形式的环境覆盖文件。
+    """
+    base_env_path = Path(base_env_file)
+    resolved_files: list[str] = []
+
+    if base_env_path.is_file():
+        resolved_files.append(str(base_env_path))
+
+    app_env = _normalize_app_env_for_env_file(os.getenv("APP_ENV"))
+    if app_env is None:
+        app_env = _normalize_app_env_for_env_file(_read_app_env_from_base_env_file(base_env_path))
+    if app_env is None:
+        return tuple(resolved_files)
+
+    override_env_path = base_env_path.with_name(f"{base_env_path.name}.{app_env}")
+    if override_env_path.is_file():
+        resolved_files.append(str(override_env_path))
+
+    return tuple(resolved_files)
+
+
 @lru_cache
 def get_settings() -> Settings:
     """缓存并返回应用配置对象。
 
     返回:
-        从环境变量和 `.env` 文件解析出的 Settings 实例。
+        从环境变量、基础 `.env` 以及 `.env.<APP_ENV>` 覆盖文件解析出的
+        Settings 实例。
     """
-    return Settings()
+    env_files = resolve_settings_env_files()
+    return Settings(_env_file=env_files or None)  # type: ignore[call-arg]

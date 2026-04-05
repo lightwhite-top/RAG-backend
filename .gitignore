@@ -23,9 +23,13 @@ site/
 uv.lock.bak
 *.log
 .env
+.env.*
+!.env.example
 .sisyphus/
 .claude/
 .codex/
+.tmp/
+tmp_pytest_run/
 data/
 docs/
 tests/

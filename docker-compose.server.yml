@@ -28,7 +28,10 @@ services:
     image: baozhi-rag-app:latest
     container_name: baozhi-rag-app
     env_file:
-      - .env
+      - path: .env
+        required: true
+      - path: .env.${APP_ENV:-development}
+        required: false
     environment:
       APP_ENV: server
       APP_DEBUG: "false"
@@ -49,8 +52,12 @@ services:
       OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET}
       OSS_OBJECT_PREFIX: ${OSS_OBJECT_PREFIX:-knowledge-files}
       ES_URL: http://elasticsearch:9200
-      ES_VERIFY_CERTS: "false"
+      ES_USERNAME: ${ES_USERNAME:-elastic}
+      ES_PASSWORD: ${ES_PASSWORD:?请在.env中配置ES_PASSWORD}
+      ES_API_KEY: ${ES_API_KEY:-}
+      ES_VERIFY_CERTS: ${ES_VERIFY_CERTS:-false}
       MILVUS_URI: http://milvus:19530
+      MILVUS_TOKEN: ${MILVUS_TOKEN:?请在.env中配置MILVUS_TOKEN，格式user:password}
     expose:
       - "8000"
     volumes:
@@ -109,11 +116,15 @@ services:
     image: baozhi-elasticsearch-ik:8.19.10
     container_name: baozhi-elasticsearch
     environment:
+      ELASTIC_PASSWORD: ${ES_PASSWORD:?请在.env中配置ES_PASSWORD}
       discovery.type: single-node
-      xpack.security.enabled: "false"
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
       xpack.license.self_generated.type: basic
       ES_JAVA_OPTS: -Xms1g -Xmx1g
       bootstrap.memory_lock: "true"
+    ports:
+      - "${ES_PUBLISH_ADDRESS:-127.0.0.1:9200}:9200"
     ulimits:
       memlock:
         soft: -1
@@ -124,7 +135,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "curl -fsS http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s >/dev/null || exit 1",
+          "curl -fsS -u elastic:$${ELASTIC_PASSWORD} http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s >/dev/null || exit 1",
         ]
       interval: 15s
       timeout: 10s
@@ -182,10 +193,22 @@ services:
   milvus:
     image: milvusdb/milvus:v2.6.11
     container_name: baozhi-milvus
-    command: ["milvus", "run", "standalone"]
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cat >/milvus/configs/user.yaml <<EOF
+        common:
+          security:
+            authorizationEnabled: true
+            defaultRootPassword: "${MILVUS_ROOT_PASSWORD:?请在.env中配置MILVUS_ROOT_PASSWORD}"
+        EOF
+        exec milvus run standalone
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+    ports:
+      - "${MILVUS_PUBLISH_ADDRESS:-127.0.0.1:19530}:19530"
     volumes:
       - milvus_data:/var/lib/milvus
     depends_on:

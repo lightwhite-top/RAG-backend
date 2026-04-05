@@ -314,8 +314,15 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
 异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
 默认领域词典文件位于 `src/baozhi_rag/domain/default_domain_terms.txt`，自定义扩展词典可通过 `DOMAIN_DICTIONARY_PATH` 配置。
-ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置。
-Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置。
+当前配置加载会先读取项目根目录下的 `.env` 公共配置，再根据 `APP_ENV` 自动叠加 `.env.development` 或 `.env.production`。
+本地开发建议把 `.env` 中的 `APP_ENV` 设为 `development`，服务器部署建议设为 `production`。
+当前仓库的环境约定是：
+
+- `development`：`ES_URL` 与 `MILVUS_URI` 默认指向 `122.152.231.116`
+- `production`：`ES_URL` 与 `MILVUS_URI` 默认指向本机地址 `127.0.0.1`
+
+ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置；服务端 compose 默认开启 ES 认证。
+Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_PASSWORD`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置；服务端 compose 默认开启 Milvus 认证。
 百炼模型配置通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 配置。
 向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置。
 
@@ -553,7 +560,8 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 服务器部署请优先使用 `docker-compose.server.yml`，该编排与本机联调版的主要区别是：
 
 - 仅对外暴露 `Nginx` 的 `6888` 端口
-- `app`、`MySQL`、`Elasticsearch`、`Milvus`、`MinIO` 只在容器内网通信
+- `app`、`MySQL`、`MinIO` 默认只在容器内网通信
+- `Elasticsearch` 与 `Milvus` 默认开启认证，并且默认只绑定服务器本机；如需本地电脑直连服务器调试，可通过环境变量按需对外发布端口
 - Nginx 已补充 SSE 代理参数，适配 `/chat/completions` 的流式输出
 
 部署步骤：
@@ -561,6 +569,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 ```powershell
 cp .env.example .env
 vi .env
+vi .env.production
 docker compose -f docker-compose.server.yml build --progress=plain
 docker compose -f docker-compose.server.yml up -d
 ```
@@ -578,6 +587,9 @@ chmod +x deploy_server.sh
 - `MYSQL_USERNAME`
 - `MYSQL_PASSWORD`
 - `MYSQL_ROOT_PASSWORD`
+- `ES_PASSWORD`
+- `MILVUS_ROOT_PASSWORD`
+- `MILVUS_TOKEN`
 - `JWT_SECRET_KEY`
 - `OSS_BUCKET_NAME`
 - `OSS_ACCESS_KEY_ID`
@@ -586,6 +598,25 @@ chmod +x deploy_server.sh
 - `BAILIAN_CHAT_MODEL`
 - `CHUNK_EMBEDDING_MODEL`
 - `CHUNK_EMBEDDING_DIMENSIONS`
+
+如果你希望“本地电脑直接连服务器上的 ES 与 Milvus 做测试”，建议额外配置：
+
+- `ES_PUBLISH_ADDRESS=0.0.0.0:9200`
+- `MILVUS_PUBLISH_ADDRESS=0.0.0.0:19530`
+
+随后在本地开发环境把连接地址改成服务器地址，并带上相同认证信息：
+
+```dotenv
+ES_URL=http://<服务器IP>:9200
+ES_USERNAME=elastic
+ES_PASSWORD=<你的ES密码>
+ES_VERIFY_CERTS=false
+
+MILVUS_URI=http://<服务器IP>:19530
+MILVUS_TOKEN=root:<你的Milvus密码>
+```
+
+仅开启认证而不加 TLS 时，用户名密码会以明文 HTTP/gRPC 在网络上传输。若需要从公网直连服务器，请至少同时配置安全组或防火墙白名单，只放行你的本地出口 IP；更稳妥的做法是放在 VPN、堡垒机或内网专线后面。
 
 服务端镜像构建默认会通过 `.env` 中的以下变量使用腾讯云镜像源，适合腾讯云服务器环境：
 
@@ -610,6 +641,22 @@ docker compose -f docker-compose.server.yml logs -f app
 docker compose -f docker-compose.server.yml logs -f mysql
 docker compose -f docker-compose.server.yml logs -f elasticsearch
 docker compose -f docker-compose.server.yml logs -f milvus
+```
+
+环境文件建议约定：
+
+```text
+.env                公共配置 + 当前环境选择器 APP_ENV
+.env.development    本地开发覆盖项，例如服务器 ES/Milvus 地址
+.env.production     生产环境覆盖项，例如本机 ES/Milvus 地址
+```
+
+如果直接在本机开发运行 `uv run uvicorn baozhi_rag.app.main:app --reload`，配置模块会自动按 `APP_ENV` 叠加对应环境文件；如果使用 `sr.sh` 或 `sr.private.sh` 部署，脚本会默认按 `production` 环境执行。
+
+认证开启后，可使用以下命令做快速连通性检查：
+
+```powershell
+curl -u elastic:<你的ES密码> http://服务器IP:9200
 ```
 
 停止与清理：

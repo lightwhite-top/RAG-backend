@@ -12,7 +12,11 @@ __pycache__
 build
 dist
 htmlcov
+.tmp
+tmp_pytest_run
 data
 docs
 tests
 .env
+.env.*
+!.env.example
