@@ -11,13 +11,13 @@ from sqlalchemy.types import TypeDecorator
 
 
 class UTCDateTime(TypeDecorator[datetime]):
-    """统一把数据库中的时间按 UTC 读写。"""
+    """统一按 UTC 读写数据库中的时间字段。"""
 
     impl = DateTime
     cache_ok = True
 
     def process_bind_param(self, value: datetime | None, dialect: Any) -> datetime | None:
-        """入库前把时间规整到 UTC 无时区格式。"""
+        """入库前把时间规整为 UTC 无时区格式。"""
         del dialect
         if value is None:
             return None
@@ -38,17 +38,13 @@ class Base(DeclarativeBase):
     """ORM 基类。"""
 
 
-def mysql_table_options() -> dict[str, str]:
-    """返回统一的 MySQL 建表选项。
-
-    返回:
-        固定为 `utf8mb4` 与 `utf8mb4_unicode_ci` 的建表参数，用于避免
-        新表跟随库默认排序规则创建后，与既有表的字符串主键/外键不兼容。
-    """
+def mysql_table_options(comment: str) -> dict[str, str]:
+    """返回统一的 MySQL 建表选项。"""
     return {
         "mysql_engine": "InnoDB",
         "mysql_charset": "utf8mb4",
         "mysql_collate": "utf8mb4_unicode_ci",
+        "comment": comment,
     }
 
 
@@ -59,16 +55,28 @@ class UserModel(Base):
     __table_args__ = (
         UniqueConstraint("email", name="uq_users_email"),
         UniqueConstraint("username", name="uq_users_username"),
-        mysql_table_options(),
+        mysql_table_options("用户表"),
     )
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), nullable=False)
-    username: Mapped[str] = mapped_column(String(64), nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="用户ID")
+    email: Mapped[str] = mapped_column(String(255), nullable=False, comment="邮箱")
+    username: Mapped[str] = mapped_column(String(64), nullable=False, comment="用户名")
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="密码哈希",
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False, comment="用户角色")
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
 
 
 class RegistrationVerificationCodeModel(Base):
@@ -81,17 +89,38 @@ class RegistrationVerificationCodeModel(Base):
             "email",
             "sent_at",
         ),
-        mysql_table_options(),
+        mysql_table_options("注册邮箱验证码表"),
     )
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), nullable=False)
-    code_digest: Mapped[str] = mapped_column(String(64), nullable=False)
-    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    sent_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    invalidated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="记录ID")
+    email: Mapped[str] = mapped_column(String(255), nullable=False, comment="邮箱")
+    code_digest: Mapped[str] = mapped_column(String(64), nullable=False, comment="验证码摘要")
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="失败校验次数",
+    )
+    sent_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="发送时间",
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="过期时间",
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="使用时间",
+    )
+    invalidated_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="失效时间",
+    )
 
 
 class KnowledgeFileModel(Base):
@@ -119,26 +148,68 @@ class KnowledgeFileModel(Base):
             "uploader_user_id",
             "content_sha256",
         ),
-        mysql_table_options(),
+        mysql_table_options("知识文件元数据表"),
     )
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="文件ID")
     uploader_user_id: Mapped[str] = mapped_column(
         String(32),
         ForeignKey("users.id"),
         nullable=False,
+        comment="上传用户ID",
     )
-    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
-    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    size: Mapped[int] = mapped_column(Integer, nullable=False)
-    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    storage_provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    visibility_scope: Mapped[str] = mapped_column(String(32), nullable=False)
-    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    original_filename: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="原始文件名",
+    )
+    content_type: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="文件MIME类型",
+    )
+    size: Mapped[int] = mapped_column(Integer, nullable=False, comment="文件大小（字节）")
+    raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="原始文件SHA256",
+    )
+    content_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="规范化内容SHA256",
+    )
+    storage_provider: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="存储提供方",
+    )
+    storage_key: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        comment="存储对象键",
+    )
+    visibility_scope: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="可见范围",
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="切片数量",
+    )
+    uploaded_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="上传时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
 
 
 class KnowledgeFileBlobModel(Base):
@@ -147,17 +218,41 @@ class KnowledgeFileBlobModel(Base):
     __tablename__ = "knowledge_file_blobs"
     __table_args__ = (
         UniqueConstraint("raw_sha256", name="uq_knowledge_file_blobs_raw_sha256"),
-        mysql_table_options(),
+        mysql_table_options("原始上传文件Blob表"),
     )
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    size: Mapped[int] = mapped_column(Integer, nullable=False)
-    storage_provider: Mapped[str] = mapped_column(String(32), nullable=False)
-    storage_key: Mapped[str] = mapped_column(String(512), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="Blob记录ID")
+    raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="原始文件SHA256",
+    )
+    content_type: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="文件MIME类型",
+    )
+    size: Mapped[int] = mapped_column(Integer, nullable=False, comment="文件大小（字节）")
+    storage_provider: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="存储提供方",
+    )
+    storage_key: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        comment="存储对象键",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
 
 
 class KnowledgeUploadTaskModel(Base):
@@ -181,39 +276,122 @@ class KnowledgeUploadTaskModel(Base):
             "uploader_user_id",
             "created_at",
         ),
-        mysql_table_options(),
+        mysql_table_options("知识文件上传任务表"),
     )
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="任务ID")
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="请求ID")
     uploader_user_id: Mapped[str] = mapped_column(
         String(32),
         ForeignKey("users.id"),
         nullable=False,
+        comment="上传用户ID",
     )
-    uploader_role: Mapped[str] = mapped_column(String(16), nullable=False)
-    raw_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # 继续复用历史列名 `blob_key`，避免现网库表在未执行迁移时无法启动；
+    uploader_role: Mapped[str] = mapped_column(String(16), nullable=False, comment="上传用户角色")
+    raw_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="原始文件SHA256",
+    )
+    content_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="规范化内容SHA256",
+    )
+    # 继续复用历史列名 `blob_key`，避免现网库表在未执行迁移时无法启动。
     # 领域层已把该字段统一解释为本地源文件的 storage_key。
-    source_storage_key: Mapped[str] = mapped_column("blob_key", String(512), nullable=False)
-    requested_filename: Mapped[str] = mapped_column(String(255), nullable=False)
-    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    size: Mapped[int] = mapped_column(Integer, nullable=False)
-    ingest_version: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    stage: Mapped[str] = mapped_column(String(32), nullable=False)
-    file_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    deduplicated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    replaced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    title_updated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    source_storage_key: Mapped[str] = mapped_column(
+        "blob_key",
+        String(512),
+        nullable=False,
+        comment="源文件存储对象键",
+    )
+    requested_filename: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="请求文件名",
+    )
+    content_type: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="文件MIME类型",
+    )
+    size: Mapped[int] = mapped_column(Integer, nullable=False, comment="文件大小（字节）")
+    ingest_version: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="导入版本",
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, comment="任务状态")
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, comment="处理阶段")
+    file_id: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="生成文件ID")
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="切片数量",
+    )
+    deduplicated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="是否命中去重",
+    )
+    replaced: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="是否替换已有文件",
+    )
+    title_updated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="是否更新标题",
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="错误码",
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="错误信息",
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="重试次数",
+    )
+    worker_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="处理工作节点ID",
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="租约过期时间",
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="最后心跳时间",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="完成时间",
+    )
