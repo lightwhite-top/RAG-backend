@@ -38,6 +38,35 @@ from baozhi_rag.services.upload_tasks import KnowledgeUploadProcessor, Knowledge
 LOGGER = logging.getLogger(__name__)
 
 
+async def attach_request_id(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    """为每个请求补充 request_id，并回写到响应头。"""
+    request_id = ensure_request_id(request)
+    response = await call_next(request)
+    response.headers[REQUEST_ID_HEADER_NAME] = request_id
+    return response
+
+
+def root(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
+) -> SuccessResponse[ServiceInfoResponse]:
+    """返回服务基础信息，便于环境探活与调试。"""
+    return SuccessResponse[ServiceInfoResponse].success(
+        message="获取服务信息成功",
+        request_id=ensure_request_id(request),
+        data=ServiceInfoResponse(
+            service=settings.app_name,
+            environment=settings.app_env,
+            version=settings.version,
+            docs_url=request.app.docs_url or "",
+        ),
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """创建并配置 FastAPI 应用实例。
 
@@ -139,43 +168,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             expose_headers=current_settings.cors_expose_headers,
         )
 
-    @app.middleware("http")
-    async def attach_request_id(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        """为每个请求补充 request_id，并回写到响应头。"""
-        request_id = ensure_request_id(request)
-        response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER_NAME] = request_id
-        return response
+    app.middleware("http")(attach_request_id)
 
     app.include_router(router)
-
-    @app.get("/", response_model=SuccessResponse[ServiceInfoResponse], summary="服务信息")
-    def root(
-        request: Request,
-        _: Annotated[CurrentUser, Depends(get_current_user)],
-    ) -> SuccessResponse[ServiceInfoResponse]:
-        """返回服务基础信息，便于环境探活与调试。
-
-        参数:
-            request: 当前 HTTP 请求对象，用于附加 request_id。
-            _: 当前登录用户，仅用于在根路径上统一启用鉴权。
-
-        返回:
-            包含服务名、运行环境、版本号和文档地址的服务信息响应。
-        """
-        return SuccessResponse[ServiceInfoResponse].success(
-            message="获取服务信息成功",
-            request_id=ensure_request_id(request),
-            data=ServiceInfoResponse(
-                service=current_settings.app_name,
-                environment=current_settings.app_env,
-                version=current_settings.version,
-                docs_url=app.docs_url or "",
-            ),
-        )
+    app.get("/", response_model=SuccessResponse[ServiceInfoResponse], summary="服务信息")(root)
 
     return app
 
