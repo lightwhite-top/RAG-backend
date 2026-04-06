@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM python:3.13-slim-bookworm
 
 ARG APT_MIRROR=https://mirrors.aliyun.com
@@ -9,6 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=${PYPI_MIRROR} \
     UV_DEFAULT_INDEX=${PYPI_MIRROR} \
+    UV_INDEX_URL=${PYPI_MIRROR} \
     UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT_SECONDS} \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -34,11 +37,13 @@ RUN pip install --no-cache-dir uv
 
 # 依赖层只受锁文件和项目元数据影响，避免 README 改动导致依赖重装。
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 COPY README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 RUN mkdir -p /app/data/uploads /app/data/tmp/converted
 
