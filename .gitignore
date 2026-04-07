@@ -25,6 +25,7 @@ uv.lock.bak
 .env
 .env.*
 !.env.example
+AGENTS.md
 .sisyphus/
 .claude/
 .codex/

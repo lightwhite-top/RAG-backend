@@ -199,15 +199,10 @@ class AlibabaModelStudioClient:
         self._validate_api_key()
         try:
             response = self._get_client().chat.completions.create(
-                model=self._chat_model,
-                messages=[
-                    {
-                        "role": message.role,
-                        "content": message.content,
-                    }
-                    for message in messages
-                ],
-                temperature=temperature,
+                **self._build_chat_completion_request(
+                    messages,
+                    temperature=temperature,
+                )
             )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             self._log_upstream_failure(
@@ -255,16 +250,11 @@ class AlibabaModelStudioClient:
         self._validate_api_key()
         try:
             response = self._get_client().chat.completions.create(
-                model=self._chat_model,
-                messages=[
-                    {
-                        "role": message.role,
-                        "content": message.content,
-                    }
-                    for message in messages
-                ],
-                temperature=temperature,
-                stream=True,
+                **self._build_chat_completion_request(
+                    messages,
+                    temperature=temperature,
+                    stream=True,
+                )
             )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             self._log_upstream_failure(
@@ -310,6 +300,31 @@ class AlibabaModelStudioClient:
                 timeout=self._timeout_seconds,
             ),
         )
+
+    def _build_chat_completion_request(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float | None,
+        stream: bool = False,
+    ) -> dict[str, object]:
+        """构造聊天补全请求参数，并兼容百炼对 `temperature` 的严格校验。"""
+        request_payload: dict[str, object] = {
+            "model": self._chat_model,
+            "messages": [
+                {
+                    "role": message.role,
+                    "content": message.content,
+                }
+                for message in messages
+            ],
+        }
+        normalized_temperature = self._normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            request_payload["temperature"] = normalized_temperature
+        if stream:
+            request_payload["stream"] = True
+        return request_payload
 
     def _validate_api_key(self) -> None:
         """校验 API Key 配置。"""
@@ -387,6 +402,13 @@ class AlibabaModelStudioClient:
             msg = "百炼向量模型返回格式非法"
             raise AlibabaModelStudioInvocationError(msg)
         return [float(value) for value in raw_embedding]
+
+    @staticmethod
+    def _normalize_temperature(temperature: float | None) -> float | None:
+        """把温度参数归一化为真正的浮点数；未传时直接省略。"""
+        if temperature is None:
+            return None
+        return float(temperature)
 
     @staticmethod
     def _extract_stream_delta(chunk: Any) -> str:

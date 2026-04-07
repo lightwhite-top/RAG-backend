@@ -679,6 +679,7 @@ docker compose -f docker-compose.server.yml down -v
 - 仓库当前不再跟踪 `tests/` 目录
 - 若本地存在测试目录，`just test`、`just test-api` 和 pre-push 钩子会继续执行 pytest
 - 若本地不存在测试目录，上述命令会自动跳过测试检查
+- 代理如为本地验证新增测试，默认不为了提交、推送或 CI 改动 `.gitignore` 去纳入版本控制，除非用户明确要求
 
 ## 提交规范
 
@@ -691,7 +692,7 @@ docs(readme): 补充启动说明
 ```
 
 详细协作约定见 `docs/development.md`。
-项目级代理与协作约定见 `AGENTS.md`。
+如需维护本地用户与代理协作约定，可在仓库根目录自备 `AGENTS.md`；该文件默认不纳入 Git。
 
 
 
@@ -700,5 +701,5 @@ docs(readme): 补充启动说明
 ## 规范入口
 
 - 项目实现规范见 `_bmad-output/project-context.md`
-- 用户与代理协作规范见 `AGENTS.md`
+- 本地用户与代理协作约定可通过仓库根目录自备 `AGENTS.md` 管理；该文件默认不纳入 Git
 - 启动、调试、部署和功能说明继续以 `README.md` 为准
