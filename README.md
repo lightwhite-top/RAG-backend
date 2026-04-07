@@ -676,9 +676,9 @@ docker compose -f docker-compose.server.yml down -v
 
 ### tests 目录说明
 
-- `tests/` 保留在仓库中，用于本地开发、CI 和回归验证
-- 镜像构建时不会复制 `tests/`，因为 [.dockerignore](/e:/PracticalProject/BaozhiRAG/.dockerignore#L1) 已排除该目录
-- 运行容器不依赖 `tests/`，服务器上无需单独删除它
+- 仓库当前不再跟踪 `tests/` 目录
+- 若本地存在测试目录，`just test`、`just test-api` 和 pre-push 钩子会继续执行 pytest
+- 若本地不存在测试目录，上述命令会自动跳过测试检查
 
 ## 提交规范
 
@@ -697,3 +697,8 @@ docs(readme): 补充启动说明
 
 
 
+## 规范入口
+
+- 项目实现规范见 `_bmad-output/project-context.md`
+- 用户与代理协作规范见 `AGENTS.md`
+- 启动、调试、部署和功能说明继续以 `README.md` 为准

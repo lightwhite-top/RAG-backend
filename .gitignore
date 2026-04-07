@@ -33,3 +33,5 @@ tmp_pytest_run/
 data/
 docs/
 tests/
+.agents/
+_*/

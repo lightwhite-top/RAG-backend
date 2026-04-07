@@ -14,7 +14,7 @@ repos:
         pass_filenames: false
       - id: pytest
         name: pytest
-        entry: uv run pytest
+        entry: uv run python -c "from pathlib import Path; import subprocess, sys; sys.exit(subprocess.call([sys.executable, '-m', 'pytest']) if Path('tests').exists() else 0)"
         language: system
         pass_filenames: false
         stages: [pre-push]

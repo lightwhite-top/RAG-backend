@@ -14,17 +14,10 @@ if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
     from baozhi_rag.services.document_chunking import DocumentChunk
 
-try:  # pragma: no cover - 是否安装依赖取决于运行环境
-    from pymilvus import DataType as ImportedMilvusDataType  # type: ignore[import-untyped]
-    from pymilvus import MilvusClient as ImportedMilvusClient  # type: ignore[import-untyped]
-except ImportError as exc:  # pragma: no cover - 测试环境可通过可选导入绕过
-    MILVUS_CLIENT_CLASS: Any | None = None
-    MILVUS_DATA_TYPE: Any | None = None
-    MILVUS_IMPORT_ERROR: Exception | None = exc
-else:  # pragma: no cover - 导入成功路径不需要单独覆盖
-    MILVUS_CLIENT_CLASS = ImportedMilvusClient
-    MILVUS_DATA_TYPE = ImportedMilvusDataType
-    MILVUS_IMPORT_ERROR = None
+MILVUS_CLIENT_CLASS: Any | None = None
+MILVUS_DATA_TYPE: Any | None = None
+MILVUS_IMPORT_ERROR: Exception | None = None
+MILVUS_IMPORT_ATTEMPTED = False
 
 LOGGER = logging.getLogger(__name__)
 
@@ -209,63 +202,54 @@ class MilvusChunkVectorStore:
 
     def _create_client(self) -> Any:
         """创建 Milvus 客户端实例。"""
-        if MILVUS_CLIENT_CLASS is None:
-            raise MilvusDependencyError(
-                "未安装 pymilvus 依赖，无法启用 Milvus 向量存储"
-            ) from MILVUS_IMPORT_ERROR
+        milvus_client_class, _ = _load_milvus_dependencies()
 
         kwargs: dict[str, object] = {"uri": self._uri, "db_name": self._db_name}
         if self._token:
             kwargs["token"] = self._token
-        return cast(Any, MILVUS_CLIENT_CLASS(**kwargs))
+        return cast(Any, milvus_client_class(**kwargs))
 
     def _build_schema(self) -> Any:
         """构造 Milvus 集合 schema。"""
-        if MILVUS_CLIENT_CLASS is None or MILVUS_DATA_TYPE is None:
-            raise MilvusDependencyError(
-                "未安装 pymilvus 依赖，无法构造 Milvus schema"
-            ) from MILVUS_IMPORT_ERROR
+        milvus_client_class, milvus_data_type = _load_milvus_dependencies()
 
-        schema = MILVUS_CLIENT_CLASS.create_schema(
+        schema = milvus_client_class.create_schema(
             auto_id=False,
             enable_dynamic_field=False,
         )
         schema.add_field(
             field_name=self._PRIMARY_FIELD_NAME,
-            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            datatype=milvus_data_type.VARCHAR,
             is_primary=True,
             max_length=256,
         )
         schema.add_field(
             field_name=self._FILE_ID_FIELD_NAME,
-            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            datatype=milvus_data_type.VARCHAR,
             max_length=128,
         )
         schema.add_field(
             field_name=self._UPLOADER_USER_ID_FIELD_NAME,
-            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            datatype=milvus_data_type.VARCHAR,
             max_length=128,
         )
         schema.add_field(
             field_name=self._VISIBILITY_SCOPE_FIELD_NAME,
-            datatype=MILVUS_DATA_TYPE.VARCHAR,
+            datatype=milvus_data_type.VARCHAR,
             max_length=32,
         )
         schema.add_field(
             field_name=self._VECTOR_FIELD_NAME,
-            datatype=MILVUS_DATA_TYPE.FLOAT_VECTOR,
+            datatype=milvus_data_type.FLOAT_VECTOR,
             dim=self._embedding_dimensions,
         )
         return schema
 
     def _build_index_params(self) -> Any:
         """构造 Milvus 向量索引参数。"""
-        if MILVUS_CLIENT_CLASS is None:
-            raise MilvusDependencyError(
-                "未安装 pymilvus 依赖，无法构造 Milvus 索引参数"
-            ) from MILVUS_IMPORT_ERROR
+        milvus_client_class, _ = _load_milvus_dependencies()
 
-        index_params = MILVUS_CLIENT_CLASS.prepare_index_params()
+        index_params = milvus_client_class.prepare_index_params()
         index_params.add_index(
             field_name=self._VECTOR_FIELD_NAME,
             index_name=self._VECTOR_INDEX_NAME,
@@ -347,3 +331,40 @@ class MilvusChunkVectorStore:
         """构造按可见性过滤的 Milvus 表达式。"""
         escaped_user_id = viewer_user_id.replace("\\", "\\\\").replace('"', '\\"')
         return f'visibility_scope == "global" or uploader_user_id == "{escaped_user_id}"'
+
+
+def _load_milvus_dependencies() -> tuple[Any, Any]:
+    """延迟加载 pymilvus 依赖，避免模块导入阶段污染环境变量。
+
+    返回:
+        一个二元组，依次为 `MilvusClient` 类与 `DataType` 枚举。
+    异常:
+        MilvusDependencyError: 当运行环境未安装 `pymilvus` 时抛出。
+    """
+    global MILVUS_CLIENT_CLASS
+    global MILVUS_DATA_TYPE
+    global MILVUS_IMPORT_ERROR
+    global MILVUS_IMPORT_ATTEMPTED
+
+    if not MILVUS_IMPORT_ATTEMPTED:
+        MILVUS_IMPORT_ATTEMPTED = True
+        try:  # pragma: no cover - 是否安装依赖取决于运行环境
+            from pymilvus import (  # type: ignore[import-untyped]
+                DataType as ImportedMilvusDataType,
+            )
+            from pymilvus import (  # type: ignore[import-untyped]
+                MilvusClient as ImportedMilvusClient,
+            )
+        except ImportError as exc:  # pragma: no cover - 测试环境可通过可选导入绕过
+            MILVUS_IMPORT_ERROR = exc
+        else:  # pragma: no cover - 导入成功路径不需要单独覆盖
+            MILVUS_CLIENT_CLASS = ImportedMilvusClient
+            MILVUS_DATA_TYPE = ImportedMilvusDataType
+            MILVUS_IMPORT_ERROR = None
+
+    if MILVUS_CLIENT_CLASS is None or MILVUS_DATA_TYPE is None:
+        raise MilvusDependencyError(
+            "未安装 pymilvus 依赖，无法启用 Milvus 向量存储"
+        ) from MILVUS_IMPORT_ERROR
+
+    return MILVUS_CLIENT_CLASS, MILVUS_DATA_TYPE

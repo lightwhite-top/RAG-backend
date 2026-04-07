@@ -1,123 +1,144 @@
-# BaozhiRAG Agent 规范
+# BaozhiRAG 协作规范
 
-本文件定义本仓库内人类开发者与智能代理共同遵守的项目规范。若与局部实现习惯冲突，以本文件为准；若与法律、合规、安全要求冲突，以更严格要求为准。
+本文件只定义本仓库内用户、人类开发者与智能代理之间的协作规则，不再承担项目实现规范职责。
 
-## 1. 项目目标
+- 项目实现规范、代码分层、技术约束、风控边界、测试与提交流程，以 [`_bmad-output/project-context.md`](./_bmad-output/project-context.md) 为准
+- 若 `AGENTS.md` 与 `project-context.md` 在代码实现层面发生冲突，以 `project-context.md` 为准
+- 若与法律、合规、安全要求冲突，以更严格要求为准
 
-- 本项目是面向金融保险场景的 RAG 客服系统后端。
-- 当前技术栈固定为 `Python 3.13`、`FastAPI`、`uv`。
-- 工程优先级依次为：正确性、可维护性、可审计性、可扩展性、开发效率。
+## 1. 文档分工
 
-## 2. 目录职责
+- `AGENTS.md`
+  - 面向“怎么协作”
+  - 约束代理与用户之间的沟通、交付物落点、执行方式
+- `_bmad-output/project-context.md`
+  - 面向“怎么实现”
+  - 约束项目代码、架构、测试、风控、流程与实现边界
+- `README.md`
+  - 面向“怎么使用项目”
+  - 提供启动、调试、部署和功能说明
 
-项目代码统一放在 `src/baozhi_rag`，采用 Python 3 命名空间包方案，不使用 `__init__.py`。
+## 2. 协作原则
 
-- `app/`
-  - 应用装配层。
-  - 放应用入口、生命周期管理、全局依赖注册。
-  - 当前入口文件是 `app/main.py`。
-- `api/`
-  - 接口层。
-  - 放路由定义、请求解析、响应返回。
-  - 不写复杂业务逻辑，只负责协议转换与参数校验。
-- `core/`
-  - 基础能力层。
-  - 放配置、日志、全局常量、通用基础设施封装。
-  - 禁止把业务领域逻辑放入 `core/`。
-- `schemas/`
-  - 接口数据结构层。
-  - 放请求体、响应体、通用接口模型。
-  - 接口模型与领域实体分开管理。
-- `domain/`
-  - 领域层。
-  - 放业务实体、值对象、领域规则和核心业务概念。
-  - 例如客户、保单、知识文档、会话、问答记录等。
-- `services/`
-  - 应用服务层。
-  - 放业务编排、流程控制、跨模块协作逻辑。
-  - 服务层调用 `domain/` 与 `infra/`，不直接承担 HTTP 协议细节。
-- `infra/`
-  - 基础设施适配层。
-  - 放与外部系统的具体集成实现。
-  - `infra/llm/`：聊天模型、Embedding、重排模型、提示词适配等。
-  - `infra/retrieval/`：向量检索、召回、过滤、重排前后的检索底座。
-  - `infra/storage/`：原始文件存储、对象存储、文档载入等。
+- 代理在开始执行前，应先理解用户当前目标，再阅读与目标直接相关的规范和上下文
+- 代理优先做小而完整的改动，避免一次引入过多抽象
+- 代理修改文档、目录或命令后，要同步更新 README 或相关规范文件
+- 用户若明确指定输出路径、产物类型或工作流，代理应优先遵守
+- 用户未明确指定时，代理应按仓库现有 BMad 配置和目录职责落盘
 
-## 3. 分层约束
+## 3. 输出物落点
 
-- `api/` 不能直接依赖具体外部 SDK，应通过 `services/` 或 `infra/` 间接调用。
-- `schemas/` 用于接口边界；`domain/` 用于业务语义，两者不要混用。
-- `services/` 可以组合多个 `infra/` 能力，但不应把底层 SDK 细节泄漏到上层。
-- `core/` 不承载业务流程，只承载全局基础能力。
-- 在业务复杂度未证明需要之前，不引入 `v1`、`v2` 这类版本目录。
-- 路由优先保持直接语义，例如 `/health/live`、`/chat/completions`。
+当前仓库按 BMad 配置解析后的输出位置如下：
 
-## 4. 编码规范
+- `output_folder` -> `E:\PracticalProject\BaozhiRAG\_bmad-output`
+- `planning_artifacts` -> `E:\PracticalProject\BaozhiRAG\_bmad-output\planning-artifacts`
+- `implementation_artifacts` -> `E:\PracticalProject\BaozhiRAG\_bmad-output\implementation-artifacts`
+- `project_knowledge` -> `E:\PracticalProject\BaozhiRAG\_bmad-output\project-knowledge`
 
-- 所有 Python 函数必须补充类型标注。
-- 方法或函数的参数必须有注释说明；如果使用 docstring，则必须逐项说明关键参数含义。
-- 公共模块、类、函数应写简洁 docstring，说明职责与输入输出。
-- 为方法或函数补充 docstring 时，必须同时说明关键参数含义、返回值以及必要的异常语义；不要只写一句职责描述。
-- 注释优先解释“为什么”，不要机械重复代码语义。
-- 新增或修改关键逻辑时，必须在代码里补充必要注释，至少覆盖协议转换点、关键分支、风控兜底、流式边界或其他需要读者停下来理解的逻辑点。
-- 多阶段编排代码不得只靠函数名表达意图；当存在“先做什么、为何这样做、失败后如何兜底”这类隐含决策时，必须在对应代码附近写明。
-- 默认遵循 `ruff format` 结果，不手工争论格式细节。
-- 单文件职责要单一；当一个文件明显承担多个职责时应主动拆分。
-- 新增代码应优先使用同步或异步中的一种清晰模型，不要混杂无必要的并发样式。
+落盘约定如下：
 
-## 5. 配置与环境规范
+- 规划类文档写入 `planning_artifacts`
+- 实现类文档写入 `implementation_artifacts`
+- 通用输出写入 `output_folder`
+- 项目知识沉淀和 brownfield 扫描文档写入 `project_knowledge`
+- 文件命名优先遵循 BMad 工作流模板、模块帮助表和技能说明；若模板已规定文件名、目录层级或状态字段，不额外施加仓库级命名约束
 
-- 环境变量统一通过 `core/config.py` 收敛读取。
-- 业务代码中禁止直接使用 `os.getenv()` 到处取值。
-- 所有本地环境示例写入 `.env.example`。
-- 新增第三方依赖必须写入 `pyproject.toml` 并更新 `uv.lock`。
+## 4. 用户交互约定
 
-## 6. 测试与质量门禁
+- 用户提出“继续完成”“接着做”这类请求时，代理应先检查当前工作流状态与已有产物，再继续执行，而不是从头开始
+- 用户若仅提出方向性目标，代理可结合仓库上下文做合理假设，但应在完成后说明关键假设
+- 遇到高风险、破坏性或会影响大量现有工作的决策时，代理应先与用户对齐
+- 用户可把 `AGENTS.md` 视为协作约定，把 `project-context.md` 视为项目实现规范
 
-- 提交前至少执行：
-  - `just lint`
-  - `just typecheck`
-  - `just test`
-- 新增功能至少补充一条正向测试。
-- 存在异常分支、鉴权分支、风控分支时，必须补对应异常路径测试。
-- 对外接口变更时，优先补接口层测试。
+## 5. 维护要求
 
-## 7. 提交与分支规范
+- 当协作方式、BMad 输出目录或文档职责发生变化时，优先更新本文件
+- 当技术栈、架构、测试门禁、风控规则或实现约束发生变化时，更新 `_bmad-output/project-context.md`
+- 当启动方式、环境变量、调试步骤或功能说明发生变化时，更新 `README.md`
 
-- 提交信息采用 Conventional Commits。
-- 推荐格式：`feat(scope): 中文摘要`
-- 提交摘要必须使用简体中文；`type` 与 `scope` 保持 Conventional Commits 习惯写法。
-- 常用 `type` 包括：`feat`、`fix`、`refactor`、`docs`、`test`、`chore`、`build`、`ci`、`perf`、`revert`。
-- `scope` 应尽量使用稳定且有语义的模块名，例如：`api`、`search`、`retrieval`、`config`、`docs`。
-- 提交标题应聚焦单一变更结果，不要写成过程描述、临时说明或无语义短语。
-- 单个提交只做一类事情，不要把功能、重构、依赖升级混在一起。
-- 提交前应确保本次改动已经完成最小自检；至少保证与改动相关的 lint、类型检查和测试已执行通过。
-- 若工作区存在与当前任务无关的改动，提交时必须只暂存本次任务相关文件，避免混入他人或历史未完成内容。
-- 非必要不要使用 `--no-verify`；只有在明确知道被本地环境或钩子异常阻塞、且已手动完成等价校验时才允许临时绕过。
-- 推送前应再次确认目标远端仓库和目标分支，避免把后端代码推送到错误仓库，或把实验性改动直接推到默认分支。
-- 推荐分支命名：
-  - `feature/<topic>`
-  - `fix/<topic>`
-  - `chore/<topic>`
+## 6、Agents
 
-## 8. 金融保险场景特别约束
+### `analyst`
 
-- 任何回答生成链路都必须预留风控和兜底机制。
-- 不得让模型直接输出确定性承诺、理赔结论、保单解释结论而无证据引用。
-- 检索链路应预留可观测字段，例如：
-  - 请求编号
-  - 用户会话编号
-  - 召回文档编号
-  - 重排结果编号
-- 涉及用户信息、保单信息、通话或会话记录时，默认按照敏感信息处理。
-- 知识库原文、切片文本、模型回答应具备审计与追踪能力。
+- 路径：`.agents/skills/bmad-agent-analyst/SKILL.md`
+- 说明：战略业务分析与需求梳理专家；当用户想与 Mary 对话或请求业务分析师时使用。
 
-## 9. 智能代理执行要求
+### `architect`
 
-- 修改代码前先理解现有目录职责，不得随意破坏既定分层。
-- 优先做小而完整的改动，避免一次引入过多抽象。
-- 修改文档、目录或命令后，要同步更新 README 或相关规范文件。
-- 若新增目录为空，允许暂时为空，但在引入实现文件时应与目录职责保持一致。
-- 智能代理产出的报告、计划书及其他过程性文档，统一放在 `docs/` 目录下，不得散落在仓库其他位置。
-- 上述文档文件名必须使用中文，命名应直接体现内容用途，避免使用无语义缩写或纯英文名称。
-- 计划书文件名必须在末尾追加状态标记，使用 `[已完成]` 或 `[未完成]`，以便区分当前执行状态。
+- 路径：`.agents/skills/bmad-agent-architect/SKILL.md`
+- 说明：系统架构与技术设计负责人；当用户想与 Winston 对话或请求架构师时使用。
+
+### `builder`
+
+- 路径：`.agents/skills/bmad-agent-builder/SKILL.md`
+- 说明：通过对话式探索来构建、编辑或分析 Agent Skill；当用户请求创建、分析或编辑 Agent 时使用。
+
+### `dev`
+
+- 路径：`.agents/skills/bmad-agent-dev/SKILL.md`
+- 说明：负责故事执行与代码实现的高级软件工程师；当用户想与 Amelia 对话或请求开发者 agent 时使用。
+
+### `pm`
+
+- 路径：`.agents/skills/bmad-agent-pm/SKILL.md`
+- 说明：负责 PRD 编写与需求探索的产品经理；当用户想与 John 对话或请求产品经理时使用。
+
+### `qa`
+
+- 路径：`.agents/skills/bmad-agent-qa/SKILL.md`
+- 说明：负责测试自动化与覆盖率的 QA 工程师；当用户想与 Quinn 对话或请求 QA 工程师时使用。
+
+### `quick-flow-solo-dev`
+
+- 路径：`.agents/skills/bmad-agent-quick-flow-solo-dev/SKILL.md`
+- 说明：用于快速规格设计与实现的顶级全栈开发者；当用户想与 Barry 对话或请求 quick flow solo dev 时使用。
+
+### `sm`
+
+- 路径：`.agents/skills/bmad-agent-sm/SKILL.md`
+- 说明：负责冲刺规划与故事准备的 Scrum Master；当用户想与 Bob 对话或请求 Scrum Master 时使用。
+
+### `tech-writer`
+
+- 路径：`.agents/skills/bmad-agent-tech-writer/SKILL.md`
+- 说明：技术文档专家与知识整理者；当用户想与 Paige 对话或请求技术写作者时使用。
+
+### `ux-designer`
+
+- 路径：`.agents/skills/bmad-agent-ux-designer/SKILL.md`
+- 说明：UX 设计师与 UI 专家；当用户想与 Sally 对话或请求 UX 设计师时使用。
+
+### `brainstorming-coach`
+
+- 路径：`.agents/skills/bmad-cis-agent-brainstorming-coach/SKILL.md`
+- 说明：负责引导式创意发想会议的顶级头脑风暴专家；当用户想与 Carson 对话或请求 Brainstorming Specialist 时使用。
+
+### `creative-problem-solver`
+
+- 路径：`.agents/skills/bmad-cis-agent-creative-problem-solver/SKILL.md`
+- 说明：精通系统化问题解决方法的高级问题解决专家；当用户想与 Dr. Quinn 对话或请求 Master Problem Solver 时使用。
+
+### `design-thinking-coach`
+
+- 路径：`.agents/skills/bmad-cis-agent-design-thinking-coach/SKILL.md`
+- 说明：专注于以人为本设计流程的设计思维大师；当用户想与 Maya 对话或请求 Design Thinking Maestro 时使用。
+
+### `innovation-strategist`
+
+- 路径：`.agents/skills/bmad-cis-agent-innovation-strategist/SKILL.md`
+- 说明：聚焦商业模式创新与战略性颠覆的颠覆式创新专家；当用户想与 Victor 对话或请求 Disruptive Innovation Oracle 时使用。
+
+### `presentation-master`
+
+- 路径：`.agents/skills/bmad-cis-agent-presentation-master/SKILL.md`
+- 说明：擅长幻灯片、路演稿与视觉叙事的视觉传达与演示专家；当用户想与 Caravaggio 对话或请求 Presentation Expert 时使用。
+
+### `storyteller`
+
+- 路径：`.agents/skills/bmad-cis-agent-storyteller/SKILL.md`
+- 说明：运用成熟框架打造有感染力叙事的故事大师；当用户想与 Sophia 对话或请求 Master Storyteller 时使用。
+
+### `tea`
+
+- 路径：`.agents/skills/bmad-tea/SKILL.md`
+- 说明：首席测试架构师与质量顾问；当用户想与 Murat 对话或请求 Test Architect 时使用。

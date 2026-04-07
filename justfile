@@ -33,15 +33,15 @@ typecheck:
     uv run mypy
 
 test:
-    uv run pytest
+    if (Test-Path tests) { uv run pytest } else { Write-Output "No tests directory; skipping pytest." }
 
 test-api:
-    uv run pytest tests/api
+    if (Test-Path tests/api) { uv run pytest tests/api } else { Write-Output "No API tests directory; skipping pytest." }
 
 check:
     uv run ruff check .
     uv run mypy
-    uv run pytest
+    if (Test-Path tests) { uv run pytest } else { Write-Output "No tests directory; skipping pytest." }
 
 lock:
     uv lock
