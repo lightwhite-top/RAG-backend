@@ -1,7 +1,14 @@
+x-json-file-logging: &json-file-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   nginx:
     image: nginx:1.27-alpine
     container_name: baozhi-rag-nginx
+    logging: *json-file-logging
     depends_on:
       app:
         condition: service_healthy
@@ -27,6 +34,7 @@ services:
         PYPI_MIRROR: ${APP_BUILD_PYPI_MIRROR:-https://mirrors.cloud.tencent.com/pypi/simple}
     image: baozhi-rag-app:latest
     container_name: baozhi-rag-app
+    logging: *json-file-logging
     env_file:
       - path: .env
         required: true
@@ -84,6 +92,7 @@ services:
   mysql:
     image: mysql:8.4
     container_name: baozhi-rag-mysql
+    logging: *json-file-logging
     environment:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-baozhi_rag}
       MYSQL_USER: ${MYSQL_USERNAME:-baozhi}
@@ -115,6 +124,7 @@ services:
         ES_VERSION: 8.19.10
     image: baozhi-elasticsearch-ik:8.19.10
     container_name: baozhi-elasticsearch
+    logging: *json-file-logging
     environment:
       ELASTIC_PASSWORD: ${ES_PASSWORD:?请在.env中配置ES_PASSWORD}
       discovery.type: single-node
@@ -146,6 +156,7 @@ services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
     container_name: baozhi-milvus-etcd
+    logging: *json-file-logging
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
@@ -177,6 +188,7 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
     container_name: baozhi-milvus-minio
+    logging: *json-file-logging
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -193,6 +205,7 @@ services:
   milvus:
     image: milvusdb/milvus:v2.6.11
     container_name: baozhi-milvus
+    logging: *json-file-logging
     command:
       - /bin/sh
       - -ec

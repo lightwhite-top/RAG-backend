@@ -643,6 +643,13 @@ docker compose -f docker-compose.server.yml logs -f elasticsearch
 docker compose -f docker-compose.server.yml logs -f milvus
 ```
 
+当前 `docker-compose.server.yml` 与 `docker-compose.server.private.yml` 已为各容器显式启用 Docker `json-file` 日志轮转：
+
+- `max-size: "50m"`：单个日志文件达到约 50MB 后轮转
+- `max-file: "5"`：每个容器最多保留 5 份日志文件
+- 单容器日志占用通常会被限制在约 250MB 量级
+- 修改日志配置后需重建容器才会生效，例如执行 `docker compose -f docker-compose.server.yml up -d --force-recreate`
+
 环境文件建议约定：
 
 ```text
