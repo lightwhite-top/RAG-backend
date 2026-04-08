@@ -14,7 +14,9 @@ dist
 htmlcov
 .tmp
 tmp_pytest_run
-data
+data/**
+!data/
+!data/domain_dictionary.txt
 docs
 tests
 .env
