@@ -70,6 +70,7 @@ services:
       - "8000"
     volumes:
       - app_data:/app/data
+      - ./data/domain_dictionary.txt:/app/data/domain_dictionary.txt:ro
     depends_on:
       mysql:
         condition: service_healthy
