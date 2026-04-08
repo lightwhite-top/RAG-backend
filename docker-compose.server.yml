@@ -7,7 +7,7 @@ x-json-file-logging: &json-file-logging
 services:
   nginx:
     image: nginx:1.27-alpine
-    container_name: baozhi-rag-nginx
+    container_name: rag-service-nginx
     logging: *json-file-logging
     depends_on:
       app:
@@ -32,8 +32,8 @@ services:
         # 服务端部署默认走腾讯云镜像源；如需切换，可在 .env 中覆盖。
         APT_MIRROR: ${APP_BUILD_APT_MIRROR:-https://mirrors.cloud.tencent.com}
         PYPI_MIRROR: ${APP_BUILD_PYPI_MIRROR:-https://mirrors.cloud.tencent.com/pypi/simple}
-    image: baozhi-rag-app:latest
-    container_name: baozhi-rag-app
+    image: rag-service-app:latest
+    container_name: rag-service-app
     logging: *json-file-logging
     env_file:
       - path: .env
@@ -47,9 +47,9 @@ services:
       DOC_CONVERT_TEMP_DIR: /app/data/tmp/converted
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-baozhi_rag}
-      MYSQL_USERNAME: ${MYSQL_USERNAME:-baozhi}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-baozhi123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-rag}
+      MYSQL_USERNAME: ${MYSQL_USERNAME:-rag}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-jwt-secret-before-production}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_ACCESS_TOKEN_EXPIRE_DAYS: ${JWT_ACCESS_TOKEN_EXPIRE_DAYS:-7}
@@ -91,12 +91,12 @@ services:
 
   mysql:
     image: mysql:8.4
-    container_name: baozhi-rag-mysql
+    container_name: rag-service-mysql
     logging: *json-file-logging
     environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-baozhi_rag}
-      MYSQL_USER: ${MYSQL_USERNAME:-baozhi}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-baozhi123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-rag}
+      MYSQL_USER: ${MYSQL_USERNAME:-rag}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
     command:
       - mysqld
@@ -122,8 +122,8 @@ services:
       dockerfile: docker/elasticsearch-ik/Dockerfile
       args:
         ES_VERSION: 8.19.10
-    image: baozhi-elasticsearch-ik:8.19.10
-    container_name: baozhi-elasticsearch
+    image: rag-service-elasticsearch-ik:8.19.10
+    container_name: rag-service-elasticsearch
     logging: *json-file-logging
     environment:
       ELASTIC_PASSWORD: ${ES_PASSWORD:?请在.env中配置ES_PASSWORD}
@@ -155,7 +155,7 @@ services:
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
-    container_name: baozhi-milvus-etcd
+    container_name: rag-service-milvus-etcd
     logging: *json-file-logging
     environment:
       ETCD_AUTO_COMPACTION_MODE: revision
@@ -187,7 +187,7 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2024-12-18T13-15-44Z
-    container_name: baozhi-milvus-minio
+    container_name: rag-service-milvus-minio
     logging: *json-file-logging
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -204,7 +204,7 @@ services:
 
   milvus:
     image: milvusdb/milvus:v2.6.11
-    container_name: baozhi-milvus
+    container_name: rag-service-milvus
     logging: *json-file-logging
     command:
       - /bin/sh

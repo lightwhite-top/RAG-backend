@@ -42,6 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY README.md ./
 COPY src ./src
+COPY data/domain_dictionary.txt ./data/domain_dictionary.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 

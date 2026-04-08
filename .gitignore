@@ -31,7 +31,8 @@ AGENTS.md
 .codex/
 .tmp/
 tmp_pytest_run/
-data/
+data/**
+!data/domain_dictionary.txt
 docs/
 tests/
 .agents/

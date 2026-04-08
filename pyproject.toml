@@ -1,5 +1,5 @@
 [project]
-name = "baozhi-rag"
+name = "rag-service"
 version = "0.1.0"
 description = "面向金融保险场景的 RAG 客服系统后端基础工程。"
 readme = "README.md"
