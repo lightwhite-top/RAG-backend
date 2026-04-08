@@ -1,11 +1,11 @@
-"""金融保险领域词典。"""
+"""领域词典。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_DOMAIN_TERMS_FILE = "default_domain_terms.txt"
+DEFAULT_DOMAIN_DICTIONARY_PATH = Path("data/domain_dictionary.txt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +78,6 @@ def _load_terms_from_text_file(dictionary_path: Path) -> set[str]:
 
 
 def load_domain_dictionary(dictionary_path: Path | None = None) -> DomainTermDictionary:
-    """加载默认金融保险词典，可选叠加外部词典。"""
-    default_terms_path = Path(__file__).with_name(DEFAULT_DOMAIN_TERMS_FILE)
-    default_terms = _load_terms_from_text_file(default_terms_path)
-    if dictionary_path is None:
-        return DomainTermDictionary.from_terms(default_terms)
-    return DomainTermDictionary.from_file(dictionary_path, base_terms=default_terms)
+    """加载领域词典。"""
+    resolved_dictionary_path = dictionary_path or DEFAULT_DOMAIN_DICTIONARY_PATH
+    return DomainTermDictionary.from_file(resolved_dictionary_path)

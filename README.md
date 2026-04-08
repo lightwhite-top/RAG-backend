@@ -1,13 +1,15 @@
-# BaozhiRAG
+# RAG Service
 
-面向金融保险场景的 RAG 客服系统后端基础工程，当前版本完成了 `FastAPI + uv` 的基础环境、质量门禁和团队协作规范初始化。
+通用 RAG 系统后端基础工程，当前版本完成了 `FastAPI + uv` 的基础环境、质量门禁和团队协作规范初始化。
+
+对外服务名统一由 `APP_NAME` 控制；当前内部 Python 包名与启动入口仍保留为 `baozhi_rag` 以兼容现有代码。
 
 ## 技术栈
 
 - Python 3.13
 - FastAPI
 - uv
-- 阿里云百炼 OpenAI 兼容接口
+- OpenAI 兼容大模型接口
 - Ruff
 - Mypy
 - Pytest
@@ -182,9 +184,9 @@ just run pytest -k health
 ```powershell
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
-MYSQL_DATABASE=baozhi_rag
-MYSQL_USERNAME=baozhi
-MYSQL_PASSWORD=baozhi123456
+MYSQL_DATABASE=rag
+MYSQL_USERNAME=rag
+MYSQL_PASSWORD=change-me
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_DAYS=7
@@ -202,7 +204,7 @@ SMTP_PASSWORD=replace-with-smtp-password
 SMTP_USE_TLS=true
 SMTP_USE_SSL=false
 SMTP_FROM_EMAIL=notice@example.com
-SMTP_FROM_NAME=Baozhi RAG Service
+SMTP_FROM_NAME=
 ```
 
 其中注册验证码邮件的发件地址由 `SMTP_FROM_EMAIL` 决定，发件人展示名称由 `SMTP_FROM_NAME` 决定。
@@ -313,7 +315,8 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
 异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
-默认领域词典文件位于 `src/baozhi_rag/domain/default_domain_terms.txt`，自定义扩展词典可通过 `DOMAIN_DICTIONARY_PATH` 配置。
+默认领域词典文件位于 `data/domain_dictionary.txt`，可通过 `DOMAIN_DICTIONARY_PATH` 配置为其他词典文件。
+`APP_NAME` 是对外服务名的统一来源；`SMTP_FROM_NAME` 留空时会自动继承 `APP_NAME`，`CHAT_SYSTEM_PROMPT` 支持使用 `{app_name}` 占位符。
 当前配置加载会先读取项目根目录下的 `.env` 公共配置，再根据 `APP_ENV` 自动叠加 `.env.development` 或 `.env.production`。
 本地开发建议把 `.env` 中的 `APP_ENV` 设为 `development`，服务器部署建议设为 `production`。
 当前仓库的环境约定是：
@@ -323,8 +326,8 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置；服务端 compose 默认开启 ES 认证。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_PASSWORD`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置；服务端 compose 默认开启 Milvus 认证。
-百炼模型配置通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 配置。
-向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置。
+大模型配置通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL` 配置；旧变量 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 仍兼容。
+向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置；如需让向量化单独接入另一家 OpenAI 兼容平台，可额外配置 `CHUNK_EMBEDDING_LLM_API_KEY`、`CHUNK_EMBEDDING_LLM_BASE_URL`、`CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS`。
 
 ## Chunk 检索
 
@@ -594,8 +597,8 @@ chmod +x deploy_server.sh
 - `OSS_BUCKET_NAME`
 - `OSS_ACCESS_KEY_ID`
 - `OSS_ACCESS_KEY_SECRET`
-- `DASHSCOPE_API_KEY`
-- `BAILIAN_CHAT_MODEL`
+- `LLM_API_KEY`
+- `LLM_CHAT_MODEL`
 - `CHUNK_EMBEDDING_MODEL`
 - `CHUNK_EMBEDDING_DIMENSIONS`
 

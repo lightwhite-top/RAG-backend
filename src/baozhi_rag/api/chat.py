@@ -6,13 +6,18 @@ import json
 import logging
 import time
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from baozhi_rag.api.dependencies import get_chat_service, get_current_user
+from baozhi_rag.api.dependencies import (
+    get_chat_service,
+    get_conversation_chat_service,
+    get_current_user,
+)
 from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
@@ -26,7 +31,8 @@ from baozhi_rag.schemas.chat import (
     ChatTraceItem,
 )
 from baozhi_rag.schemas.common import SuccessResponse
-from baozhi_rag.services.chat import ChatService, ChatStreamEvent
+from baozhi_rag.services.chat import ChatCompletionResult, ChatService, ChatStreamEvent
+from baozhi_rag.services.conversation_chat import ConversationChatService
 from baozhi_rag.services.llm import ChatMessage
 
 LOGGER = logging.getLogger(__name__)
@@ -43,50 +49,50 @@ def create_chat_completion(
     request: Request,
     payload: ChatCompletionRequest,
     service: Annotated[ChatService, Depends(get_chat_service)],
+    conversation_service: Annotated[
+        ConversationChatService,
+        Depends(get_conversation_chat_service),
+    ],
     settings: Annotated[Settings, Depends(get_settings)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> SuccessResponse[ChatCompletionResponse] | StreamingResponse:
-    """执行带检索增强的聊天补全，支持普通返回和 SSE 流式返回。
-
-    参数:
-        request: 当前 HTTP 请求对象，用于提取或生成请求 ID。
-        payload: 聊天请求体，包含消息列表、检索条数和流式开关。
-        service: 聊天服务实例，负责检索增强与模型调用。
-
-    返回:
-        当 `stream=false` 时返回统一成功响应；当 `stream=true` 时返回 `text/event-stream`。
-
-    异常:
-        ChatCompletionValidationError: 当请求参数非法时由服务层抛出。
-        AlibabaModelStudioError: 当底层聊天模型调用失败时继续上抛。
-        HybridChunkStoreError: 当检索链路失败时继续上抛。
-    """
+    """执行带检索增强的聊天补全，支持普通返回和 SSE 流式返回。"""
     request_id = ensure_request_id(request)
     started_at = time.perf_counter()
-    # 在 API 边界先完成 schema 到领域消息的转换，避免服务层感知 HTTP 模型。
     messages = [
         ChatMessage(role=message.role, content=message.content) for message in payload.messages
     ]
 
     if payload.stream:
-        message_id = uuid4().hex
         original_query = _resolve_original_query(messages)
-        # 先预取首个事件，确保检索或参数错误在响应头发出前就能走统一异常处理。
-        stream_iterator = iter(
-            service.stream(
-                messages,
-                retrieval_size=payload.retrieval_size,
-                temperature=payload.temperature,
-                viewer_user_id=current_user.id,
+        if payload.session_id is not None:
+            stream_iterator = iter(
+                conversation_service.stream(
+                    session_id=payload.session_id,
+                    messages=messages,
+                    retrieval_size=payload.retrieval_size,
+                    temperature=payload.temperature,
+                    current_user=current_user,
+                    request_id=request_id,
+                )
             )
-        )
+        else:
+            stream_iterator = iter(
+                service.stream(
+                    messages,
+                    retrieval_size=payload.retrieval_size,
+                    temperature=payload.temperature,
+                    viewer_user_id=current_user.id,
+                )
+            )
         first_event = next(stream_iterator)
+        message_id = _read_optional_str(first_event.data.get("message_id")) or uuid4().hex
         return StreamingResponse(
             _stream_events(
                 request_id=request_id,
                 message_id=message_id,
                 original_query=original_query,
-                model_name=settings.bailian_chat_model,
+                model_name=settings.llm_chat_model,
                 started_at=started_at,
                 first_event=first_event,
                 remaining_events=stream_iterator,
@@ -99,42 +105,73 @@ def create_chat_completion(
             },
         )
 
-    result = service.complete(
-        messages,
-        retrieval_size=payload.retrieval_size,
-        temperature=payload.temperature,
-        viewer_user_id=current_user.id,
+    if payload.session_id is not None:
+        result = conversation_service.complete(
+            session_id=payload.session_id,
+            messages=messages,
+            retrieval_size=payload.retrieval_size,
+            temperature=payload.temperature,
+            current_user=current_user,
+            request_id=request_id,
+        )
+    else:
+        result = service.complete(
+            messages,
+            retrieval_size=payload.retrieval_size,
+            temperature=payload.temperature,
+            viewer_user_id=current_user.id,
+        )
+
+    return SuccessResponse[ChatCompletionResponse].success(
+        message="聊天完成",
+        request_id=request_id,
+        data=_build_completion_response(
+            result=result,
+            request_id=request_id,
+            fallback_original_query=_resolve_original_query(messages),
+            model_name=settings.llm_chat_model,
+            latency_ms=_calculate_latency_ms(started_at),
+        ),
     )
+
+
+def _build_completion_response(
+    *,
+    result: ChatCompletionResult,
+    request_id: str,
+    fallback_original_query: str,
+    model_name: str | None,
+    latency_ms: int | None,
+) -> ChatCompletionResponse:
     citations = _build_citation_items(result.citations)
-    message_id = uuid4().hex
     assistant_message = _build_assistant_message(
-        message_id=message_id,
+        message_id=result.message_id or uuid4().hex,
+        session_id=result.session_id,
+        sequence_no=result.sequence_no,
         answer=result.answer,
         plain_text=result.plain_text,
         content_blocks=result.content_blocks,
         citations=citations,
         finish_reason=result.finish_reason,
+        created_at=result.created_at,
+        completed_at=result.completed_at,
     )
     trace = _build_trace_item(
         request_id=request_id,
-        original_query=result.original_query or _resolve_original_query(messages),
+        original_query=result.original_query or fallback_original_query,
         retrieval_query=result.retrieval_query,
         rewrite_applied=result.rewrite_applied,
-        model_name=settings.bailian_chat_model,
-        latency_ms=_calculate_latency_ms(started_at),
+        model_name=model_name,
+        latency_ms=latency_ms,
     )
-    return SuccessResponse[ChatCompletionResponse].success(
-        message="聊天完成",
-        request_id=request_id,
-        data=ChatCompletionResponse(
-            assistant_message=assistant_message,
-            trace=trace,
-            answer=result.answer,
-            retrieval_query=result.retrieval_query,
-            citation_count=len(citations),
-            citations=citations,
-            finish_reason=result.finish_reason,
-        ),
+    return ChatCompletionResponse(
+        assistant_message=assistant_message,
+        trace=trace,
+        answer=result.answer,
+        retrieval_query=result.retrieval_query,
+        citation_count=len(citations),
+        citations=citations,
+        finish_reason=result.finish_reason,
     )
 
 
@@ -156,6 +193,8 @@ def _stream_events(
     offset = 0
     message_started = False
     emitted_citation_ids: set[str] = set()
+    session_id: str | None = None
+    sequence_no: int | None = None
 
     try:
         for event in _iterate_stream_events(first_event, remaining_events):
@@ -163,6 +202,8 @@ def _stream_events(
                 retrieval_query = str(event.data.get("retrieval_query", original_query))
                 rewrite_applied = bool(event.data.get("rewrite_applied", False))
                 citations = _build_citation_items(event.data.get("citations", []))
+                session_id = _read_optional_str(event.data.get("session_id"))
+                sequence_no = _read_optional_int(event.data.get("sequence_no"))
                 if not message_started:
                     yield _encode_sse_event(
                         "message.start",
@@ -173,6 +214,8 @@ def _stream_events(
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
                             "model": model_name,
+                            "session_id": session_id,
+                            "sequence_no": sequence_no,
                         },
                     )
                     message_started = True
@@ -199,6 +242,8 @@ def _stream_events(
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
                             "model": model_name,
+                            "session_id": session_id,
+                            "sequence_no": sequence_no,
                         },
                     )
                     message_started = True
@@ -219,6 +264,8 @@ def _stream_events(
             if event.event == "done":
                 if not citations:
                     citations = _build_citation_items(event.data.get("citations", []))
+                session_id = _read_optional_str(event.data.get("session_id")) or session_id
+                sequence_no = _read_optional_int(event.data.get("sequence_no")) or sequence_no
                 if not message_started:
                     yield _encode_sse_event(
                         "message.start",
@@ -229,6 +276,8 @@ def _stream_events(
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
                             "model": model_name,
+                            "session_id": session_id,
+                            "sequence_no": sequence_no,
                         },
                     )
                     message_started = True
@@ -242,11 +291,15 @@ def _stream_events(
                 finish_reason = str(event.data.get("finish_reason", "stop"))
                 assistant_message = _build_assistant_message(
                     message_id=message_id,
+                    session_id=session_id,
+                    sequence_no=sequence_no,
                     answer=str(event.data.get("answer", "")),
                     plain_text=_read_optional_str(event.data.get("plain_text")),
                     content_blocks=event.data.get("content_blocks"),
                     citations=citations,
                     finish_reason=finish_reason,
+                    created_at=_read_optional_datetime(event.data.get("created_at")),
+                    completed_at=_read_optional_datetime(event.data.get("completed_at")),
                 )
                 trace = _build_trace_item(
                     request_id=request_id,
@@ -266,7 +319,6 @@ def _stream_events(
                     },
                 )
     except AppError as exc:
-        # SSE 已经开始输出后，不能再切回标准 JSON 错误体，只能继续发 error 事件。
         LOGGER.warning(
             "chat_stream_failed request_id=%s error_code=%s message=%s",
             request_id,
@@ -282,7 +334,7 @@ def _stream_events(
                 "request_id": request_id,
             },
         )
-    except Exception:  # pragma: no cover - 兜底路径不稳定
+    except Exception:
         LOGGER.exception("chat_stream_failed request_id=%s", request_id)
         yield _encode_sse_event(
             "message.error",
@@ -299,7 +351,7 @@ def _iterate_stream_events(
     first_event: ChatStreamEvent,
     remaining_events: Iterator[ChatStreamEvent],
 ) -> Iterator[ChatStreamEvent]:
-    """按顺序遍历首个事件和剩余事件，避免一次性展开迭代器。"""
+    """按顺序遍历首个事件和剩余事件。"""
     yield first_event
     yield from remaining_events
 
@@ -448,11 +500,15 @@ def _build_content_block_items(
 def _build_assistant_message(
     *,
     message_id: str,
+    session_id: str | None,
+    sequence_no: int | None,
     answer: str,
     plain_text: str | None,
     content_blocks: Any,
     citations: list[ChatCitationItem],
     finish_reason: str,
+    created_at: datetime | None = None,
+    completed_at: datetime | None = None,
 ) -> ChatAssistantMessage:
     """组装结构化助手消息。"""
     resolved_plain_text = (plain_text or "").strip() or answer.strip()
@@ -466,10 +522,14 @@ def _build_assistant_message(
     )
     return ChatAssistantMessage(
         message_id=message_id,
+        session_id=session_id,
+        sequence_no=sequence_no,
         plain_text=normalized_plain_text,
         content_blocks=block_items,
         citations=citations,
         finish_reason=finish_reason,
+        created_at=created_at,
+        completed_at=completed_at,
     )
 
 
@@ -524,6 +584,31 @@ def _read_optional_float(value: object) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _read_optional_int(value: object) -> int | None:
+    """安全读取可选整数。"""
+    if value is None:
+        return None
+    if not isinstance(value, int | float | str):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_optional_datetime(value: object) -> datetime | None:
+    """安全读取可选时间。"""
+    if isinstance(value, datetime):
+        return value
+    text = _read_optional_str(value)
+    if text is None:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
         return None
 
 

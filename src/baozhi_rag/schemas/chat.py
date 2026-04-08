@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ class ChatMessageItem(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """聊天补全请求体。"""
 
+    session_id: str | None = Field(default=None, description="会话 ID；为空时按无状态模式处理")
     messages: list[ChatMessageItem] = Field(
         min_length=1,
         description="会话消息列表，至少包含一条 user 消息",
@@ -69,10 +71,14 @@ class ChatAssistantMessage(BaseModel):
 
     message_id: str = Field(description="消息唯一标识")
     role: Literal["assistant"] = Field(default="assistant", description="消息角色")
+    session_id: str | None = Field(default=None, description="所属会话 ID")
+    sequence_no: int | None = Field(default=None, description="会话内消息序号")
     plain_text: str = Field(description="助手回答纯文本")
     content_blocks: list[ChatContentBlockItem] = Field(description="结构化正文块")
     citations: list[ChatCitationItem] = Field(description="结构化引用列表")
     finish_reason: str = Field(description="消息完成原因")
+    created_at: datetime | None = Field(default=None, description="消息创建时间")
+    completed_at: datetime | None = Field(default=None, description="消息完成时间")
 
 
 class ChatTraceItem(BaseModel):

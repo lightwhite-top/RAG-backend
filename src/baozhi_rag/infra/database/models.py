@@ -5,7 +5,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -46,6 +57,305 @@ def mysql_table_options(comment: str) -> dict[str, str]:
         "mysql_collate": "utf8mb4_unicode_ci",
         "comment": comment,
     }
+
+
+class ChatSessionModel(Base):
+    """聊天会话表。"""
+
+    __tablename__ = "chat_sessions"
+    __table_args__ = (
+        Index("ix_chat_sessions_owner_updated_at", "owner_user_id", "updated_at"),
+        Index(
+            "ix_chat_sessions_owner_status_updated_at",
+            "owner_user_id",
+            "status",
+            "updated_at",
+        ),
+        mysql_table_options("聊天会话表"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="会话ID")
+    owner_user_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("users.id"),
+        nullable=False,
+        comment="所属用户ID",
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, comment="会话标题")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="会话状态")
+    message_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="消息总数",
+    )
+    summary_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="摘要版本",
+    )
+    last_message_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="最近消息时间",
+    )
+    last_user_message_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="最近用户消息时间",
+    )
+    last_assistant_message_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="最近助手消息时间",
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="删除时间",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
+
+
+class ChatMessageModel(Base):
+    """聊天消息表。"""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "sequence_no",
+            name="uq_chat_messages_session_sequence",
+        ),
+        Index("ix_chat_messages_session_created_at", "session_id", "created_at"),
+        Index("ix_chat_messages_request_id", "request_id"),
+        mysql_table_options("聊天消息表"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="消息ID")
+    session_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("chat_sessions.id"),
+        nullable=False,
+        comment="会话ID",
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False, comment="会话内序号")
+    role: Mapped[str] = mapped_column(String(16), nullable=False, comment="消息角色")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="消息状态")
+    plain_text: Mapped[str] = mapped_column(Text, nullable=False, comment="消息正文")
+    content_blocks_json: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="结构化内容块",
+    )
+    request_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="请求ID",
+    )
+    model_name: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="模型名称",
+    )
+    original_query: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="原始问题",
+    )
+    retrieval_query: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="检索问题",
+    )
+    rewrite_applied: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="是否执行改写",
+    )
+    retrieval_size: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="召回数量",
+    )
+    temperature: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        comment="采样温度",
+    )
+    finish_reason: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        comment="完成原因",
+    )
+    latency_ms: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="耗时毫秒",
+    )
+    usage_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="用量信息",
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="错误码",
+    )
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="错误消息",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        nullable=True,
+        comment="完成时间",
+    )
+
+
+class ChatMessageCitationModel(Base):
+    """聊天消息引用表。"""
+
+    __tablename__ = "chat_message_citations"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "citation_index",
+            name="uq_chat_message_citations_message_index",
+        ),
+        Index("ix_chat_message_citations_file_id", "file_id"),
+        Index("ix_chat_message_citations_chunk_id", "chunk_id"),
+        mysql_table_options("聊天消息引用表"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="引用ID")
+    message_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("chat_messages.id"),
+        nullable=False,
+        comment="消息ID",
+    )
+    citation_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="引用序号")
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="Chunk ID")
+    file_id: Mapped[str] = mapped_column(String(32), nullable=False, comment="文件ID")
+    source_filename: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="原文件名",
+    )
+    storage_key: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        comment="存储键",
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="Chunk序号")
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False, comment="字符数")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="引用正文")
+    snippet: Mapped[str] = mapped_column(Text, nullable=False, comment="引用摘要")
+    merged_terms_json: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="命中领域词",
+    )
+    score: Mapped[float | None] = mapped_column(Float, nullable=True, comment="检索得分")
+    heading_path_json: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="标题路径",
+    )
+    section_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="节标题",
+    )
+    content_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        comment="内容类型",
+    )
+    source_anchor: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="原文锚点",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
+
+
+class ChatSessionMemorySnapshotModel(Base):
+    """聊天会话摘要快照表。"""
+
+    __tablename__ = "chat_session_memory_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "version",
+            name="uq_chat_session_memory_snapshots_session_version",
+        ),
+        Index(
+            "ix_chat_session_memory_snapshots_session_covered",
+            "session_id",
+            "covered_until_sequence_no",
+        ),
+        mysql_table_options("聊天会话摘要快照表"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="快照ID")
+    session_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("chat_sessions.id"),
+        nullable=False,
+        comment="会话ID",
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, comment="摘要版本")
+    covered_until_sequence_no: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="覆盖到的消息序号",
+    )
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False, comment="摘要正文")
+    memory_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="结构化记忆",
+    )
+    token_estimate: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Token 估算",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
+    )
 
 
 class UserModel(Base):

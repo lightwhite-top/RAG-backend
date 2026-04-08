@@ -24,7 +24,7 @@ from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
 )
 from baozhi_rag.infra.database.mysql import DatabaseManager
-from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
+from baozhi_rag.infra.llm.openai_compatible_client import OpenAICompatibleLlmClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
@@ -94,8 +94,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_manager.ensure_schema()
         object_store = AliyunOssFileStore.from_settings(current_settings)
         object_store.ensure_ready()
-        bailian_client = AlibabaModelStudioClient.from_settings(current_settings)
-        bailian_client.ensure_ready()
+        chat_llm_client = OpenAICompatibleLlmClient.from_settings(current_settings)
+        chat_llm_client.ensure_ready()
+        embedding_llm_client = OpenAICompatibleLlmClient.from_embedding_settings(current_settings)
+        embedding_llm_client.ensure_ready()
         chunk_store = HybridChunkStore.from_settings(current_settings)
         chunk_store.ensure_ready()
 
@@ -122,7 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 ),
                 chunk_store=chunk_store,
-                chunk_embedding_service=ChunkEmbeddingService(bailian_client),
+                chunk_embedding_service=ChunkEmbeddingService(embedding_llm_client),
                 lease_seconds=current_settings.upload_task_lease_seconds,
                 heartbeat_interval_seconds=current_settings.upload_task_heartbeat_interval_seconds,
             )

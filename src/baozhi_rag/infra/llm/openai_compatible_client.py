@@ -1,63 +1,66 @@
-"""阿里云百炼 OpenAI 兼容客户端封装。"""
+"""OpenAI 兼容大模型客户端封装。"""
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
-from typing import Any, cast
+from collections.abc import Iterator, Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.llm import ChatMessage
 
+if TYPE_CHECKING:
+    from baozhi_rag.core.config import Settings
+
 try:  # pragma: no cover - 是否安装依赖取决于运行环境
     from openai import OpenAI as ImportedOpenAIClient  # type: ignore[import-not-found]
 except ImportError as exc:  # pragma: no cover - 测试环境可通过可选导入绕过
-    OPENAI_CLIENT_CLASS: Any | None = None
-    OPENAI_IMPORT_ERROR: Exception | None = exc
+    openai_client_class: type[Any] | None = None
+    openai_import_error: Exception | None = exc
 else:  # pragma: no cover - 导入成功路径不需要单独覆盖
-    OPENAI_CLIENT_CLASS = ImportedOpenAIClient
-    OPENAI_IMPORT_ERROR = None
+    openai_client_class = ImportedOpenAIClient
+    openai_import_error = None
 
 LOGGER = logging.getLogger(__name__)
 
 
-class AlibabaModelStudioError(AppError):
-    """阿里云百炼客户端异常。"""
+class OpenAICompatibleLlmError(AppError):
+    """OpenAI 兼容大模型客户端异常。"""
 
-    default_message = "阿里云百炼调用失败"
-    default_error_code = "bailian_error"
+    default_message = "大模型服务调用失败"
+    default_error_code = "llm_error"
     default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
-class AlibabaModelStudioDependencyError(AlibabaModelStudioError):
-    """百炼客户端依赖缺失。"""
+class OpenAICompatibleLlmDependencyError(OpenAICompatibleLlmError):
+    """大模型客户端依赖缺失。"""
 
-    default_message = "百炼客户端依赖缺失"
-    default_error_code = "bailian_dependency_error"
+    default_message = "大模型客户端依赖缺失"
+    default_error_code = "llm_dependency_error"
     default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
-class AlibabaModelStudioConfigurationError(AlibabaModelStudioError):
-    """百炼客户端配置异常。"""
+class OpenAICompatibleLlmConfigurationError(OpenAICompatibleLlmError):
+    """大模型客户端配置异常。"""
 
-    default_message = "百炼客户端配置异常"
-    default_error_code = "bailian_configuration_error"
+    default_message = "大模型客户端配置异常"
+    default_error_code = "llm_configuration_error"
     default_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
-class AlibabaModelStudioInvocationError(AlibabaModelStudioError):
-    """百炼模型调用异常。"""
+class OpenAICompatibleLlmInvocationError(OpenAICompatibleLlmError):
+    """大模型调用异常。"""
 
-    default_message = "百炼模型调用失败"
-    default_error_code = "bailian_invocation_error"
+    default_message = "调用大模型失败"
+    default_error_code = "llm_invocation_error"
     default_status_code = status.HTTP_502_BAD_GATEWAY
 
 
-class AlibabaModelStudioClient:
-    """统一封装阿里云百炼的 Embedding 与 Chat 能力。"""
+class OpenAICompatibleLlmClient:
+    """统一封装 OpenAI 兼容接口的 Embedding 与 Chat 能力。"""
 
     def __init__(
         self,
@@ -70,28 +73,12 @@ class AlibabaModelStudioClient:
         embedding_batch_size: int,
         chat_model: str | None,
     ) -> None:
-        """初始化百炼客户端。
-
-        参数:
-            api_key: DashScope API Key。
-            base_url: 百炼 OpenAI 兼容接口地址。
-            timeout_seconds: 单次调用超时时间。
-            embedding_model: 向量模型名称。
-            embedding_dimensions: 向量维度。
-            embedding_batch_size: 单次批量向量化最大文本数。
-            chat_model: 预留的聊天模型名称；后续接入对话生成时复用。
-
-        返回:
-            None。
-
-        异常:
-            ValueError: 当超时时间、向量维度或批大小非法时抛出。
-        """
+        """初始化大模型客户端。"""
         if timeout_seconds <= 0:
-            msg = "百炼客户端超时时间必须大于 0"
+            msg = "大模型客户端超时时间必须大于 0"
             raise ValueError(msg)
         if not embedding_model.strip():
-            msg = "百炼向量模型名称不能为空"
+            msg = "向量大模型名称不能为空"
             raise ValueError(msg)
         if embedding_dimensions <= 0:
             msg = "向量维度必须大于 0"
@@ -110,16 +97,29 @@ class AlibabaModelStudioClient:
         self._client: Any | None = None
 
     @classmethod
-    def from_settings(cls, settings: Any) -> AlibabaModelStudioClient:
-        """基于应用配置创建百炼客户端。"""
+    def from_settings(cls, settings: Settings) -> OpenAICompatibleLlmClient:
+        """基于应用配置创建大模型客户端。"""
         return cls(
-            api_key=settings.bailian_api_key,
-            base_url=settings.bailian_base_url,
-            timeout_seconds=settings.bailian_timeout_seconds,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            timeout_seconds=settings.llm_timeout_seconds,
             embedding_model=settings.chunk_embedding_model,
             embedding_dimensions=settings.chunk_embedding_dimensions,
             embedding_batch_size=settings.chunk_embedding_batch_size,
-            chat_model=settings.bailian_chat_model,
+            chat_model=settings.llm_chat_model,
+        )
+
+    @classmethod
+    def from_embedding_settings(cls, settings: Settings) -> OpenAICompatibleLlmClient:
+        """基于应用配置创建向量化专用客户端。"""
+        return cls(
+            api_key=settings.resolved_chunk_embedding_llm_api_key,
+            base_url=settings.resolved_chunk_embedding_llm_base_url,
+            timeout_seconds=settings.resolved_chunk_embedding_llm_timeout_seconds,
+            embedding_model=settings.chunk_embedding_model,
+            embedding_dimensions=settings.chunk_embedding_dimensions,
+            embedding_batch_size=settings.chunk_embedding_batch_size,
+            chat_model=settings.llm_chat_model,
         )
 
     def ensure_ready(self) -> None:
@@ -128,18 +128,7 @@ class AlibabaModelStudioClient:
         self._get_client()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """调用百炼向量模型生成文本向量。
-
-        参数:
-            texts: 待向量化文本列表。
-
-        返回:
-            与输入文本顺序一一对应的浮点向量列表。
-
-        异常:
-            AlibabaModelStudioConfigurationError: 当向量模型未配置时抛出。
-            AlibabaModelStudioInvocationError: 当模型调用失败或响应不完整时抛出。
-        """
+        """调用向量大模型生成文本向量。"""
         if not texts:
             return []
         self._validate_api_key()
@@ -147,7 +136,7 @@ class AlibabaModelStudioClient:
         embeddings: list[list[float]] = []
 
         for start in range(0, len(texts), self._embedding_batch_size):
-            # 这里按百炼单次批量限制切片，避免大批次请求直接被上游拒绝。
+            # 这里按当前上游的单次批量限制切片，避免大批次请求直接被上游拒绝。
             batch = texts[start : start + self._embedding_batch_size]
             try:
                 response = client.embeddings.create(
@@ -162,13 +151,13 @@ class AlibabaModelStudioClient:
                     model_name=self._embedding_model,
                     exc=exc,
                 )
-                msg = "调用百炼向量模型失败"
-                raise AlibabaModelStudioInvocationError(msg) from exc
+                msg = "调用向量大模型失败"
+                raise OpenAICompatibleLlmInvocationError(msg) from exc
 
             data = sorted(getattr(response, "data", []), key=lambda item: item.index)
             if len(data) != len(batch):
-                msg = "百炼向量模型返回数量异常"
-                raise AlibabaModelStudioInvocationError(msg)
+                msg = "向量大模型返回数量异常"
+                raise OpenAICompatibleLlmInvocationError(msg)
 
             embeddings.extend([self._extract_embedding(item.embedding) for item in data])
         return embeddings
@@ -179,22 +168,10 @@ class AlibabaModelStudioClient:
         *,
         temperature: float | None = None,
     ) -> str:
-        """调用百炼聊天模型完成一次对话补全。
-
-        参数:
-            messages: 标准化消息列表。
-            temperature: 可选采样温度。
-
-        返回:
-            首个候选回复文本。
-
-        异常:
-            AlibabaModelStudioConfigurationError: 当聊天模型未配置时抛出。
-            AlibabaModelStudioInvocationError: 当模型调用失败或响应为空时抛出。
-        """
+        """调用聊天大模型完成一次对话补全。"""
         if not self._chat_model:
-            msg = "未配置百炼聊天模型"
-            raise AlibabaModelStudioConfigurationError(msg)
+            msg = "未配置聊天大模型"
+            raise OpenAICompatibleLlmConfigurationError(msg)
 
         self._validate_api_key()
         try:
@@ -210,18 +187,18 @@ class AlibabaModelStudioClient:
                 model_name=self._chat_model,
                 exc=exc,
             )
-            msg = "调用百炼聊天模型失败"
-            raise AlibabaModelStudioInvocationError(msg) from exc
+            msg = "调用聊天大模型失败"
+            raise OpenAICompatibleLlmInvocationError(msg) from exc
 
         choices = getattr(response, "choices", [])
         if not choices:
-            msg = "百炼聊天模型未返回候选结果"
-            raise AlibabaModelStudioInvocationError(msg)
+            msg = "聊天大模型未返回候选结果"
+            raise OpenAICompatibleLlmInvocationError(msg)
 
-        content = cast(str | None, getattr(choices[0].message, "content", None))
-        if not content:
-            msg = "百炼聊天模型返回空内容"
-            raise AlibabaModelStudioInvocationError(msg)
+        content = getattr(choices[0].message, "content", None)
+        if not isinstance(content, str) or not content:
+            msg = "聊天大模型返回空内容"
+            raise OpenAICompatibleLlmInvocationError(msg)
         return content
 
     def stream_chat(
@@ -230,22 +207,10 @@ class AlibabaModelStudioClient:
         *,
         temperature: float | None = None,
     ) -> Iterator[str]:
-        """调用百炼聊天模型执行流式对话补全。
-
-        参数:
-            messages: 标准化消息列表。
-            temperature: 可选采样温度。
-
-        返回:
-            逐段返回模型生成的文本增量。
-
-        异常:
-            AlibabaModelStudioConfigurationError: 当聊天模型未配置时抛出。
-            AlibabaModelStudioInvocationError: 当模型调用失败时抛出。
-        """
+        """调用聊天大模型执行流式对话补全。"""
         if not self._chat_model:
-            msg = "未配置百炼聊天模型"
-            raise AlibabaModelStudioConfigurationError(msg)
+            msg = "未配置聊天大模型"
+            raise OpenAICompatibleLlmConfigurationError(msg)
 
         self._validate_api_key()
         try:
@@ -262,8 +227,8 @@ class AlibabaModelStudioClient:
                 model_name=self._chat_model,
                 exc=exc,
             )
-            msg = "调用百炼聊天模型失败"
-            raise AlibabaModelStudioInvocationError(msg) from exc
+            msg = "调用聊天大模型失败"
+            raise OpenAICompatibleLlmInvocationError(msg) from exc
 
         try:
             for chunk in response:
@@ -277,8 +242,8 @@ class AlibabaModelStudioClient:
                 model_name=self._chat_model,
                 exc=exc,
             )
-            msg = "读取百炼聊天模型流式结果失败"
-            raise AlibabaModelStudioInvocationError(msg) from exc
+            msg = "读取聊天大模型流式结果失败"
+            raise OpenAICompatibleLlmInvocationError(msg) from exc
 
     def _get_client(self) -> Any:
         """延迟初始化 OpenAI 兼容客户端。"""
@@ -288,17 +253,14 @@ class AlibabaModelStudioClient:
 
     def _create_client(self) -> Any:
         """创建 OpenAI 兼容客户端实例。"""
-        if OPENAI_CLIENT_CLASS is None:
-            msg = "未安装 openai 依赖，无法启用阿里云百炼模型"
-            raise AlibabaModelStudioDependencyError(msg) from OPENAI_IMPORT_ERROR
+        if openai_client_class is None:
+            msg = "未安装 openai 依赖，无法启用大模型客户端"
+            raise OpenAICompatibleLlmDependencyError(msg) from openai_import_error
 
-        return cast(
-            Any,
-            OPENAI_CLIENT_CLASS(
-                api_key=self._api_key,
-                base_url=self._base_url,
-                timeout=self._timeout_seconds,
-            ),
+        return openai_client_class(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=self._timeout_seconds,
         )
 
     def _build_chat_completion_request(
@@ -308,7 +270,7 @@ class AlibabaModelStudioClient:
         temperature: float | None,
         stream: bool = False,
     ) -> dict[str, object]:
-        """构造聊天补全请求参数，并兼容百炼对 `temperature` 的严格校验。"""
+        """构造聊天补全请求参数，并兼容上游对 `temperature` 的严格校验。"""
         request_payload: dict[str, object] = {
             "model": self._chat_model,
             "messages": [
@@ -330,8 +292,8 @@ class AlibabaModelStudioClient:
         """校验 API Key 配置。"""
         if self._api_key:
             return
-        msg = "未配置 DASHSCOPE_API_KEY，无法调用阿里云百炼模型"
-        raise AlibabaModelStudioConfigurationError(msg)
+        msg = "未配置模型服务 API Key，无法调用聊天或向量化能力"
+        raise OpenAICompatibleLlmConfigurationError(msg)
 
     def _log_upstream_failure(
         self,
@@ -340,9 +302,9 @@ class AlibabaModelStudioClient:
         model_name: str,
         exc: Exception,
     ) -> None:
-        """记录上游百炼调用失败的关键上下文，便于排查模型、权限或网关问题。"""
+        """记录上游大模型调用失败的关键上下文，便于排查模型、权限或网关问题。"""
         LOGGER.exception(
-            "bailian_upstream_failed operation=%s model=%s base_url=%s timeout_seconds=%s upstream=%s",
+            "llm_upstream_failed operation=%s model=%s base_url=%s timeout_seconds=%s upstream=%s",
             operation,
             model_name,
             self._base_url,
@@ -396,12 +358,52 @@ class AlibabaModelStudioClient:
         return f"{normalized[:max_length]}..."
 
     @staticmethod
-    def _extract_embedding(raw_embedding: Any) -> list[float]:
+    def _as_object_list(value: object) -> list[object] | None:
+        """鎶婂姩鎬佸€煎綊涓€鍖栦负鍙亶鍘嗙殑 `list[object]`銆?"""
+        if not isinstance(value, list):
+            return None
+        return cast(list[object], value)
+
+    @staticmethod
+    def _get_optional_attribute(value: object, attribute_name: str) -> object | None:
+        """浠ュ畨鍏ㄧ被鍨嬭繑鍥炶鍙栧姩鎬佸璞＄殑鍙€夊睘鎬с€?"""
+        return getattr(value, attribute_name, None)
+
+    @staticmethod
+    def _extract_stream_text_piece(value: object) -> str | None:
+        """浠庢祦寮忓唴瀹瑰垎娈靛璞′腑鎻愬彇绾枃鏈墖娈点€?"""
+        if isinstance(value, Mapping):
+            mapping_value = cast(Mapping[object, object], value)
+            text_value = mapping_value.get("text")
+            if isinstance(text_value, str):
+                return text_value
+            return None
+
+        text_value = OpenAICompatibleLlmClient._get_optional_attribute(value, "text")
+        if isinstance(text_value, str):
+            return text_value
+        return None
+
+    @staticmethod
+    def _extract_embedding(raw_embedding: object) -> list[float]:
         """标准化单个向量结果。"""
-        if not isinstance(raw_embedding, list):
-            msg = "百炼向量模型返回格式非法"
-            raise AlibabaModelStudioInvocationError(msg)
-        return [float(value) for value in raw_embedding]
+        embedding_values = OpenAICompatibleLlmClient._as_object_list(raw_embedding)
+        if embedding_values is None:
+            msg = "向量大模型返回格式非法"
+            raise OpenAICompatibleLlmInvocationError(msg)
+
+        normalized_embedding: list[float] = []
+        for value in embedding_values:
+            if isinstance(value, bool):
+                normalized_embedding.append(float(value))
+                continue
+            if isinstance(value, int | float | str):
+                normalized_embedding.append(float(value))
+                continue
+
+            msg = "向量大模型返回格式非法"
+            raise OpenAICompatibleLlmInvocationError(msg)
+        return normalized_embedding
 
     @staticmethod
     def _normalize_temperature(temperature: float | None) -> float | None:
@@ -411,33 +413,30 @@ class AlibabaModelStudioClient:
         return float(temperature)
 
     @staticmethod
-    def _extract_stream_delta(chunk: Any) -> str:
+    def _extract_stream_delta(chunk: object) -> str:
         """从流式 chunk 中提取文本增量。"""
-        choices = getattr(chunk, "choices", [])
+        choices = OpenAICompatibleLlmClient._as_object_list(
+            OpenAICompatibleLlmClient._get_optional_attribute(chunk, "choices")
+        )
         if not choices:
             return ""
 
-        delta = getattr(choices[0], "delta", None)
+        delta = OpenAICompatibleLlmClient._get_optional_attribute(choices[0], "delta")
         if delta is None:
             return ""
 
-        content = getattr(delta, "content", None)
+        content = OpenAICompatibleLlmClient._get_optional_attribute(delta, "content")
         if isinstance(content, str):
             return content
 
-        if isinstance(content, list):
-            # 某些兼容实现会把内容拆成分段对象列表，这里统一拼回纯文本。
-            pieces: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text_value = item.get("text")
-                    if isinstance(text_value, str):
-                        pieces.append(text_value)
-                    continue
+        content_items = OpenAICompatibleLlmClient._as_object_list(content)
+        if content_items is None:
+            return ""
 
-                text_value = getattr(item, "text", None)
-                if isinstance(text_value, str):
-                    pieces.append(text_value)
-            return "".join(pieces)
-
-        return ""
+        # 某些兼容实现会把内容拆成分段对象列表，这里统一拼回纯文本。
+        pieces: list[str] = []
+        for item in content_items:
+            text_value = OpenAICompatibleLlmClient._extract_stream_text_piece(item)
+            if text_value is not None:
+                pieces.append(text_value)
+        return "".join(pieces)

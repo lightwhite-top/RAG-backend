@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from fastapi import status
@@ -66,6 +67,11 @@ class ChatCompletionResult:
     content_blocks: list[ChatContentBlock] = field(default_factory=list)
     original_query: str = ""
     rewrite_applied: bool = False
+    message_id: str | None = None
+    session_id: str | None = None
+    sequence_no: int | None = None
+    created_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

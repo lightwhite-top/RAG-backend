@@ -8,6 +8,8 @@ from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from baozhi_rag.core.config import Settings, get_settings
+from baozhi_rag.domain.chat_message_repository import ChatMessageRepository
+from baozhi_rag.domain.chat_session_repository import ChatSessionRepository
 from baozhi_rag.domain.knowledge_file_repository import KnowledgeFileRepository
 from baozhi_rag.domain.knowledge_upload_task_repository import KnowledgeUploadTaskRepository
 from baozhi_rag.domain.registration_verification_repository import (
@@ -16,6 +18,8 @@ from baozhi_rag.domain.registration_verification_repository import (
 from baozhi_rag.domain.user import CurrentUser, UserRole
 from baozhi_rag.domain.user_errors import AuthenticationRequiredError, PermissionDeniedError
 from baozhi_rag.domain.user_repository import UserRepository
+from baozhi_rag.infra.database.chat_message_repository import SqlAlchemyChatMessageRepository
+from baozhi_rag.infra.database.chat_session_repository import SqlAlchemyChatSessionRepository
 from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowledgeFileRepository
 from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
@@ -25,7 +29,7 @@ from baozhi_rag.infra.database.registration_verification_repository import (
     SqlAlchemyRegistrationVerificationRepository,
 )
 from baozhi_rag.infra.database.user_repository import SqlAlchemyUserRepository
-from baozhi_rag.infra.llm.aliyun_model_studio import AlibabaModelStudioClient
+from baozhi_rag.infra.llm.openai_compatible_client import OpenAICompatibleLlmClient
 from baozhi_rag.infra.notification.smtp_email_sender import SmtpRegistrationEmailSender
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
 from baozhi_rag.infra.security.jwt_tokens import JwtTokenManager
@@ -35,8 +39,10 @@ from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
 from baozhi_rag.infra.storage.local_file_store import LocalFileStore
 from baozhi_rag.services.auth import AuthService
 from baozhi_rag.services.chat import ChatService
+from baozhi_rag.services.chat_sessions import ChatSessionService
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchService
+from baozhi_rag.services.conversation_chat import ConversationChatService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
@@ -51,7 +57,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 def _build_chunk_embedding_service(settings: Settings) -> ChunkEmbeddingService:
     """构造必选的 chunk 向量化服务。"""
-    return ChunkEmbeddingService(AlibabaModelStudioClient.from_settings(settings))
+    return ChunkEmbeddingService(OpenAICompatibleLlmClient.from_embedding_settings(settings))
 
 
 def get_database_manager(
@@ -66,6 +72,20 @@ def get_user_repository(
 ) -> UserRepository:
     """构造用户仓储。"""
     return SqlAlchemyUserRepository(database_manager.session_factory)
+
+
+def get_chat_session_repository(
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> ChatSessionRepository:
+    """构造聊天会话仓储。"""
+    return SqlAlchemyChatSessionRepository(database_manager.session_factory)
+
+
+def get_chat_message_repository(
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> ChatMessageRepository:
+    """构造聊天消息仓储。"""
+    return SqlAlchemyChatMessageRepository(database_manager.session_factory)
 
 
 def get_knowledge_file_repository(
@@ -204,9 +224,47 @@ def get_chat_service(
 ) -> ChatService:
     """构造聊天服务。"""
     return ChatService(
-        chat_client=AlibabaModelStudioClient.from_settings(settings),
+        chat_client=OpenAICompatibleLlmClient.from_settings(settings),
         chunk_search_service=chunk_search_service,
-        system_prompt=settings.chat_system_prompt,
+        system_prompt=settings.resolved_chat_system_prompt,
+    )
+
+
+def get_chat_session_service(
+    chat_session_repository: Annotated[
+        ChatSessionRepository,
+        Depends(get_chat_session_repository),
+    ],
+    chat_message_repository: Annotated[
+        ChatMessageRepository,
+        Depends(get_chat_message_repository),
+    ],
+) -> ChatSessionService:
+    """构造聊天会话管理服务。"""
+    return ChatSessionService(
+        session_repository=chat_session_repository,
+        message_repository=chat_message_repository,
+    )
+
+
+def get_conversation_chat_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+    chat_service: Annotated[ChatService, Depends(get_chat_service)],
+    chat_session_service: Annotated[
+        ChatSessionService,
+        Depends(get_chat_session_service),
+    ],
+    chat_message_repository: Annotated[
+        ChatMessageRepository,
+        Depends(get_chat_message_repository),
+    ],
+) -> ConversationChatService:
+    """构造有状态聊天服务。"""
+    return ConversationChatService(
+        chat_service=chat_service,
+        session_service=chat_session_service,
+        message_repository=chat_message_repository,
+        model_name=settings.llm_chat_model,
     )
 
 

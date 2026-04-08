@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = Field(
-        default="Baozhi RAG Service",
+        default="RAG Service",
         description="服务名称",
         validation_alias=AliasChoices("APP_NAME"),
     )
@@ -137,8 +137,8 @@ class Settings(BaseSettings):
         gt=0,
     )
     domain_dictionary_path: Path | None = Field(
-        default=None,
-        description="金融保险领域词典文件路径，按行存储词项",
+        default=Path("data/domain_dictionary.txt"),
+        description="领域词典文件路径，按行存储词项",
         validation_alias=AliasChoices("DOMAIN_DICTIONARY_PATH"),
     )
     es_url: str = Field(
@@ -191,36 +191,52 @@ class Settings(BaseSettings):
         description="Milvus 向量集合名称",
         validation_alias=AliasChoices("MILVUS_COLLECTION_NAME"),
     )
-    bailian_api_key: str | None = Field(
+    llm_api_key: str | None = Field(
         default=None,
-        description="阿里云百炼 DashScope API Key",
-        validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
+        description="大模型服务 API Key",
+        validation_alias=AliasChoices(
+            "LLM_API_KEY",
+            "MODEL_API_KEY",
+            "DASHSCOPE_API_KEY",
+            "BAILIAN_API_KEY",
+        ),
     )
-    bailian_base_url: str = Field(
+    llm_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        description="阿里云百炼 OpenAI 兼容接口地址",
-        validation_alias=AliasChoices("DASHSCOPE_BASE_URL", "BAILIAN_BASE_URL"),
+        description="大模型服务 OpenAI 兼容接口地址",
+        validation_alias=AliasChoices(
+            "LLM_BASE_URL",
+            "MODEL_BASE_URL",
+            "DASHSCOPE_BASE_URL",
+            "BAILIAN_BASE_URL",
+        ),
     )
-    bailian_timeout_seconds: float = Field(
+    llm_timeout_seconds: float = Field(
         default=30.0,
-        description="阿里云百炼模型调用超时时间（秒）",
-        validation_alias=AliasChoices("BAILIAN_TIMEOUT_SECONDS"),
+        description="大模型调用超时时间（秒）",
+        validation_alias=AliasChoices(
+            "LLM_TIMEOUT_SECONDS",
+            "MODEL_TIMEOUT_SECONDS",
+            "BAILIAN_TIMEOUT_SECONDS",
+        ),
     )
-    bailian_chat_model: str | None = Field(
+    llm_chat_model: str | None = Field(
         default=None,
-        description="预留的阿里云百炼聊天模型名称",
-        validation_alias=AliasChoices("BAILIAN_CHAT_MODEL"),
+        description="聊天模型名称",
+        validation_alias=AliasChoices(
+            "LLM_CHAT_MODEL",
+            "CHAT_MODEL",
+            "BAILIAN_CHAT_MODEL",
+        ),
     )
     chat_system_prompt: str = Field(
         default=(
-            "你是金融保险问答助手。"
+            "你是 {app_name} 的知识库问答助手。"
             "如果当前轮提供了知识库证据，优先只基于证据回答，并在相关句子后追加 [1][2] 这类证据编号。"
-            "如果当前轮没有提供知识库证据，你仍可以回答问候、身份说明、能力介绍和一般性概念解释，"
-            "但不得把未验证内容表述为具体条款、保障责任、免责结论、理赔结论或确定性承诺。"
-            "遇到具体产品、保单、承保、理赔、免责、金额计算等高风险问题且缺少证据时，"
+            "如果当前轮没有提供知识库证据，"
             "必须明确说明“当前没有检索到可支撑结论的知识库材料”，"
-            "只能提供一般性说明，并建议补充材料或转人工核实。"
-            "涉及理赔、承保、免责、保单解释时，要明确说明以正式合同条款、系统记录和人工审核结果为准。"
+            "只能提供一般性说明，不要把未验证内容表述为确定事实。"
+            "如果问题需要具体制度、条款、业务规则或数据支撑，请建议用户补充材料或转人工核实。"
         ),
         description="聊天接口默认使用的系统提示词",
         validation_alias=AliasChoices("CHAT_SYSTEM_PROMPT"),
@@ -230,6 +246,30 @@ class Settings(BaseSettings):
         default="text-embedding-v4",
         description="chunk 向量化模型名称",
         validation_alias=AliasChoices("CHUNK_EMBEDDING_MODEL"),
+    )
+    chunk_embedding_llm_api_key: str | None = Field(
+        default=None,
+        description="向量化专用大模型服务 API Key；未配置时回退到通用 LLM_API_KEY",
+        validation_alias=AliasChoices(
+            "CHUNK_EMBEDDING_LLM_API_KEY",
+            "CHUNK_EMBEDDING_API_KEY",
+        ),
+    )
+    chunk_embedding_llm_base_url: str | None = Field(
+        default=None,
+        description="向量化专用 OpenAI 兼容接口地址；未配置时回退到通用 LLM_BASE_URL",
+        validation_alias=AliasChoices(
+            "CHUNK_EMBEDDING_LLM_BASE_URL",
+            "CHUNK_EMBEDDING_BASE_URL",
+        ),
+    )
+    chunk_embedding_llm_timeout_seconds: float | None = Field(
+        default=None,
+        description="向量化专用调用超时时间（秒）；未配置时回退到通用 LLM_TIMEOUT_SECONDS",
+        validation_alias=AliasChoices(
+            "CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS",
+            "CHUNK_EMBEDDING_TIMEOUT_SECONDS",
+        ),
     )
     chunk_embedding_dimensions: int = Field(
         default=1024,
@@ -257,7 +297,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MYSQL_PORT"),
     )
     mysql_database: str = Field(
-        default="baozhi_rag",
+        default="rag",
         description="MySQL 数据库名称",
         validation_alias=AliasChoices("MYSQL_DATABASE"),
     )
@@ -327,8 +367,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("SMTP_FROM_EMAIL"),
     )
     smtp_from_name: str = Field(
-        default="Baozhi RAG Service",
-        description="注册验证码邮件发件人名称",
+        default="",
+        description="注册验证码邮件发件人名称；留空时回退到 APP_NAME",
         validation_alias=AliasChoices("SMTP_FROM_NAME"),
     )
     smtp_timeout_seconds: float = Field(
@@ -453,6 +493,50 @@ class Settings(BaseSettings):
     def normalized_oss_object_prefix(self) -> str:
         """返回清理首尾斜杠后的 OSS 对象前缀。"""
         return self.oss_object_prefix.strip().strip("/")
+
+    @property
+    def resolved_chunk_embedding_llm_api_key(self) -> str | None:
+        """返回向量化链路最终使用的 API Key。"""
+        return self.chunk_embedding_llm_api_key or self.llm_api_key
+
+    @property
+    def resolved_chunk_embedding_llm_base_url(self) -> str:
+        """返回向量化链路最终使用的接口地址。"""
+        return self.chunk_embedding_llm_base_url or self.llm_base_url
+
+    @property
+    def resolved_chunk_embedding_llm_timeout_seconds(self) -> float:
+        """返回向量化链路最终使用的超时时间。"""
+        return (
+            self.chunk_embedding_llm_timeout_seconds
+            if self.chunk_embedding_llm_timeout_seconds is not None
+            else self.llm_timeout_seconds
+        )
+
+    @property
+    def resolved_chat_system_prompt(self) -> str:
+        """返回注入了应用名称的聊天系统提示词。"""
+        return self.chat_system_prompt.replace("{app_name}", self.app_name)
+
+    @property
+    def bailian_api_key(self) -> str | None:
+        """兼容旧命名，返回大模型服务 API Key。"""
+        return self.llm_api_key
+
+    @property
+    def bailian_base_url(self) -> str:
+        """兼容旧命名，返回大模型服务接口地址。"""
+        return self.llm_base_url
+
+    @property
+    def bailian_timeout_seconds(self) -> float:
+        """兼容旧命名，返回大模型调用超时时间。"""
+        return self.llm_timeout_seconds
+
+    @property
+    def bailian_chat_model(self) -> str | None:
+        """兼容旧命名，返回聊天模型名称。"""
+        return self.llm_chat_model
 
 
 def _normalize_app_env_for_env_file(app_env: str | None) -> str | None:
