@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Protocol
 
@@ -12,7 +12,13 @@ from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchHit
+from baozhi_rag.services.document_chunking import ChunkImageAsset
 from baozhi_rag.services.llm import ChatMessage, ChatModelClient
+
+
+def _empty_image_asset_list() -> list[ChunkImageAsset]:
+    """返回空图片资产列表。"""
+    return []
 
 
 class ChatCompletionValidationError(AppError):
@@ -42,6 +48,7 @@ class ChatCitation:
     section_title: str | None = None
     content_type: str = "paragraph"
     source_anchor: str | None = None
+    image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,7 @@ class ChatContentBlock:
     text: str
     citation_ids: list[str]
     sequence: int
+    image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +232,8 @@ class ChatService:
         )
 
         answer_parts: list[str] = []
+        pending_buffer = ""
+        emitted_block_count = 0
         for delta in self._chat_client.stream_chat(
             completion.model_messages,
             temperature=temperature,
@@ -231,7 +241,26 @@ class ChatService:
             if not delta:
                 continue
             answer_parts.append(delta)
-            yield ChatStreamEvent(event="delta", data={"content": delta})
+            pending_buffer += delta
+            completed_raw_blocks, pending_buffer = self._extract_completed_stream_blocks(
+                pending_buffer
+            )
+            for raw_block in completed_raw_blocks:
+                block_candidates, _ = self._build_stream_content_blocks_from_raw_block(
+                    raw_block,
+                    completion.citations,
+                    start_sequence=emitted_block_count + 1,
+                )
+                content_blocks = self._inject_image_blocks(block_candidates, completion.citations)
+                for block in content_blocks:
+                    emitted_block_count += 1
+                    yield ChatStreamEvent(
+                        event="delta",
+                        data={
+                            "delta_type": "content_block",
+                            "block": self._serialize_content_block(block),
+                        },
+                    )
 
         answer = "".join(answer_parts).strip()
         finish_reason = "stop"
@@ -244,6 +273,14 @@ class ChatService:
             completion.citations,
             finish_reason=finish_reason,
         )
+        for block in content_blocks[emitted_block_count:]:
+            yield ChatStreamEvent(
+                event="delta",
+                data={
+                    "delta_type": "content_block",
+                    "block": self._serialize_content_block(block),
+                },
+            )
         yield ChatStreamEvent(
             event="done",
             data={
@@ -414,6 +451,7 @@ class ChatService:
             section_title=None,
             content_type="paragraph",
             source_anchor=f"chunk:{hit.chunk_index}",
+            image_assets=hit.image_assets,
         )
 
     def _serialize_citation(self, citation: ChatCitation) -> dict[str, object]:
@@ -434,6 +472,7 @@ class ChatService:
             "section_title": citation.section_title,
             "content_type": citation.content_type,
             "source_anchor": citation.source_anchor,
+            "image_assets": [self._serialize_image_asset(item) for item in citation.image_assets],
         }
 
     def _serialize_content_block(self, block: ChatContentBlock) -> dict[str, object]:
@@ -444,6 +483,19 @@ class ChatService:
             "text": block.text,
             "citation_ids": block.citation_ids,
             "sequence": block.sequence,
+            "image_assets": [self._serialize_image_asset(item) for item in block.image_assets],
+        }
+
+    def _serialize_image_asset(self, asset: ChunkImageAsset) -> dict[str, object]:
+        """把图片资产转换为可序列化结构。"""
+        return {
+            "asset_id": asset.asset_id,
+            "source_anchor": asset.source_anchor,
+            "storage_key": asset.storage_key,
+            "thumbnail_storage_key": asset.thumbnail_storage_key,
+            "image_type": asset.image_type,
+            "summary": asset.summary,
+            "ocr_text": asset.ocr_text,
         }
 
     def _truncate_content(self, content: str) -> str:
@@ -495,23 +547,17 @@ class ChatService:
         parsed_blocks: list[ChatContentBlock] = []
         has_valid_reference = False
 
-        for sequence, raw_block in enumerate(raw_blocks, start=1):
-            citation_ids = self._resolve_block_citation_ids(raw_block, citations)
-            if citation_ids:
-                has_valid_reference = True
-            block_text = self._strip_citation_markers(raw_block).strip()
-            if not block_text:
-                continue
-
-            parsed_blocks.append(
-                ChatContentBlock(
-                    block_id=f"blk-{sequence}",
-                    block_type="markdown",
-                    text=block_text,
-                    citation_ids=citation_ids,
-                    sequence=sequence,
-                )
+        for raw_block in raw_blocks:
+            blocks, has_reference = self._build_stream_content_blocks_from_raw_block(
+                raw_block,
+                citations,
+                start_sequence=len(parsed_blocks) + 1,
             )
+            if has_reference:
+                has_valid_reference = True
+            if not blocks:
+                continue
+            parsed_blocks.extend(blocks)
 
         if not parsed_blocks:
             stripped_answer = self._strip_citation_markers(cleaned_answer).strip() or cleaned_answer
@@ -534,13 +580,21 @@ class ChatService:
                     block_id=block.block_id,
                     block_type=block.block_type,
                     text=block.text,
-                    citation_ids=[only_citation_id],
+                    citation_ids=[only_citation_id]
+                    if block.block_type == "markdown"
+                    else block.citation_ids,
                     sequence=block.sequence,
+                    image_assets=block.image_assets,
                 )
                 for block in parsed_blocks
             ]
+            parsed_blocks = self._inject_image_blocks(parsed_blocks, citations)
+        else:
+            parsed_blocks = self._inject_image_blocks(parsed_blocks, citations)
 
-        plain_text = "\n\n".join(block.text for block in parsed_blocks).strip()
+        plain_text = "\n\n".join(
+            block.text for block in parsed_blocks if block.block_type != "image_gallery"
+        ).strip()
         return plain_text or cleaned_answer, parsed_blocks
 
     def _build_uncited_render_content(
@@ -581,6 +635,106 @@ class ChatService:
 
         plain_text = "\n\n".join(block.text for block in parsed_blocks).strip()
         return plain_text or answer, parsed_blocks
+
+    def _build_stream_content_blocks_from_raw_block(
+        self,
+        raw_block: str,
+        citations: list[ChatCitation],
+        *,
+        start_sequence: int,
+    ) -> tuple[list[ChatContentBlock], bool]:
+        """把单个原始正文块转换为结构化文本块。"""
+        citation_ids = self._resolve_block_citation_ids(raw_block, citations)
+        has_valid_reference = bool(citation_ids)
+        if not citation_ids and len(citations) == 1:
+            citation_ids = [citations[0].citation_id]
+        block_text = self._strip_citation_markers(raw_block).strip()
+        if not block_text:
+            return [], has_valid_reference
+
+        return (
+            [
+                ChatContentBlock(
+                    block_id=f"blk-{start_sequence}",
+                    block_type="markdown",
+                    text=block_text,
+                    citation_ids=citation_ids,
+                    sequence=start_sequence,
+                )
+            ],
+            has_valid_reference,
+        )
+
+    def _inject_image_blocks(
+        self,
+        blocks: list[ChatContentBlock],
+        citations: list[ChatCitation],
+    ) -> list[ChatContentBlock]:
+        """在正文块后插入对应的图片画廊块。"""
+        if not blocks:
+            return []
+
+        final_blocks: list[ChatContentBlock] = []
+        next_sequence = 1
+        for block in blocks:
+            final_blocks.append(
+                replace(
+                    block,
+                    sequence=next_sequence,
+                )
+            )
+            next_sequence += 1
+            if block.block_type != "markdown":
+                continue
+            image_assets = self._collect_image_assets_for_citation_ids(
+                block.citation_ids, citations
+            )
+            if not image_assets:
+                continue
+            final_blocks.append(
+                ChatContentBlock(
+                    block_id=f"{block.block_id}-imgs",
+                    block_type="image_gallery",
+                    text="",
+                    citation_ids=list(block.citation_ids),
+                    sequence=next_sequence,
+                    image_assets=image_assets,
+                )
+            )
+            next_sequence += 1
+        return final_blocks
+
+    def _collect_image_assets_for_citation_ids(
+        self,
+        citation_ids: list[str],
+        citations: list[ChatCitation],
+    ) -> list[ChunkImageAsset]:
+        """汇总正文块关联引用中的图片资产。"""
+        image_assets: list[ChunkImageAsset] = []
+        seen_asset_ids: set[str] = set()
+
+        for citation in citations:
+            if citation.citation_id not in citation_ids:
+                continue
+            for image_asset in citation.image_assets:
+                unique_key = image_asset.asset_id or image_asset.source_anchor
+                if unique_key in seen_asset_ids:
+                    continue
+                seen_asset_ids.add(unique_key)
+                image_assets.append(image_asset)
+
+        return image_assets
+
+    def _extract_completed_stream_blocks(self, buffer: str) -> tuple[list[str], str]:
+        """从流式缓冲区中提取已闭合的正文块。"""
+        completed_blocks: list[str] = []
+        last_end = 0
+        for match in self._BLOCK_SPLIT_PATTERN.finditer(buffer):
+            raw_block = buffer[last_end : match.start()].strip()
+            if raw_block:
+                completed_blocks.append(raw_block)
+            last_end = match.end()
+        return completed_blocks, buffer[last_end:]
 
     def _resolve_block_citation_ids(
         self,

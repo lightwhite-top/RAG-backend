@@ -47,6 +47,7 @@ class ChatMessageCitationRecord:
     content_type: str
     source_anchor: str | None
     created_at: datetime
+    image_assets: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

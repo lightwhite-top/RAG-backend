@@ -8,6 +8,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class ChatImageAssetItem(BaseModel):
+    """聊天引用与正文块中的图片资产。"""
+
+    asset_id: str = Field(description="图片资产唯一标识")
+    source_anchor: str | None = Field(default=None, description="原文锚点")
+    storage_key: str = Field(description="原图存储对象键")
+    thumbnail_storage_key: str | None = Field(default=None, description="缩略图存储对象键")
+    image_url: str | None = Field(default=None, description="原图访问地址")
+    thumbnail_url: str | None = Field(default=None, description="缩略图访问地址")
+    image_type: str = Field(default="", description="图片类型")
+    summary: str = Field(default="", description="图片语义摘要")
+    ocr_text: str = Field(default="", description="图片OCR文本")
+
+
 class ChatMessageItem(BaseModel):
     """单条聊天消息。"""
 
@@ -54,16 +68,24 @@ class ChatCitationItem(BaseModel):
         description="证据内容类型",
     )
     source_anchor: str | None = Field(default=None, description="原文定位锚点")
+    image_assets: list[ChatImageAssetItem] = Field(
+        default_factory=list,
+        description="关联图片资产",
+    )
 
 
 class ChatContentBlockItem(BaseModel):
     """结构化正文块。"""
 
     block_id: str = Field(description="正文块唯一标识")
-    block_type: Literal["markdown", "notice"] = Field(description="正文块类型")
+    block_type: Literal["markdown", "notice", "image_gallery"] = Field(description="正文块类型")
     text: str = Field(description="正文块文本")
     citation_ids: list[str] = Field(default_factory=list, description="关联引用标识列表")
     sequence: int = Field(description="正文块顺序")
+    image_assets: list[ChatImageAssetItem] = Field(
+        default_factory=list,
+        description="正文块内联图片资产",
+    )
 
 
 class ChatAssistantMessage(BaseModel):

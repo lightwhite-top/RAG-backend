@@ -276,6 +276,18 @@ class ConversationChatService:
                 section_title=citation.section_title,
                 content_type=citation.content_type,
                 source_anchor=citation.source_anchor,
+                image_assets=[
+                    {
+                        "asset_id": getattr(asset, "asset_id", ""),
+                        "source_anchor": getattr(asset, "source_anchor", None),
+                        "storage_key": getattr(asset, "storage_key", ""),
+                        "thumbnail_storage_key": getattr(asset, "thumbnail_storage_key", None),
+                        "image_type": getattr(asset, "image_type", ""),
+                        "summary": getattr(asset, "summary", ""),
+                        "ocr_text": getattr(asset, "ocr_text", ""),
+                    }
+                    for asset in citation.image_assets
+                ],
                 created_at=now,
             )
             for index, citation in enumerate(result.citations, start=1)
@@ -327,6 +339,11 @@ class ConversationChatService:
                     source_anchor=str(item["source_anchor"]).strip()
                     if item.get("source_anchor") is not None
                     else None,
+                    image_assets=[
+                        dict(image_asset)
+                        for image_asset in item.get("image_assets", [])
+                        if isinstance(image_asset, dict)
+                    ],
                     created_at=now,
                 )
             )
@@ -339,4 +356,16 @@ class ConversationChatService:
             "text": getattr(block, "text", ""),
             "citation_ids": list(getattr(block, "citation_ids", [])),
             "sequence": int(getattr(block, "sequence", 0)),
+            "image_assets": [
+                {
+                    "asset_id": getattr(asset, "asset_id", ""),
+                    "source_anchor": getattr(asset, "source_anchor", None),
+                    "storage_key": getattr(asset, "storage_key", ""),
+                    "thumbnail_storage_key": getattr(asset, "thumbnail_storage_key", None),
+                    "image_type": getattr(asset, "image_type", ""),
+                    "summary": getattr(asset, "summary", ""),
+                    "ocr_text": getattr(asset, "ocr_text", ""),
+                }
+                for asset in list(getattr(block, "image_assets", []))
+            ],
         }

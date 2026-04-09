@@ -37,6 +37,7 @@ class ChatMessageRepository(Protocol):
         error_message: str | None = None,
     ) -> ChatMessageRecord:
         """向会话末尾追加一条消息。"""
+        ...
 
     def update_message(
         self,
@@ -59,6 +60,7 @@ class ChatMessageRepository(Protocol):
         completed: bool = False,
     ) -> ChatMessageRecord | None:
         """更新消息。"""
+        ...
 
     def replace_citations(
         self,
@@ -66,6 +68,7 @@ class ChatMessageRepository(Protocol):
         citations: list[ChatMessageCitationRecord],
     ) -> list[ChatMessageCitationRecord]:
         """替换消息引用。"""
+        ...
 
     def list_messages(
         self,
@@ -75,6 +78,7 @@ class ChatMessageRepository(Protocol):
         limit: int,
     ) -> list[ChatMessageRecord]:
         """按游标查询历史消息。"""
+        ...
 
     def get_recent_messages(
         self,
@@ -83,3 +87,4 @@ class ChatMessageRepository(Protocol):
         limit: int,
     ) -> list[ChatMessageRecord]:
         """获取最近消息窗口。"""
+        ...

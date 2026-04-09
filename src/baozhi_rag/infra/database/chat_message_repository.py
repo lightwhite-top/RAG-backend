@@ -208,6 +208,7 @@ class SqlAlchemyChatMessageRepository:
                     section_title=citation.section_title,
                     content_type=citation.content_type,
                     source_anchor=citation.source_anchor,
+                    image_assets=[dict(item) for item in citation.image_assets],
                     created_at=now,
                 )
                 db_session.add(self._citation_to_model(record))
@@ -330,6 +331,7 @@ class SqlAlchemyChatMessageRepository:
             section_title=citation.section_title,
             content_type=citation.content_type,
             source_anchor=citation.source_anchor,
+            image_assets_json=citation.image_assets,
             created_at=citation.created_at,
         )
 
@@ -355,5 +357,6 @@ class SqlAlchemyChatMessageRepository:
             section_title=citation_model.section_title,
             content_type=citation_model.content_type,
             source_anchor=citation_model.source_anchor,
+            image_assets=list(citation_model.image_assets_json or []),
             created_at=citation_model.created_at,
         )

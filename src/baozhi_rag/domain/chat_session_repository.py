@@ -12,9 +12,11 @@ class ChatSessionRepository(Protocol):
 
     def create_session(self, session: ChatSession) -> ChatSession:
         """创建聊天会话。"""
+        ...
 
     def get_session_by_id(self, session_id: str) -> ChatSession | None:
         """按 ID 查询会话。"""
+        ...
 
     def list_sessions(
         self,
@@ -25,6 +27,7 @@ class ChatSessionRepository(Protocol):
         status: ChatSessionStatus | None,
     ) -> ChatSessionListPage:
         """分页查询会话。"""
+        ...
 
     def update_session(
         self,
@@ -34,3 +37,4 @@ class ChatSessionRepository(Protocol):
         status: ChatSessionStatus | None = None,
     ) -> ChatSession | None:
         """更新会话。"""
+        ...

@@ -6,7 +6,11 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request
 
-from baozhi_rag.api.dependencies import get_chat_session_service, get_current_user
+from baozhi_rag.api.dependencies import (
+    get_aliyun_oss_file_store,
+    get_chat_session_service,
+    get_current_user,
+)
 from baozhi_rag.core.request_context import ensure_request_id
 from baozhi_rag.domain.chat_message import (
     ChatMessageCitationRecord,
@@ -15,10 +19,12 @@ from baozhi_rag.domain.chat_message import (
 )
 from baozhi_rag.domain.chat_session import ChatSession, ChatSessionStatus
 from baozhi_rag.domain.user import CurrentUser
+from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
 from baozhi_rag.schemas.chat import (
     ChatAssistantMessage,
     ChatCitationItem,
     ChatContentBlockItem,
+    ChatImageAssetItem,
     ChatTraceItem,
 )
 from baozhi_rag.schemas.chat_sessions import (
@@ -169,6 +175,7 @@ def list_chat_session_messages(
     request: Request,
     session_id: Annotated[str, Path(description="会话ID")],
     service: Annotated[ChatSessionService, Depends(get_chat_session_service)],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
     before_sequence_no: Annotated[int | None, Query(ge=1, description="向前翻页游标")] = None,
     limit: Annotated[int, Query(ge=1, le=100, description="返回条数")] = 50,
@@ -182,7 +189,7 @@ def list_chat_session_messages(
     return SuccessResponse[ChatHistoryMessageListResponseData].success(
         message="获取会话历史成功",
         request_id=ensure_request_id(request),
-        data=_build_message_history_response(result),
+        data=_build_message_history_response(result, file_url_builder=object_store),
     )
 
 
@@ -201,6 +208,8 @@ def _build_chat_session_item(session: ChatSession) -> ChatSessionItem:
 
 def _build_message_history_response(
     result: ChatSessionMessageHistoryResult,
+    *,
+    file_url_builder: AliyunOssFileStore,
 ) -> ChatHistoryMessageListResponseData:
     return ChatHistoryMessageListResponseData(
         session=ChatSessionSummaryItem(
@@ -208,18 +217,29 @@ def _build_message_history_response(
             title=result.session.title,
             status=result.session.status.value,
         ),
-        items=[_build_history_message_item(item) for item in result.items],
+        items=[
+            _build_history_message_item(item, file_url_builder=file_url_builder)
+            for item in result.items
+        ],
         next_before_sequence_no=result.next_before_sequence_no,
     )
 
 
-def _build_history_message_item(message: ChatMessageRecord) -> ChatHistoryMessageItem:
+def _build_history_message_item(
+    message: ChatMessageRecord,
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> ChatHistoryMessageItem:
     assistant_message: ChatAssistantMessage | None = None
     trace: ChatTraceItem | None = None
     if message.role is ChatMessageRole.ASSISTANT:
-        citations = [_build_citation_item(item) for item in message.citations]
+        citations = [
+            _build_citation_item(item, file_url_builder=file_url_builder)
+            for item in message.citations
+        ]
         content_blocks = [
-            ChatContentBlockItem.model_validate(block) for block in message.content_blocks
+            _build_content_block_item(block, file_url_builder=file_url_builder)
+            for block in message.content_blocks
         ]
         assistant_message = ChatAssistantMessage(
             message_id=message.id,
@@ -258,7 +278,11 @@ def _build_history_message_item(message: ChatMessageRecord) -> ChatHistoryMessag
     )
 
 
-def _build_citation_item(message_citation: ChatMessageCitationRecord) -> ChatCitationItem:
+def _build_citation_item(
+    message_citation: ChatMessageCitationRecord,
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> ChatCitationItem:
     return ChatCitationItem(
         id=message_citation.id,
         chunk_id=message_citation.chunk_id,
@@ -275,4 +299,87 @@ def _build_citation_item(message_citation: ChatMessageCitationRecord) -> ChatCit
         section_title=message_citation.section_title,
         content_type="table" if message_citation.content_type == "table" else "paragraph",
         source_anchor=message_citation.source_anchor,
+        image_assets=_build_history_image_assets(
+            message_citation.image_assets,
+            file_url_builder=file_url_builder,
+        ),
     )
+
+
+def _build_content_block_item(
+    block: dict[str, object],
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> ChatContentBlockItem:
+    """构造带图片 URL 的历史正文块。"""
+    normalized_block = dict(block)
+    raw_assets = normalized_block.get("image_assets", [])
+    image_assets = []
+    if isinstance(raw_assets, list):
+        for item in raw_assets:
+            if not isinstance(item, dict):
+                continue
+            storage_key = str(item.get("storage_key", "")).strip()
+            thumbnail_storage_key = (
+                str(item["thumbnail_storage_key"]).strip()
+                if item.get("thumbnail_storage_key") is not None
+                else None
+            )
+            image_assets.append(
+                {
+                    "asset_id": str(item.get("asset_id", "")),
+                    "source_anchor": str(item["source_anchor"]).strip()
+                    if item.get("source_anchor") is not None
+                    else None,
+                    "storage_key": storage_key,
+                    "thumbnail_storage_key": thumbnail_storage_key,
+                    "image_url": file_url_builder.build_presigned_get_url(storage_key=storage_key)
+                    if storage_key
+                    else None,
+                    "thumbnail_url": file_url_builder.build_presigned_get_url(
+                        storage_key=thumbnail_storage_key
+                    )
+                    if thumbnail_storage_key
+                    else None,
+                    "image_type": str(item.get("image_type", "")),
+                    "summary": str(item.get("summary", "")),
+                    "ocr_text": str(item.get("ocr_text", "")),
+                }
+            )
+    normalized_block["image_assets"] = image_assets
+    return ChatContentBlockItem.model_validate(normalized_block)
+
+
+def _build_history_image_assets(
+    raw_assets: list[dict[str, object]],
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> list[ChatImageAssetItem]:
+    """把历史消息中的图片资产补齐为可渲染结构。"""
+    return [
+        ChatImageAssetItem(
+            asset_id=str(item.get("asset_id", "")),
+            source_anchor=str(item["source_anchor"]).strip()
+            if item.get("source_anchor") is not None
+            else None,
+            storage_key=str(item.get("storage_key", "")),
+            thumbnail_storage_key=str(item["thumbnail_storage_key"]).strip()
+            if item.get("thumbnail_storage_key") is not None
+            else None,
+            image_url=file_url_builder.build_presigned_get_url(
+                storage_key=str(item.get("storage_key", ""))
+            )
+            if str(item.get("storage_key", "")).strip()
+            else None,
+            thumbnail_url=file_url_builder.build_presigned_get_url(
+                storage_key=str(item["thumbnail_storage_key"]).strip()
+            )
+            if item.get("thumbnail_storage_key") is not None
+            and str(item["thumbnail_storage_key"]).strip()
+            else None,
+            image_type=str(item.get("image_type", "")),
+            summary=str(item.get("summary", "")),
+            ocr_text=str(item.get("ocr_text", "")),
+        )
+        for item in raw_assets
+    ]

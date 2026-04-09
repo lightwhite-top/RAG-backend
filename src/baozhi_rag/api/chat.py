@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from baozhi_rag.api.dependencies import (
+    get_aliyun_oss_file_store,
     get_chat_service,
     get_conversation_chat_service,
     get_current_user,
@@ -22,12 +23,14 @@ from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
 from baozhi_rag.domain.user import CurrentUser
+from baozhi_rag.infra.storage.aliyun_oss_file_store import AliyunOssFileStore
 from baozhi_rag.schemas.chat import (
     ChatAssistantMessage,
     ChatCitationItem,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatContentBlockItem,
+    ChatImageAssetItem,
     ChatTraceItem,
 )
 from baozhi_rag.schemas.common import SuccessResponse
@@ -54,6 +57,7 @@ def create_chat_completion(
         Depends(get_conversation_chat_service),
     ],
     settings: Annotated[Settings, Depends(get_settings)],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> SuccessResponse[ChatCompletionResponse] | StreamingResponse:
     """执行带检索增强的聊天补全，支持普通返回和 SSE 流式返回。"""
@@ -93,6 +97,7 @@ def create_chat_completion(
                 message_id=message_id,
                 original_query=original_query,
                 model_name=settings.llm_chat_model,
+                file_url_builder=object_store,
                 started_at=started_at,
                 first_event=first_event,
                 remaining_events=stream_iterator,
@@ -130,6 +135,7 @@ def create_chat_completion(
             request_id=request_id,
             fallback_original_query=_resolve_original_query(messages),
             model_name=settings.llm_chat_model,
+            file_url_builder=object_store,
             latency_ms=_calculate_latency_ms(started_at),
         ),
     )
@@ -141,9 +147,10 @@ def _build_completion_response(
     request_id: str,
     fallback_original_query: str,
     model_name: str | None,
+    file_url_builder: AliyunOssFileStore,
     latency_ms: int | None,
 ) -> ChatCompletionResponse:
-    citations = _build_citation_items(result.citations)
+    citations = _build_citation_items(result.citations, file_url_builder=file_url_builder)
     assistant_message = _build_assistant_message(
         message_id=result.message_id or uuid4().hex,
         session_id=result.session_id,
@@ -152,6 +159,7 @@ def _build_completion_response(
         plain_text=result.plain_text,
         content_blocks=result.content_blocks,
         citations=citations,
+        file_url_builder=file_url_builder,
         finish_reason=result.finish_reason,
         created_at=result.created_at,
         completed_at=result.completed_at,
@@ -181,6 +189,7 @@ def _stream_events(
     message_id: str,
     original_query: str,
     model_name: str | None,
+    file_url_builder: AliyunOssFileStore,
     started_at: float,
     first_event: ChatStreamEvent,
     remaining_events: Iterator[ChatStreamEvent],
@@ -201,7 +210,10 @@ def _stream_events(
             if event.event == "context":
                 retrieval_query = str(event.data.get("retrieval_query", original_query))
                 rewrite_applied = bool(event.data.get("rewrite_applied", False))
-                citations = _build_citation_items(event.data.get("citations", []))
+                citations = _build_citation_items(
+                    event.data.get("citations", []),
+                    file_url_builder=file_url_builder,
+                )
                 session_id = _read_optional_str(event.data.get("session_id"))
                 sequence_no = _read_optional_int(event.data.get("sequence_no"))
                 if not message_started:
@@ -229,9 +241,6 @@ def _stream_events(
                 continue
 
             if event.event == "delta":
-                text = str(event.data.get("content", ""))
-                if not text:
-                    continue
                 if not message_started:
                     yield _encode_sse_event(
                         "message.start",
@@ -247,6 +256,33 @@ def _stream_events(
                         },
                     )
                     message_started = True
+                delta_type = _read_optional_str(event.data.get("delta_type"))
+                block_payload = event.data.get("block")
+                if delta_type == "content_block" and block_payload is not None:
+                    block_items = _build_content_block_items(
+                        [block_payload],
+                        fallback_text="",
+                        citations=citations,
+                        file_url_builder=file_url_builder,
+                    )
+                    if not block_items:
+                        continue
+                    delta_seq += 1
+                    yield _encode_sse_event(
+                        "message.delta",
+                        {
+                            "message_id": message_id,
+                            "request_id": request_id,
+                            "seq": delta_seq,
+                            "delta_type": "content_block",
+                            "block": block_items[0].model_dump(),
+                        },
+                    )
+                    continue
+
+                text = str(event.data.get("content", ""))
+                if not text:
+                    continue
                 delta_seq += 1
                 yield _encode_sse_event(
                     "message.delta",
@@ -263,7 +299,10 @@ def _stream_events(
 
             if event.event == "done":
                 if not citations:
-                    citations = _build_citation_items(event.data.get("citations", []))
+                    citations = _build_citation_items(
+                        event.data.get("citations", []),
+                        file_url_builder=file_url_builder,
+                    )
                 session_id = _read_optional_str(event.data.get("session_id")) or session_id
                 sequence_no = _read_optional_int(event.data.get("sequence_no")) or sequence_no
                 if not message_started:
@@ -297,6 +336,7 @@ def _stream_events(
                     plain_text=_read_optional_str(event.data.get("plain_text")),
                     content_blocks=event.data.get("content_blocks"),
                     citations=citations,
+                    file_url_builder=file_url_builder,
                     finish_reason=finish_reason,
                     created_at=_read_optional_datetime(event.data.get("created_at")),
                     completed_at=_read_optional_datetime(event.data.get("completed_at")),
@@ -378,7 +418,11 @@ def _encode_citation_add_events(
         )
 
 
-def _build_citation_items(raw_citations: Any) -> list[ChatCitationItem]:
+def _build_citation_items(
+    raw_citations: Any,
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> list[ChatCitationItem]:
     """把服务层或事件中的引用对象统一转换为 schema。"""
     if not isinstance(raw_citations, list):
         return []
@@ -404,6 +448,10 @@ def _build_citation_items(raw_citations: Any) -> list[ChatCitationItem]:
                     section_title=_read_optional_str(item.get("section_title")),
                     content_type=_normalize_citation_content_type(item.get("content_type")),
                     source_anchor=_read_optional_str(item.get("source_anchor")),
+                    image_assets=_build_chat_image_asset_items(
+                        item.get("image_assets", []),
+                        file_url_builder=file_url_builder,
+                    ),
                 )
             )
             continue
@@ -432,6 +480,10 @@ def _build_citation_items(raw_citations: Any) -> list[ChatCitationItem]:
                     getattr(item, "content_type", "paragraph")
                 ),
                 source_anchor=_read_optional_str(getattr(item, "source_anchor", None)),
+                image_assets=_build_chat_image_asset_items(
+                    getattr(item, "image_assets", []),
+                    file_url_builder=file_url_builder,
+                ),
             )
         )
     return citations
@@ -442,6 +494,7 @@ def _build_content_block_items(
     *,
     fallback_text: str,
     citations: list[ChatCitationItem],
+    file_url_builder: AliyunOssFileStore,
 ) -> list[ChatContentBlockItem]:
     """把服务层正文块统一转换为 schema，并为兼容场景提供兜底块。"""
     blocks: list[ChatContentBlockItem] = []
@@ -457,6 +510,10 @@ def _build_content_block_items(
                     available_citation_ids,
                 )
                 sequence = _coerce_int(item.get("sequence"), default=len(blocks) + 1)
+                image_assets = _build_chat_image_asset_items(
+                    item.get("image_assets", []),
+                    file_url_builder=file_url_builder,
+                )
             else:
                 block_id = str(getattr(item, "block_id", ""))
                 block_type = _normalize_block_type(getattr(item, "block_type", "markdown"))
@@ -469,8 +526,12 @@ def _build_content_block_items(
                     getattr(item, "sequence", len(blocks) + 1),
                     default=len(blocks) + 1,
                 )
+                image_assets = _build_chat_image_asset_items(
+                    getattr(item, "image_assets", []),
+                    file_url_builder=file_url_builder,
+                )
 
-            if not text:
+            if not text and block_type != "image_gallery":
                 continue
             blocks.append(
                 ChatContentBlockItem(
@@ -479,6 +540,7 @@ def _build_content_block_items(
                     text=text,
                     citation_ids=citation_ids,
                     sequence=sequence,
+                    image_assets=image_assets,
                 )
             )
 
@@ -493,6 +555,7 @@ def _build_content_block_items(
             text=fallback_text.strip(),
             citation_ids=[citations[0].id] if len(citations) == 1 and citations[0].id else [],
             sequence=1,
+            image_assets=[],
         )
     ]
 
@@ -506,6 +569,7 @@ def _build_assistant_message(
     plain_text: str | None,
     content_blocks: Any,
     citations: list[ChatCitationItem],
+    file_url_builder: AliyunOssFileStore,
     finish_reason: str,
     created_at: datetime | None = None,
     completed_at: datetime | None = None,
@@ -516,6 +580,7 @@ def _build_assistant_message(
         content_blocks,
         fallback_text=resolved_plain_text,
         citations=citations,
+        file_url_builder=file_url_builder,
     )
     normalized_plain_text = (
         resolved_plain_text or "\n\n".join(block.text for block in block_items).strip()
@@ -639,8 +704,59 @@ def _normalize_citation_content_type(value: object) -> Literal["paragraph", "tab
     return "table" if str(value).strip() == "table" else "paragraph"
 
 
-def _normalize_block_type(value: object) -> Literal["markdown", "notice"]:
+def _build_chat_image_asset_items(
+    raw_assets: Any,
+    *,
+    file_url_builder: AliyunOssFileStore,
+) -> list[ChatImageAssetItem]:
+    """把图片资产统一转换为可渲染结构，并补充预签名 URL。"""
+    if not isinstance(raw_assets, list):
+        return []
+
+    image_assets: list[ChatImageAssetItem] = []
+    for item in raw_assets:
+        if isinstance(item, dict):
+            storage_key = str(item.get("storage_key", "")).strip()
+            thumbnail_storage_key = _read_optional_str(item.get("thumbnail_storage_key"))
+            asset_id = str(item.get("asset_id", ""))
+            source_anchor = _read_optional_str(item.get("source_anchor"))
+            image_type = str(item.get("image_type", ""))
+            summary = str(item.get("summary", ""))
+            ocr_text = str(item.get("ocr_text", ""))
+        else:
+            storage_key = str(getattr(item, "storage_key", "")).strip()
+            thumbnail_storage_key = _read_optional_str(getattr(item, "thumbnail_storage_key", None))
+            asset_id = str(getattr(item, "asset_id", ""))
+            source_anchor = _read_optional_str(getattr(item, "source_anchor", None))
+            image_type = str(getattr(item, "image_type", ""))
+            summary = str(getattr(item, "summary", ""))
+            ocr_text = str(getattr(item, "ocr_text", ""))
+        image_assets.append(
+            ChatImageAssetItem(
+                asset_id=asset_id,
+                source_anchor=source_anchor,
+                storage_key=storage_key,
+                thumbnail_storage_key=thumbnail_storage_key,
+                image_url=file_url_builder.build_presigned_get_url(storage_key=storage_key)
+                if storage_key
+                else None,
+                thumbnail_url=file_url_builder.build_presigned_get_url(
+                    storage_key=thumbnail_storage_key
+                )
+                if thumbnail_storage_key
+                else None,
+                image_type=image_type,
+                summary=summary,
+                ocr_text=ocr_text,
+            )
+        )
+    return image_assets
+
+
+def _normalize_block_type(value: object) -> Literal["markdown", "notice", "image_gallery"]:
     """把正文块类型归一化到协议允许值。"""
+    if str(value).strip() == "image_gallery":
+        return "image_gallery"
     return "notice" if str(value).strip() == "notice" else "markdown"
 
 
