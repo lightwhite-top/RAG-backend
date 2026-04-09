@@ -7,6 +7,7 @@ from typing import Protocol
 
 from baozhi_rag.domain.knowledge_file import KnowledgeFile
 from baozhi_rag.domain.knowledge_file_errors import KnowledgeFileNotFoundError
+from baozhi_rag.domain.knowledge_file_image_asset import KnowledgeFileImageAsset
 from baozhi_rag.domain.user import CurrentUser
 
 LOGGER = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ class KnowledgeFileDeleteRepository(Protocol):
         返回:
             找到时返回知识文件实体，否则返回 `None`。
         """
+        ...
 
     def delete_file(self, file_id: str) -> bool:
         """删除文件记录。
@@ -34,6 +36,7 @@ class KnowledgeFileDeleteRepository(Protocol):
         返回:
             删除成功返回 `True`，否则返回 `False`。
         """
+        ...
 
 
 class KnowledgeFileDeleteChunkStore(Protocol):
@@ -48,6 +51,7 @@ class KnowledgeFileDeleteChunkStore(Protocol):
         返回:
             None。
         """
+        ...
 
 
 class KnowledgeFileObjectStore(Protocol):
@@ -62,6 +66,19 @@ class KnowledgeFileObjectStore(Protocol):
         返回:
             None。
         """
+        ...
+
+
+class KnowledgeFileImageAssetDeleteRepository(Protocol):
+    """知识文件删除使用的图片资产仓储协议。"""
+
+    def list_assets_by_file_id(self, file_id: str) -> list[KnowledgeFileImageAsset]:
+        """按文件 ID 查询图片资产。"""
+        ...
+
+    def delete_assets_by_file_id(self, file_id: str) -> int:
+        """按文件 ID 删除图片资产。"""
+        ...
 
 
 class KnowledgeFileDeleteService:
@@ -71,6 +88,7 @@ class KnowledgeFileDeleteService:
         self,
         *,
         knowledge_file_repository: KnowledgeFileDeleteRepository,
+        knowledge_file_image_asset_repository: KnowledgeFileImageAssetDeleteRepository,
         chunk_store: KnowledgeFileDeleteChunkStore,
         object_store: KnowledgeFileObjectStore,
     ) -> None:
@@ -85,6 +103,7 @@ class KnowledgeFileDeleteService:
             None。
         """
         self._knowledge_file_repository = knowledge_file_repository
+        self._knowledge_file_image_asset_repository = knowledge_file_image_asset_repository
         self._chunk_store = chunk_store
         self._object_store = object_store
 
@@ -105,8 +124,10 @@ class KnowledgeFileDeleteService:
         if knowledge_file is None or knowledge_file.uploader_user_id != current_user.id:
             raise KnowledgeFileNotFoundError()
 
+        image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(file_id)
         if not self._knowledge_file_repository.delete_file(file_id):
             raise KnowledgeFileNotFoundError()
+        self._knowledge_file_image_asset_repository.delete_assets_by_file_id(file_id)
 
         # 先删除数据库记录，把文件从列表和检索元数据补齐链路中移除；随后再尽力清理
         # 检索索引与对象存储，避免调用方在外部依赖短暂抖动时继续看到“已删除文件”。
@@ -114,6 +135,7 @@ class KnowledgeFileDeleteService:
             file_id=knowledge_file.id,
             uploader_user_id=knowledge_file.uploader_user_id,
             storage_key=knowledge_file.storage_key,
+            image_assets=image_assets,
         )
 
     def _run_cleanup(
@@ -122,6 +144,7 @@ class KnowledgeFileDeleteService:
         file_id: str,
         uploader_user_id: str,
         storage_key: str,
+        image_assets: list[KnowledgeFileImageAsset],
     ) -> None:
         """执行删除后的索引与对象存储清理。
 
@@ -151,3 +174,23 @@ class KnowledgeFileDeleteService:
                     cleanup_target,
                     exc_info=True,
                 )
+        for image_asset in image_assets:
+            for cleanup_target, cleanup_storage_key in (
+                ("image_object_storage", image_asset.storage_key),
+                ("image_thumbnail_storage", image_asset.thumbnail_storage_key),
+            ):
+                if not cleanup_storage_key:
+                    continue
+                try:
+                    self._object_store.delete(cleanup_storage_key)
+                except Exception:
+                    LOGGER.warning(
+                        (
+                            "knowledge_file_delete_cleanup_failed "
+                            "file_id=%s uploader_user_id=%s cleanup_target=%s"
+                        ),
+                        file_id,
+                        uploader_user_id,
+                        cleanup_target,
+                        exc_info=True,
+                    )

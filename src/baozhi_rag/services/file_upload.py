@@ -58,6 +58,7 @@ class AsyncBinaryReader(Protocol):
 
     async def read(self, size: int = -1) -> bytes:
         """读取指定大小的字节内容。"""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

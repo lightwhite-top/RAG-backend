@@ -17,9 +17,11 @@ class KnowledgeUploadTaskRepository(Protocol):
 
     def create_task(self, task: KnowledgeUploadTask) -> KnowledgeUploadTask:
         """创建上传任务。"""
+        ...
 
     def get_task_by_id(self, task_id: str) -> KnowledgeUploadTask | None:
         """按任务标识查询任务。"""
+        ...
 
     def get_task_by_id_for_user(
         self,
@@ -27,6 +29,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         uploader_user_id: str,
     ) -> KnowledgeUploadTask | None:
         """按任务标识和上传用户查询任务。"""
+        ...
 
     def get_task_by_user_and_raw_sha256(
         self,
@@ -35,6 +38,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         ingest_version: str,
     ) -> KnowledgeUploadTask | None:
         """按用户、原始哈希和 ingest 版本查询任务。"""
+        ...
 
     def list_tasks_by_user(
         self,
@@ -43,6 +47,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         limit: int,
     ) -> list[KnowledgeUploadTask]:
         """按用户倒序列出最近任务。"""
+        ...
 
     def update_submission_context(
         self,
@@ -52,6 +57,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         source_storage_key: str | None = None,
     ) -> KnowledgeUploadTask | None:
         """更新任务最近一次提交使用的标题与源文件位置。"""
+        ...
 
     def claim_next_task(
         self,
@@ -61,6 +67,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         lease_expires_at: datetime,
     ) -> KnowledgeUploadTask | None:
         """抢占一条待处理或租约过期的任务。"""
+        ...
 
     def refresh_lease(
         self,
@@ -71,6 +78,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         heartbeat_at: datetime,
     ) -> bool:
         """刷新任务租约与心跳。"""
+        ...
 
     def update_task_progress(
         self,
@@ -87,6 +95,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         title_updated: bool | None = None,
     ) -> KnowledgeUploadTask | None:
         """更新任务阶段性处理结果。"""
+        ...
 
     def mark_succeeded(
         self,
@@ -103,6 +112,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         completed_at: datetime,
     ) -> KnowledgeUploadTask | None:
         """把任务标记为成功。"""
+        ...
 
     def mark_failed(
         self,
@@ -114,6 +124,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         failed_at: datetime,
     ) -> KnowledgeUploadTask | None:
         """把任务标记为失败。"""
+        ...
 
     def retry_task(
         self,
@@ -123,3 +134,4 @@ class KnowledgeUploadTaskRepository(Protocol):
         queued_at: datetime,
     ) -> KnowledgeUploadTask | None:
         """将失败任务重新入队。"""
+        ...

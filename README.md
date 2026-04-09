@@ -150,7 +150,10 @@ uv run ruff check .
 uv run ruff format .
 uv run mypy
 uv run pytest
+npx pyright --pythonpath .venv\Scripts\python.exe src/baozhi_rag/services/document_chunking.py
 ```
+
+当修改依赖动态属性、第三方库私有成员或底层 OOXML 的文件时，建议额外执行一次 `Pyright` 检查，确保 VS Code `Pylance` 不再残留高优先级诊断。
 
 对应的 `just` 命令如下：
 
@@ -278,6 +281,7 @@ INSERT INTO users (
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`
+- Word 解析会保留标题上下文、表格 Markdown 与批注文本，一并进入切块和检索
 - 成功时返回 `202 Accepted`
 - 业务输入错误返回 `4xx`
 - 下游依赖或系统故障返回 `5xx`
@@ -326,7 +330,7 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置；服务端 compose 默认开启 ES 认证。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_PASSWORD`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置；服务端 compose 默认开启 Milvus 认证。
-大模型配置通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL` 配置；旧变量 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 仍兼容。
+大模型配置通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL`、`IMAGE_RECOGNITION_MODEL` 配置；旧变量 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 仍兼容。
 向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置；如需让向量化单独接入另一家 OpenAI 兼容平台，可额外配置 `CHUNK_EMBEDDING_LLM_API_KEY`、`CHUNK_EMBEDDING_LLM_BASE_URL`、`CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS`。
 
 ## Chunk 检索
@@ -711,5 +715,6 @@ docs(readme): 补充启动说明
 ## 规范入口
 
 - 项目实现规范见 `_bmad-output/project-context.md`
+- `_bmad-output` 下除 `project-context.md` 外的文档产物默认使用中文文件名；目录名保留现有英文目录以兼容 BMad 配置
 - 本地用户与代理协作约定可通过仓库根目录自备 `AGENTS.md` 管理；该文件默认不纳入 Git
 - 启动、调试、部署和功能说明继续以 `README.md` 为准

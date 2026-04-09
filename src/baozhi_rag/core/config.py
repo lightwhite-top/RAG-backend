@@ -229,6 +229,11 @@ class Settings(BaseSettings):
             "BAILIAN_CHAT_MODEL",
         ),
     )
+    image_recognition_model: str | None = Field(
+        default=None,
+        description="文档图片识别使用的多模态模型名称",
+        validation_alias=AliasChoices("IMAGE_RECOGNITION_MODEL"),
+    )
     chat_system_prompt: str = Field(
         default=(
             "你是 {app_name} 的知识库问答助手。"

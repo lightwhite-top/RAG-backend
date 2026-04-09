@@ -301,6 +301,11 @@ class ChatMessageCitationModel(Base):
         nullable=True,
         comment="原文锚点",
     )
+    image_assets_json: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="图片资产投影",
+    )
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         nullable=False,
@@ -514,6 +519,96 @@ class KnowledgeFileModel(Base):
         UTCDateTime(),
         nullable=False,
         comment="上传时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="更新时间",
+    )
+
+
+class KnowledgeFileImageAssetModel(Base):
+    """知识文件图片资产表。"""
+
+    __tablename__ = "knowledge_file_image_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "file_id",
+            "source_anchor",
+            name="uq_knowledge_file_image_assets_file_anchor",
+        ),
+        Index("ix_knowledge_file_image_assets_chunk_id", "chunk_id"),
+        Index(
+            "ix_knowledge_file_image_assets_file_chunk",
+            "file_id",
+            "chunk_index",
+        ),
+        Index(
+            "ix_knowledge_file_image_assets_uploader_normalized_sha256",
+            "uploader_user_id",
+            "normalized_image_sha256",
+        ),
+        mysql_table_options("知识文件图片资产表"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="图片资产ID")
+    file_id: Mapped[str] = mapped_column(String(32), nullable=False, comment="所属文件ID")
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="所属Chunk ID")
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="所属Chunk序号")
+    asset_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="Chunk内图片序号")
+    uploader_user_id: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="上传用户ID",
+    )
+    source_anchor: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="原文锚点",
+    )
+    image_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="原始图片SHA256",
+    )
+    normalized_image_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="归一化图片SHA256",
+    )
+    storage_key: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        comment="原图存储对象键",
+    )
+    thumbnail_storage_key: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="缩略图存储对象键",
+    )
+    content_type: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="图片MIME类型",
+    )
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="图片宽度")
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="图片高度")
+    ocr_text: Mapped[str] = mapped_column(Text, nullable=False, comment="图片OCR文本")
+    summary: Mapped[str] = mapped_column(Text, nullable=False, comment="图片语义摘要")
+    image_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        comment="图片类型",
+    )
+    recognition_model: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="图片识别模型名称",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(),
+        nullable=False,
+        comment="创建时间",
     )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),

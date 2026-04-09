@@ -19,12 +19,15 @@ class UserRepository(Protocol):
         role: UserRole,
     ) -> User:
         """创建用户并返回完整实体。"""
+        ...
 
     def get_user_by_id(self, user_id: str) -> User | None:
         """按用户 ID 查询用户。"""
+        ...
 
     def get_user_by_email(self, email: str) -> User | None:
         """按邮箱查询用户。"""
+        ...
 
     def list_users(
         self,
@@ -34,6 +37,7 @@ class UserRepository(Protocol):
         page_size: int,
     ) -> UserListPage:
         """分页查询用户。"""
+        ...
 
     def update_user(
         self,
@@ -45,6 +49,8 @@ class UserRepository(Protocol):
         password_hash: str | None = None,
     ) -> User | None:
         """更新指定用户并返回最新实体。"""
+        ...
 
     def delete_user(self, user_id: str) -> bool:
         """删除用户，返回是否删除成功。"""
+        ...

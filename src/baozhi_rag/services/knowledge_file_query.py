@@ -21,6 +21,7 @@ class PresignedFileUrlBuilder(Protocol):
         expires_seconds: int = 900,
     ) -> str:
         """为对象键生成短时可访问地址。"""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

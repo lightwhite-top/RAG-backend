@@ -217,27 +217,33 @@ class MilvusChunkVectorStore:
             auto_id=False,
             enable_dynamic_field=False,
         )
+        # Milvus schema 不支持像 MySQL 那样直接落字段 COMMENT，这里用紧邻中文注释固定字段语义。
+        # chunk 唯一标识，也是集合主键与跨库回填锚点。
         schema.add_field(
             field_name=self._PRIMARY_FIELD_NAME,
             datatype=milvus_data_type.VARCHAR,
             is_primary=True,
             max_length=256,
         )
+        # 所属文件 ID，用于按文件删除向量与检索后补全文件元数据。
         schema.add_field(
             field_name=self._FILE_ID_FIELD_NAME,
             datatype=milvus_data_type.VARCHAR,
             max_length=128,
         )
+        # 上传用户 ID，用于权限过滤和审计。
         schema.add_field(
             field_name=self._UPLOADER_USER_ID_FIELD_NAME,
             datatype=milvus_data_type.VARCHAR,
             max_length=128,
         )
+        # 文件可见范围，配合 viewer_user_id 生成检索过滤条件。
         schema.add_field(
             field_name=self._VISIBILITY_SCOPE_FIELD_NAME,
             datatype=milvus_data_type.VARCHAR,
             max_length=32,
         )
+        # chunk 正文对应的向量表示，后续图片语义也是通过正文融合进入该向量。
         schema.add_field(
             field_name=self._VECTOR_FIELD_NAME,
             datatype=milvus_data_type.FLOAT_VECTOR,

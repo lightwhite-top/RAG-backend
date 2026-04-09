@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Protocol
 
 from fastapi import status
@@ -13,7 +13,12 @@ from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher
 
 if TYPE_CHECKING:
-    from baozhi_rag.services.document_chunking import DocumentChunk
+    from baozhi_rag.services.document_chunking import ChunkImageAsset, DocumentChunk
+
+
+def _empty_image_asset_list() -> list[ChunkImageAsset]:
+    """返回空图片资产列表。"""
+    return []
 
 
 class ChunkSearchValidationError(AppError):
@@ -48,6 +53,7 @@ class ChunkSearchHit:
     content: str
     merged_terms: list[str]
     score: float | None
+    image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
     uploader_user_id: str = ""
     visibility_scope: str = ""
 

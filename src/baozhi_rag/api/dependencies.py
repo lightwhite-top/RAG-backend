@@ -10,6 +10,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.domain.chat_message_repository import ChatMessageRepository
 from baozhi_rag.domain.chat_session_repository import ChatSessionRepository
+from baozhi_rag.domain.knowledge_file_image_asset_repository import (
+    KnowledgeFileImageAssetRepository,
+)
 from baozhi_rag.domain.knowledge_file_repository import KnowledgeFileRepository
 from baozhi_rag.domain.knowledge_upload_task_repository import KnowledgeUploadTaskRepository
 from baozhi_rag.domain.registration_verification_repository import (
@@ -20,6 +23,9 @@ from baozhi_rag.domain.user_errors import AuthenticationRequiredError, Permissio
 from baozhi_rag.domain.user_repository import UserRepository
 from baozhi_rag.infra.database.chat_message_repository import SqlAlchemyChatMessageRepository
 from baozhi_rag.infra.database.chat_session_repository import SqlAlchemyChatSessionRepository
+from baozhi_rag.infra.database.knowledge_file_image_asset_repository import (
+    SqlAlchemyKnowledgeFileImageAssetRepository,
+)
 from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowledgeFileRepository
 from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
@@ -44,6 +50,7 @@ from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchService
 from baozhi_rag.services.conversation_chat import ConversationChatService
 from baozhi_rag.services.document_chunking import DocumentChunkService
+from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
@@ -58,6 +65,16 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def _build_chunk_embedding_service(settings: Settings) -> ChunkEmbeddingService:
     """构造必选的 chunk 向量化服务。"""
     return ChunkEmbeddingService(OpenAICompatibleLlmClient.from_embedding_settings(settings))
+
+
+def _build_document_image_understanding_service(
+    settings: Settings,
+) -> DocumentImageUnderstandingService:
+    """构造文档图片识别服务。"""
+    return DocumentImageUnderstandingService(
+        client=OpenAICompatibleLlmClient.from_settings(settings),
+        model_name=settings.image_recognition_model or "",
+    )
 
 
 def get_database_manager(
@@ -93,6 +110,13 @@ def get_knowledge_file_repository(
 ) -> KnowledgeFileRepository:
     """构造知识文件仓储。"""
     return SqlAlchemyKnowledgeFileRepository(database_manager.session_factory)
+
+
+def get_knowledge_file_image_asset_repository(
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> KnowledgeFileImageAssetRepository:
+    """构造知识文件图片资产仓储。"""
+    return SqlAlchemyKnowledgeFileImageAssetRepository(database_manager.session_factory)
 
 
 def get_registration_verification_repository(
@@ -192,11 +216,16 @@ def get_knowledge_file_delete_service(
         KnowledgeFileRepository,
         Depends(get_knowledge_file_repository),
     ],
+    knowledge_file_image_asset_repository: Annotated[
+        KnowledgeFileImageAssetRepository,
+        Depends(get_knowledge_file_image_asset_repository),
+    ],
     object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
 ) -> KnowledgeFileDeleteService:
     """构造知识文件删除服务。"""
     return KnowledgeFileDeleteService(
         knowledge_file_repository=knowledge_file_repository,
+        knowledge_file_image_asset_repository=knowledge_file_image_asset_repository,
         chunk_store=HybridChunkStore.from_settings(settings),
         object_store=object_store,
     )

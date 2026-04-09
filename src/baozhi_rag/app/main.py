@@ -19,6 +19,9 @@ from baozhi_rag.core.config import Settings, get_settings
 from baozhi_rag.core.logging import configure_logging
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME, ensure_request_id
 from baozhi_rag.domain.user import CurrentUser
+from baozhi_rag.infra.database.knowledge_file_image_asset_repository import (
+    SqlAlchemyKnowledgeFileImageAssetRepository,
+)
 from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowledgeFileRepository
 from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
@@ -32,6 +35,7 @@ from baozhi_rag.schemas.common import SuccessResponse
 from baozhi_rag.schemas.system import ServiceInfoResponse
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.document_chunking import DocumentChunkService
+from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadProcessor, KnowledgeUploadWorker
 
@@ -98,6 +102,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         chat_llm_client.ensure_ready()
         embedding_llm_client = OpenAICompatibleLlmClient.from_embedding_settings(current_settings)
         embedding_llm_client.ensure_ready()
+        image_understanding_service = DocumentImageUnderstandingService(
+            client=chat_llm_client,
+            model_name=current_settings.image_recognition_model or "",
+        )
+        image_understanding_service.ensure_ready()
         chunk_store = HybridChunkStore.from_settings(current_settings)
         chunk_store.ensure_ready()
 
@@ -114,6 +123,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 knowledge_file_repository=SqlAlchemyKnowledgeFileRepository(
                     database_manager.session_factory
                 ),
+                knowledge_file_image_asset_repository=SqlAlchemyKnowledgeFileImageAssetRepository(
+                    database_manager.session_factory
+                ),
                 chunk_service=DocumentChunkService(
                     chunk_size=current_settings.doc_chunk_size,
                     chunk_overlap=current_settings.doc_chunk_overlap,
@@ -125,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 chunk_store=chunk_store,
                 chunk_embedding_service=ChunkEmbeddingService(embedding_llm_client),
+                image_understanding_service=image_understanding_service,
                 lease_seconds=current_settings.upload_task_lease_seconds,
                 heartbeat_interval_seconds=current_settings.upload_task_heartbeat_interval_seconds,
             )

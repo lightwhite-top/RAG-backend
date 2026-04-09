@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import re
 import subprocess
 import textwrap
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from threading import Lock
+from typing import Any, cast
 
 from docx import Document
 from docx.document import Document as DocxDocument
+from docx.oxml.ns import qn
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
-from docx.table import Table, _Cell
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from fastapi import status
 
@@ -25,6 +29,23 @@ from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_
 
 LOGGER = logging.getLogger(__name__)
 _SOFFICE_CONVERT_LOCK = Lock()
+# Word 批注相关的 OOXML 标签与属性名，用于从底层 XML 中定位 comment 锚点。
+_COMMENT_RANGE_START_TAG = qn("w:commentRangeStart")
+_COMMENT_RANGE_END_TAG = qn("w:commentRangeEnd")
+_COMMENT_REFERENCE_TAG = qn("w:commentReference")
+_COMMENT_ID_ATTR = qn("w:id")
+_DRAWING_BLIP_TAG = qn("a:blip")
+_REL_EMBED_ATTR = qn("r:embed")
+
+
+def _empty_str_list() -> list[str]:
+    """返回空字符串列表，避免类型检查器把 `list` 推断为 `list[Unknown]`。"""
+    return []
+
+
+def _empty_image_asset_list() -> list[ChunkImageAsset]:
+    """返回空图片资产列表，避免类型检查器推断为未知列表类型。"""
+    return []
 
 
 class SegmentType(Enum):
@@ -34,6 +55,40 @@ class SegmentType(Enum):
     TABLE = "table"
 
 
+@dataclass(frozen=True, slots=True)
+class ChunkImageAsset:
+    """切块阶段使用的图片资产结构。"""
+
+    asset_id: str
+    asset_index: int
+    source_anchor: str
+    content_type: str
+    extension: str
+    image_bytes: bytes | None = None
+    image_sha256: str = ""
+    normalized_image_sha256: str = ""
+    storage_key: str = ""
+    thumbnail_storage_key: str | None = None
+    width: int | None = None
+    height: int | None = None
+    ocr_text: str = ""
+    summary: str = ""
+    image_type: str = ""
+    recognition_model: str = ""
+
+    def to_search_document(self) -> dict[str, object]:
+        """构造可写入 ES 的图片资产投影。"""
+        return {
+            "asset_id": self.asset_id,
+            "source_anchor": self.source_anchor,
+            "storage_key": self.storage_key,
+            "thumbnail_storage_key": self.thumbnail_storage_key,
+            "image_type": self.image_type,
+            "summary": self.summary,
+            "ocr_text": self.ocr_text,
+        }
+
+
 @dataclass
 class DocumentSegment:
     """文档片段，可以是段落或表格。"""
@@ -41,6 +96,10 @@ class DocumentSegment:
     content: str
     segment_type: SegmentType
     heading_context: str
+    # 锚定到当前片段的批注文本，会在切块前拼接到可检索内容中。
+    comment_texts: list[str] = field(default_factory=_empty_str_list)
+    # 锚定到当前片段的图片资产，会在切块阶段进一步绑定到 chunk。
+    image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
 
 
 class DocumentChunkingError(AppError):
@@ -98,7 +157,9 @@ class DocumentChunk:
     # 文件可见性范围
     visibility_scope: str = ""
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
-    merged_terms: list[str] = field(default_factory=list)
+    merged_terms: list[str] = field(default_factory=_empty_str_list)
+    # 与当前 chunk 绑定的图片资产元数据。
+    image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
     # 向量化
     content_embedding: list[float] | None = None
 
@@ -115,6 +176,7 @@ class DocumentChunk:
             "char_count": self.char_count,
             "content": self.content,
             "merged_terms": self.merged_terms,
+            "image_assets": [asset.to_search_document() for asset in self.image_assets],
         }
 
 
@@ -250,7 +312,33 @@ class DocumentChunkService:
 
         for segment in segments:
             if segment.segment_type is SegmentType.PARAGRAPH:
-                paragraph_buffer.append(segment.content)
+                if not segment.image_assets:
+                    paragraph_buffer.append(segment.content)
+                    continue
+
+                # 带图片的段落单独切块，避免图片和无关段落被混装到同一个 chunk。
+                if paragraph_buffer:
+                    chunks.extend(
+                        self._build_chunks(
+                            text="\n\n".join(paragraph_buffer),
+                            source_filename=source_filename,
+                            storage_key=storage_key,
+                            file_id=file_id,
+                            start_index=len(chunks),
+                        )
+                    )
+                    paragraph_buffer.clear()
+
+                chunks.extend(
+                    self._build_chunks(
+                        text=segment.content,
+                        source_filename=source_filename,
+                        storage_key=storage_key,
+                        file_id=file_id,
+                        start_index=len(chunks),
+                        image_assets=segment.image_assets,
+                    )
+                )
                 continue
 
             if paragraph_buffer:
@@ -273,6 +361,8 @@ class DocumentChunkService:
                     file_id=file_id,
                     start_index=len(chunks),
                     heading_context=segment.heading_context,
+                    comment_texts=segment.comment_texts,
+                    image_assets=segment.image_assets,
                 )
             )
 
@@ -386,7 +476,7 @@ class DocumentChunkService:
             if converted_path.parent.exists():
                 converted_path.parent.rmdir()
 
-    def _is_vertically_merged_continuation(self, cell: _Cell) -> bool:
+    def _is_vertically_merged_continuation(self, cell: object) -> bool:
         """检查单元格是否是垂直合并的延续格（需要跳过）。
 
         参数:
@@ -395,7 +485,9 @@ class DocumentChunkService:
         返回:
             True 表示该单元格是合并延续格，应跳过；False 表示正常单元格或合并起始格。
         """
-        tc_pr = cell._element.tcPr
+        # python-docx 这里没有公开类型声明，只能通过底层 OOXML 属性读取合并标记。
+        cell_element = getattr(cast(Any, cell), "_element", None)
+        tc_pr = getattr(cell_element, "tcPr", None)
         if tc_pr is None:
             return False
 
@@ -430,7 +522,9 @@ class DocumentChunkService:
                 text = cell.text.strip().replace("\n", " ").replace("|", "\\|")
                 current_row_texts.append(text)
 
-                tc_pr = cell._element.tcPr
+                # 读取底层 tcPr，识别竖向合并场景，避免把续格内容重复写入 Markdown。
+                cell_element = getattr(cast(Any, cell), "_element", None)
+                tc_pr = getattr(cell_element, "tcPr", None)
                 has_vertical_merge_marker = tc_pr is not None and tc_pr.vMerge is not None
                 is_repeated_vertical_merge = (
                     has_vertical_merge_marker
@@ -455,6 +549,8 @@ class DocumentChunkService:
         self,
         paragraph: Paragraph,
         headings: list[str],
+        comment_texts: list[str],
+        image_assets: list[ChunkImageAsset],
     ) -> tuple[DocumentSegment | None, list[str]]:
         """处理单个段落，返回 DocumentSegment 和更新后的 headings。
 
@@ -474,21 +570,26 @@ class DocumentChunkService:
         if heading_level is not None:
             # 更新标题层级
             updated_headings = headings[: heading_level - 1] + [text]
-            content = " / ".join(updated_headings)
+            content = self._append_comment_block(" / ".join(updated_headings), comment_texts)
             segment = DocumentSegment(
                 content=content,
                 segment_type=SegmentType.PARAGRAPH,
                 heading_context=" / ".join(updated_headings),
+                comment_texts=comment_texts,
+                image_assets=image_assets,
             )
             return segment, updated_headings
 
         # 普通段落
         context = " / ".join(headings)
         content = f"{context}\n{text}" if context else text
+        content = self._append_comment_block(content, comment_texts)
         segment = DocumentSegment(
             content=content,
             segment_type=SegmentType.PARAGRAPH,
             heading_context=" / ".join(headings),
+            comment_texts=comment_texts,
+            image_assets=image_assets,
         )
         return segment, headings
 
@@ -496,6 +597,8 @@ class DocumentChunkService:
         self,
         table: Table,
         headings: list[str],
+        comment_texts: list[str],
+        image_assets: list[ChunkImageAsset],
     ) -> DocumentSegment | None:
         """处理单个表格，转换为 Markdown 格式。
 
@@ -514,6 +617,8 @@ class DocumentChunkService:
             content=markdown,
             segment_type=SegmentType.TABLE,
             heading_context=" / ".join(headings),
+            comment_texts=comment_texts,
+            image_assets=image_assets,
         )
 
     def _extract_docx_segments(self, document: DocxDocument) -> list[DocumentSegment]:
@@ -527,23 +632,208 @@ class DocumentChunkService:
         """
         headings: list[str] = []
         segments: list[DocumentSegment] = []
-
-        # 遍历 body 的所有子元素，保持段落和表格的原始顺序
-        for element in document.element.body:
+        # Pylance 对 `document.element.body` 的类型推断较弱，这里先显式转成可遍历列表。
+        body_elements = list(cast(Iterable[Any], cast(Any, document.element).body))
+        body_comment_ids = self._collect_body_element_comment_ids(document)
+        comment_lookup = self._build_comment_lookup(document)
+        # 先按顶层 body 元素收集批注锚点，确保后续与 python-docx 的遍历顺序一致。
+        for element_index, element in enumerate(body_elements):
+            # 当前元素可能命中多个批注，这里统一去重后再交给段落/表格处理逻辑。
+            comment_texts = self._resolve_comment_texts(
+                body_comment_ids.get(element_index, []),
+                comment_lookup,
+            )
+            image_assets = self._extract_body_element_images(
+                element=element,
+                document=document,
+                element_index=element_index,
+            )
             if isinstance(element, CT_P):
                 # 处理段落
                 paragraph = Paragraph(element, document)
-                segment, headings = self._process_paragraph(paragraph, headings)
+                segment, headings = self._process_paragraph(
+                    paragraph,
+                    headings,
+                    comment_texts,
+                    image_assets,
+                )
                 if segment:
                     segments.append(segment)
             elif isinstance(element, CT_Tbl):
                 # 处理表格
                 table = Table(element, document)
-                segment = self._process_table(table, headings)
+                segment = self._process_table(table, headings, comment_texts, image_assets)
                 if segment:
                     segments.append(segment)
 
         return segments
+
+    def _build_comment_lookup(self, document: DocxDocument) -> dict[int, str]:
+        """构建 comment id 到归一化批注文本的映射。"""
+        comment_lookup: dict[int, str] = {}
+        for comment in document.comments:
+            # 批注正文会参与检索与 content_sha256，先做稳定归一化。
+            normalized_text = self._normalize_comment_text(comment.text)
+            if not normalized_text:
+                continue
+            comment_lookup[int(comment.comment_id)] = normalized_text
+        return comment_lookup
+
+    def _collect_body_element_comment_ids(self, document: DocxDocument) -> dict[int, list[int]]:
+        """按顶层 body 元素收集命中的批注 id。"""
+        body_comment_ids: dict[int, list[int]] = {}
+        # active_comment_ids 表示跨元素仍然处于生效范围内的批注。
+        active_comment_ids: set[int] = set()
+        body_elements = list(cast(Iterable[Any], cast(Any, document.element).body))
+
+        for element_index, element in enumerate(body_elements):
+            # 先继承跨元素延续中的批注，再补当前元素内新出现的批注。
+            element_comment_ids: set[int] = set(active_comment_ids)
+
+            for descendant in cast(Iterable[Any], element.iter()):
+                if descendant.tag == _COMMENT_RANGE_START_TAG:
+                    # commentRangeStart 表示批注从当前元素开始生效。
+                    comment_id = self._read_comment_id(descendant)
+                    if comment_id is None:
+                        continue
+                    active_comment_ids.add(comment_id)
+                    element_comment_ids.add(comment_id)
+                    continue
+
+                if descendant.tag == _COMMENT_REFERENCE_TAG:
+                    # commentReference 通常出现在结束处，这里也视为当前元素命中。
+                    comment_id = self._read_comment_id(descendant)
+                    if comment_id is not None:
+                        element_comment_ids.add(comment_id)
+                    continue
+
+                if descendant.tag == _COMMENT_RANGE_END_TAG:
+                    # commentRangeEnd 命中当前元素后，需要把批注从活动集合中移除。
+                    comment_id = self._read_comment_id(descendant)
+                    if comment_id is None:
+                        continue
+                    element_comment_ids.add(comment_id)
+                    active_comment_ids.discard(comment_id)
+
+            if element_comment_ids:
+                body_comment_ids[element_index] = sorted(element_comment_ids)
+
+        return body_comment_ids
+
+    def _extract_body_element_images(
+        self,
+        *,
+        element: object,
+        document: DocxDocument,
+        element_index: int,
+    ) -> list[ChunkImageAsset]:
+        """从顶层 body 元素中提取图片并构造预览图片资产。"""
+        image_assets: list[ChunkImageAsset] = []
+        related_parts = cast(dict[str, Any], getattr(document.part, "related_parts", {}))
+
+        element_iter = getattr(element, "iter", None)
+        if not callable(element_iter):
+            return image_assets
+
+        for asset_index, descendant in enumerate(cast(Iterable[Any], element_iter()), start=1):
+            if getattr(descendant, "tag", None) != _DRAWING_BLIP_TAG:
+                continue
+
+            relation_id = getattr(descendant, "get", lambda *_args, **_kwargs: None)(
+                _REL_EMBED_ATTR
+            )
+            if relation_id in (None, ""):
+                continue
+
+            related_part = related_parts.get(str(relation_id))
+            if related_part is None:
+                continue
+
+            image_bytes = cast(bytes | None, getattr(related_part, "blob", None))
+            if not image_bytes:
+                continue
+
+            content_type = str(getattr(related_part, "content_type", "")).strip()
+            extension = self._guess_image_extension(content_type)
+            source_anchor = f"body:{element_index}:image:{asset_index}"
+            image_assets.append(
+                ChunkImageAsset(
+                    asset_id=f"preview-{element_index}-{asset_index}",
+                    asset_index=asset_index,
+                    source_anchor=source_anchor,
+                    content_type=content_type,
+                    extension=extension,
+                    image_bytes=image_bytes,
+                )
+            )
+
+        return image_assets
+
+    def _guess_image_extension(self, content_type: str) -> str:
+        """根据图片 MIME 类型推断扩展名。"""
+        guessed_extension = mimetypes.guess_extension(content_type, strict=False)
+        if guessed_extension:
+            return guessed_extension
+        return ".bin"
+
+    def _read_comment_id(self, element: object) -> int | None:
+        """从 OOXML 批注锚点元素中读取 comment id。"""
+        element_getter = getattr(element, "get", None)
+        if not callable(element_getter):
+            return None
+
+        raw_value = element_getter(_COMMENT_ID_ATTR)
+        if raw_value in (None, ""):
+            return None
+
+        try:
+            return int(str(raw_value))
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_comment_texts(
+        self,
+        comment_ids: Iterable[int],
+        comment_lookup: dict[int, str],
+    ) -> list[str]:
+        """把批注 id 列表解析为去重后的批注文本列表。"""
+        resolved_comment_texts: list[str] = []
+        seen_texts: set[str] = set()
+
+        for comment_id in comment_ids:
+            comment_text = comment_lookup.get(comment_id)
+            if comment_text is None or comment_text in seen_texts:
+                continue
+            resolved_comment_texts.append(comment_text)
+            seen_texts.add(comment_text)
+
+        return resolved_comment_texts
+
+    def _normalize_comment_text(self, text: str) -> str:
+        """归一化批注文本，降低换行和空白对哈希与检索的干扰。"""
+        return " / ".join(
+            normalized_line
+            for normalized_line in (" ".join(part.split()) for part in text.splitlines())
+            if normalized_line
+        )
+
+    def _append_comment_block(self, content: str, comment_texts: list[str]) -> str:
+        """把批注块附加到正文末尾，使批注文本能随正文一起被检索。"""
+        comment_suffix = self._build_comment_suffix(comment_texts)
+        if not comment_suffix:
+            return content
+        return f"{content}{comment_suffix}"
+
+    def _build_comment_suffix(self, comment_texts: list[str]) -> str:
+        """构建稳定的批注补充块。"""
+        if not comment_texts:
+            return ""
+
+        if len(comment_texts) == 1:
+            return f"\n\n批注: {comment_texts[0]}"
+
+        comment_lines = "\n".join(f"- {comment_text}" for comment_text in comment_texts)
+        return f"\n\n批注:\n{comment_lines}"
 
     def _get_heading_level(self, paragraph: Paragraph) -> int | None:
         """获取段落的大纲级别。
@@ -566,17 +856,17 @@ class DocumentChunkService:
             return level
 
         # 优先级 2：从底层 XML 读取样式 ID（某些自定义样式可能未暴露到 style.name）
-        xml_element = paragraph._element
-        if isinstance(xml_element, CT_P):
-            p_pr = xml_element.pPr
-            if p_pr is not None:
-                p_style = p_pr.pStyle
-                if p_style is not None:
-                    style_val = p_style.val
-                    if style_val is not None:
-                        level = self._parse_heading_level_by_name(style_val)
-                        if level is not None:
-                            return level
+        # python-docx 未公开这段 XML 结构的完整类型，这里只在局部用 Any 读取样式 ID。
+        xml_element = getattr(cast(Any, paragraph), "_element", None)
+        p_pr = getattr(xml_element, "pPr", None)
+        if p_pr is not None:
+            p_style = p_pr.pStyle
+            if p_style is not None:
+                style_val = p_style.val
+                if style_val is not None:
+                    level = self._parse_heading_level_by_name(str(style_val))
+                    if level is not None:
+                        return level
 
         # 优先级 3：从正文内容正则匹配识别（第 X 章、第 X 条、（一）、一、等）
         text = paragraph.text.strip()
@@ -693,6 +983,7 @@ class DocumentChunkService:
         source_filename: str,
         storage_key: str,
         file_id: str,
+        image_assets: list[ChunkImageAsset] | None = None,
     ) -> DocumentChunk:
         """基于统一元数据创建单个 chunk。
 
@@ -716,6 +1007,7 @@ class DocumentChunkService:
             source_filename=source_filename,
             storage_key=storage_key,
             merged_terms=term_match_result.merged_terms,
+            image_assets=list(image_assets or []),
         )
 
     def _build_chunks(
@@ -725,6 +1017,7 @@ class DocumentChunkService:
         storage_key: str,
         file_id: str,
         start_index: int = 0,
+        image_assets: list[ChunkImageAsset] | None = None,
     ) -> list[DocumentChunk]:
         """按固定窗口与 overlap 生成切块。
 
@@ -754,6 +1047,7 @@ class DocumentChunkService:
             end = min(start + self._chunk_size, len(normalized_text))
             chunk_content = normalized_text[start:end].strip()
             if chunk_content:
+                chunk_image_assets = image_assets if not chunks else None
                 chunks.append(
                     self._create_chunk(
                         content=chunk_content,
@@ -761,6 +1055,7 @@ class DocumentChunkService:
                         source_filename=source_filename,
                         storage_key=storage_key,
                         file_id=file_id,
+                        image_assets=chunk_image_assets,
                     )
                 )
 
@@ -780,6 +1075,8 @@ class DocumentChunkService:
         file_id: str,
         start_index: int = 0,
         heading_context: str = "",
+        comment_texts: list[str] | None = None,
+        image_assets: list[ChunkImageAsset] | None = None,
     ) -> list[DocumentChunk]:
         """为表格生成独立的 chunks。
 
@@ -799,8 +1096,12 @@ class DocumentChunkService:
         """
         normalized_heading = heading_context.strip()
         heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
+        # 表格批注作为补充上下文追加到每个表格 chunk 尾部，避免破坏表格主体结构。
+        comment_suffix = self._build_comment_suffix(comment_texts or [])
         content_with_context = (
-            f"{heading_prefix}{table_markdown}" if heading_prefix else table_markdown
+            f"{heading_prefix}{table_markdown}{comment_suffix}"
+            if heading_prefix
+            else f"{table_markdown}{comment_suffix}"
         )
 
         if len(content_with_context) <= self._chunk_size:
@@ -812,6 +1113,7 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    image_assets=image_assets,
                 )
             ]
 
@@ -826,6 +1128,7 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    image_assets=image_assets,
                 )
             ]
 
@@ -836,10 +1139,12 @@ class DocumentChunkService:
             header_line,
             separator_line,
             heading_context=heading_context,
+            comment_suffix=comment_suffix,
         )
 
         chunks: list[DocumentChunk] = []
         for offset, table_part in enumerate(split_tables):
+            chunk_image_assets = image_assets if offset == 0 else None
             chunks.append(
                 self._create_chunk(
                     content=table_part,
@@ -847,6 +1152,7 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    image_assets=chunk_image_assets,
                 )
             )
 
@@ -858,6 +1164,7 @@ class DocumentChunkService:
         header_line: str,
         separator_line: str,
         heading_context: str = "",
+        comment_suffix: str = "",
     ) -> list[str]:
         """将超大表格按行分组切分，每组补充表头。
 
@@ -874,14 +1181,15 @@ class DocumentChunkService:
         if len(lines) <= 2:
             normalized_heading = heading_context.strip()
             if not normalized_heading:
-                return [markdown]
-            return [f"{normalized_heading}\n{markdown}"]
+                return [f"{markdown}{comment_suffix}"]
+            return [f"{normalized_heading}\n{markdown}{comment_suffix}"]
 
         normalized_heading = heading_context.strip()
         heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
         header = f"{header_line}\n{separator_line}"
         chunk_prefix = f"{heading_prefix}{header}" if heading_prefix else header
-        header_size = len(chunk_prefix)
+        # 预留批注补充块的长度，避免拆分后 chunk 明显超过目标大小。
+        header_size = len(chunk_prefix) + len(comment_suffix)
         data_rows = lines[2:]
 
         chunks: list[str] = []
@@ -892,7 +1200,7 @@ class DocumentChunkService:
             row_size = len(row) + 1  # +1 for newline
 
             if current_size + row_size > self._chunk_size and current_rows:
-                chunk_content = chunk_prefix + "\n" + "\n".join(current_rows)
+                chunk_content = chunk_prefix + "\n" + "\n".join(current_rows) + comment_suffix
                 chunks.append(chunk_content)
                 current_rows = []
                 current_size = header_size
@@ -901,10 +1209,13 @@ class DocumentChunkService:
             current_size += row_size
 
         if current_rows:
-            chunk_content = chunk_prefix + "\n" + "\n".join(current_rows)
+            chunk_content = chunk_prefix + "\n" + "\n".join(current_rows) + comment_suffix
             chunks.append(chunk_content)
 
-        return chunks if chunks else [markdown]
+        if chunks:
+            return chunks
+
+        return [f"{chunk_prefix}{comment_suffix}"]
 
     def _log_chunk_preview(
         self,

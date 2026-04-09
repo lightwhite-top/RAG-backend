@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Iterator, Mapping
@@ -200,6 +201,86 @@ class OpenAICompatibleLlmClient:
             msg = "聊天大模型返回空内容"
             raise OpenAICompatibleLlmInvocationError(msg)
         return content
+
+    def recognize_image(
+        self,
+        *,
+        image_bytes: bytes,
+        content_type: str,
+        model_name: str,
+    ) -> dict[str, str]:
+        """调用多模态模型识别文档图片并返回结构化结果。"""
+        self._validate_api_key()
+        normalized_model_name = model_name.strip()
+        if not normalized_model_name:
+            msg = "未配置图片识别模型名称"
+            raise OpenAICompatibleLlmConfigurationError(msg)
+
+        request_payload = {
+            "model": normalized_model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是文档图片识别助手。请识别图片中的文字和图示语义，只返回 JSON。"
+                        "JSON 必须包含三个字符串字段：ocr_text、summary、image_type。"
+                        "image_type 仅允许 diagram、stamp、handwriting、screenshot、mixed、unknown。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "请识别这张文档图片。"
+                                "ocr_text 填写图片中的可见文字；"
+                                "summary 用中文概括图片语义；"
+                                "image_type 选择最贴近的类别。"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": self._build_image_data_url(
+                                    image_bytes=image_bytes,
+                                    content_type=content_type,
+                                )
+                            },
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0.0,
+        }
+
+        try:
+            response = self._get_client().chat.completions.create(**request_payload)
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            self._log_upstream_failure(
+                operation="chat.completions.create_image_recognition",
+                model_name=normalized_model_name,
+                exc=exc,
+            )
+            msg = "调用图片识别模型失败"
+            raise OpenAICompatibleLlmInvocationError(msg) from exc
+
+        choices = getattr(response, "choices", [])
+        if not choices:
+            msg = "图片识别模型未返回候选结果"
+            raise OpenAICompatibleLlmInvocationError(msg)
+
+        content = getattr(choices[0].message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            msg = "图片识别模型返回空内容"
+            raise OpenAICompatibleLlmInvocationError(msg)
+
+        parsed_content = self._parse_json_object(content)
+        return {
+            "ocr_text": str(parsed_content.get("ocr_text", "")).strip(),
+            "summary": str(parsed_content.get("summary", "")).strip(),
+            "image_type": str(parsed_content.get("image_type", "unknown")).strip() or "unknown",
+        }
 
     def stream_chat(
         self,
@@ -440,3 +521,33 @@ class OpenAICompatibleLlmClient:
             if text_value is not None:
                 pieces.append(text_value)
         return "".join(pieces)
+
+    @staticmethod
+    def _build_image_data_url(*, image_bytes: bytes, content_type: str) -> str:
+        """把图片字节编码为多模态模型可读取的 data URL。"""
+        encoded_bytes = base64.b64encode(image_bytes).decode("ascii")
+        normalized_content_type = content_type.strip() or "application/octet-stream"
+        return f"data:{normalized_content_type};base64,{encoded_bytes}"
+
+    @staticmethod
+    def _parse_json_object(raw_content: str) -> dict[str, object]:
+        """从模型返回文本中提取 JSON 对象。"""
+        text = raw_content.strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            start_index = text.find("{")
+            end_index = text.rfind("}")
+            if start_index < 0 or end_index < start_index:
+                msg = "图片识别模型未返回合法 JSON"
+                raise OpenAICompatibleLlmInvocationError(msg) from None
+            try:
+                parsed = json.loads(text[start_index : end_index + 1])
+            except json.JSONDecodeError as exc:
+                msg = "图片识别模型未返回合法 JSON"
+                raise OpenAICompatibleLlmInvocationError(msg) from exc
+
+        if not isinstance(parsed, dict):
+            msg = "图片识别模型返回的 JSON 结构非法"
+            raise OpenAICompatibleLlmInvocationError(msg)
+        return cast(dict[str, object], parsed)

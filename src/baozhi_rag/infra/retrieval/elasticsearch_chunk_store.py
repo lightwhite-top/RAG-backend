@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest
+from baozhi_rag.services.document_chunking import ChunkImageAsset
 
 if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
@@ -373,21 +375,60 @@ class ElasticsearchChunkStore:
 
     def _build_mappings(self) -> dict[str, object]:
         """构造 chunk 索引 mapping。"""
+        # ES mapping 不支持像 MySQL 那样直接落字段 COMMENT，这里用紧邻中文注释固定字段语义。
         properties: dict[str, object] = {
+            # chunk 唯一标识，也是跨库回填时的主锚点。
             "chunk_id": {"type": "keyword"},
+            # 所属文件 ID，用于删除、审计和回填文件元数据。
             "file_id": {"type": "keyword"},
+            # 原始文件名，供搜索结果展示与引用回填使用。
             "source_filename": {"type": "keyword"},
+            # 文件在对象存储中的稳定对象键。
             "storage_key": {"type": "keyword"},
+            # 上传者用户 ID，用于权限过滤与审计追踪。
             "uploader_user_id": {"type": "keyword"},
+            # 文件可见范围，控制 owner_only/global 检索边界。
             "visibility_scope": {"type": "keyword"},
+            # chunk 在原文件中的顺序编号。
             "chunk_index": {"type": "integer"},
+            # chunk 字符数，便于前端展示与检索调试。
             "char_count": {"type": "integer"},
+            # chunk 正文，后续若引入图片语义投影也会并入该字段参与检索。
             "content": {
                 "type": "text",
                 "analyzer": "ik_max_word",
                 "search_analyzer": "ik_smart",
             },
+            # 领域词命中结果，服务混合召回加权。
             "merged_terms": {"type": "keyword"},
+            # 图片资产投影，供检索命中后补全前端渲染信息。
+            "image_assets": {
+                "type": "nested",
+                "properties": {
+                    # 图片资产唯一标识。
+                    "asset_id": {"type": "keyword"},
+                    # 图片在原文中的稳定锚点。
+                    "source_anchor": {"type": "keyword"},
+                    # 原图在对象存储中的稳定对象键。
+                    "storage_key": {"type": "keyword"},
+                    # 缩略图在对象存储中的稳定对象键。
+                    "thumbnail_storage_key": {"type": "keyword"},
+                    # 图片类型，如流程图、印章、手写批注等。
+                    "image_type": {"type": "keyword"},
+                    # 图片语义摘要，参与全文检索补充。
+                    "summary": {
+                        "type": "text",
+                        "analyzer": "ik_max_word",
+                        "search_analyzer": "ik_smart",
+                    },
+                    # 图片 OCR 文本，参与全文检索补充。
+                    "ocr_text": {
+                        "type": "text",
+                        "analyzer": "ik_max_word",
+                        "search_analyzer": "ik_smart",
+                    },
+                },
+            },
         }
 
         return {
@@ -409,6 +450,7 @@ class ElasticsearchChunkStore:
             "char_count",
             "content",
             "merged_terms",
+            "image_assets",
         ]
 
     @staticmethod
@@ -451,6 +493,7 @@ class ElasticsearchChunkStore:
             char_count=int(source.get("char_count", 0)),
             content=str(source.get("content", "")),
             merged_terms=_as_string_list(source.get("merged_terms")),
+            image_assets=_as_image_assets(source.get("image_assets")),
             score=float(score) if isinstance(score, (int, float)) else None,
         )
 
@@ -460,3 +503,32 @@ def _as_string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
+
+
+def _as_image_assets(value: object) -> list[ChunkImageAsset]:
+    """把 ES 投影中的图片资产转换为 chunk 图片资产对象。"""
+    if not isinstance(value, list):
+        return []
+
+    image_assets: list[ChunkImageAsset] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        image_assets.append(
+            ChunkImageAsset(
+                asset_id=str(item.get("asset_id", "")),
+                asset_index=index,
+                source_anchor=str(item.get("source_anchor", "")),
+                content_type="",
+                extension=Path(str(item.get("storage_key", ""))).suffix or ".bin",
+                image_bytes=None,
+                storage_key=str(item.get("storage_key", "")),
+                thumbnail_storage_key=str(item["thumbnail_storage_key"])
+                if item.get("thumbnail_storage_key") is not None
+                else None,
+                summary=str(item.get("summary", "")),
+                ocr_text=str(item.get("ocr_text", "")),
+                image_type=str(item.get("image_type", "")),
+            )
+        )
+    return image_assets

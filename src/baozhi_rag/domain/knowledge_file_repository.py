@@ -17,9 +17,11 @@ class KnowledgeFileRepository(Protocol):
 
     def create_file(self, file: KnowledgeFile) -> KnowledgeFile:
         """创建文件记录。"""
+        ...
 
     def get_file_by_id(self, file_id: str) -> KnowledgeFile | None:
         """按文件 ID 查询文件。"""
+        ...
 
     def get_file_by_user_and_filename(
         self,
@@ -27,6 +29,7 @@ class KnowledgeFileRepository(Protocol):
         original_filename: str,
     ) -> KnowledgeFile | None:
         """按上传者和文件名查询文件。"""
+        ...
 
     def get_file_by_user_and_sha256(
         self,
@@ -34,6 +37,7 @@ class KnowledgeFileRepository(Protocol):
         sha256: str,
     ) -> KnowledgeFile | None:
         """按上传者和内容哈希查询文件。"""
+        ...
 
     def get_file_by_user_and_content_sha256(
         self,
@@ -41,9 +45,11 @@ class KnowledgeFileRepository(Protocol):
         content_sha256: str,
     ) -> KnowledgeFile | None:
         """按上传者和内容哈希查询文件。"""
+        ...
 
     def get_files_by_ids(self, file_ids: list[str]) -> list[KnowledgeFile]:
         """批量查询文件元数据。"""
+        ...
 
     def list_global_files(
         self,
@@ -52,6 +58,7 @@ class KnowledgeFileRepository(Protocol):
         page_size: int,
     ) -> KnowledgeFileListPage:
         """分页查询全局可见文件。"""
+        ...
 
     def list_user_files(
         self,
@@ -61,6 +68,7 @@ class KnowledgeFileRepository(Protocol):
         page_size: int,
     ) -> KnowledgeFileListPage:
         """分页查询指定用户上传的文件。"""
+        ...
 
     def update_file(
         self,
@@ -78,6 +86,7 @@ class KnowledgeFileRepository(Protocol):
         chunk_count: int | None = None,
     ) -> KnowledgeFile | None:
         """更新文件记录。"""
+        ...
 
     def replace_file(
         self,
@@ -85,6 +94,8 @@ class KnowledgeFileRepository(Protocol):
         replacement_file: KnowledgeFile,
     ) -> KnowledgeFile:
         """以新文件记录替换旧文件记录。"""
+        ...
 
     def delete_file(self, file_id: str) -> bool:
         """删除文件记录。"""
+        ...

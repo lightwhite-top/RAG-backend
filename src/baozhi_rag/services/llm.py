@@ -51,3 +51,21 @@ class ChatModelClient(Protocol):
     ) -> Iterator[str]:
         """执行一次流式聊天补全，并按顺序返回文本增量。"""
         ...
+
+
+class ImageRecognitionModelClient(Protocol):
+    """图片识别模型客户端抽象。"""
+
+    def ensure_ready(self) -> None:
+        """校验客户端是否可用于后续模型调用。"""
+        ...
+
+    def recognize_image(
+        self,
+        *,
+        image_bytes: bytes,
+        content_type: str,
+        model_name: str,
+    ) -> dict[str, str]:
+        """识别图片并返回结构化语义结果。"""
+        ...
