@@ -278,6 +278,7 @@ class ConversationChatService:
                 source_anchor=citation.source_anchor,
                 image_assets=[
                     {
+                        "segment_id": getattr(asset, "segment_id", None),
                         "asset_id": getattr(asset, "asset_id", ""),
                         "source_anchor": getattr(asset, "source_anchor", None),
                         "storage_key": getattr(asset, "storage_key", ""),
@@ -358,6 +359,7 @@ class ConversationChatService:
             "sequence": int(getattr(block, "sequence", 0)),
             "image_assets": [
                 {
+                    "segment_id": getattr(asset, "segment_id", None),
                     "asset_id": getattr(asset, "asset_id", ""),
                     "source_anchor": getattr(asset, "source_anchor", None),
                     "storage_key": getattr(asset, "storage_key", ""),

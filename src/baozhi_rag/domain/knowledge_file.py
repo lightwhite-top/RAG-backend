@@ -36,6 +36,7 @@ class KnowledgeFile:
     uploaded_at: datetime
     updated_at: datetime
     raw_sha256: str = ""
+    text_sha256: str = ""
     content_sha256: str = ""
 
     @property

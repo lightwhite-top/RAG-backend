@@ -46,6 +46,8 @@ class ChunkSearchHit:
 
     chunk_id: str
     file_id: str
+    chunk_type: str
+    segment_id: str
     source_filename: str
     storage_key: str
     chunk_index: int

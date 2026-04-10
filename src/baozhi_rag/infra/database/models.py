@@ -448,6 +448,11 @@ class KnowledgeFileModel(Base):
             "content_sha256",
             name="uq_knowledge_files_uploader_content_sha256",
         ),
+        UniqueConstraint(
+            "uploader_user_id",
+            "text_sha256",
+            name="uq_knowledge_files_uploader_text_sha256",
+        ),
         Index(
             "ix_knowledge_files_uploader_filename",
             "uploader_user_id",
@@ -462,6 +467,11 @@ class KnowledgeFileModel(Base):
             "ix_knowledge_files_uploader_content_sha256",
             "uploader_user_id",
             "content_sha256",
+        ),
+        Index(
+            "ix_knowledge_files_uploader_text_sha256",
+            "uploader_user_id",
+            "text_sha256",
         ),
         mysql_table_options("知识文件元数据表"),
     )
@@ -488,6 +498,11 @@ class KnowledgeFileModel(Base):
         String(64),
         nullable=False,
         comment="原始文件SHA256",
+    )
+    text_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="正文稳定SHA256",
     )
     content_sha256: Mapped[str] = mapped_column(
         String(64),
@@ -537,11 +552,11 @@ class KnowledgeFileImageAssetModel(Base):
             "source_anchor",
             name="uq_knowledge_file_image_assets_file_anchor",
         ),
-        Index("ix_knowledge_file_image_assets_chunk_id", "chunk_id"),
+        Index("ix_knowledge_file_image_assets_semantic_chunk_id", "semantic_chunk_id"),
         Index(
-            "ix_knowledge_file_image_assets_file_chunk",
+            "ix_knowledge_file_image_assets_file_segment",
             "file_id",
-            "chunk_index",
+            "segment_id",
         ),
         Index(
             "ix_knowledge_file_image_assets_uploader_normalized_sha256",
@@ -553,8 +568,12 @@ class KnowledgeFileImageAssetModel(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, comment="图片资产ID")
     file_id: Mapped[str] = mapped_column(String(32), nullable=False, comment="所属文件ID")
-    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="所属Chunk ID")
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="所属Chunk序号")
+    segment_id: Mapped[str] = mapped_column(String(64), nullable=False, comment="所属原始片段ID")
+    semantic_chunk_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="对应图片语义Chunk ID",
+    )
     asset_index: Mapped[int] = mapped_column(Integer, nullable=False, comment="Chunk内图片序号")
     uploader_user_id: Mapped[str] = mapped_column(
         String(32),

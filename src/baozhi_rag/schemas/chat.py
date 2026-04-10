@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class ChatImageAssetItem(BaseModel):
     """聊天引用与正文块中的图片资产。"""
 
+    segment_id: str | None = Field(default=None, description="所属原始片段ID")
     asset_id: str = Field(description="图片资产唯一标识")
     source_anchor: str | None = Field(default=None, description="原文锚点")
     storage_key: str = Field(description="原图存储对象键")

@@ -48,6 +48,11 @@ def _empty_image_asset_list() -> list[ChunkImageAsset]:
     return []
 
 
+def _empty_image_asset_ref_list() -> list[ChunkImageAssetRef]:
+    """返回空图片引用列表，避免类型检查器推断为未知列表类型。"""
+    return []
+
+
 class SegmentType(Enum):
     """文档片段类型。"""
 
@@ -55,10 +60,33 @@ class SegmentType(Enum):
     TABLE = "table"
 
 
+class ChunkType(Enum):
+    """检索 chunk 类型。"""
+
+    TEXT = "text"
+    IMAGE_SEMANTIC = "image_semantic"
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkImageAssetRef:
+    """chunk 挂载的图片引用键。"""
+
+    segment_id: str
+    asset_id: str
+
+    def to_search_document(self) -> dict[str, str]:
+        """构造可写入 ES 的图片引用投影。"""
+        return {
+            "segment_id": self.segment_id,
+            "asset_id": self.asset_id,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ChunkImageAsset:
     """切块阶段使用的图片资产结构。"""
 
+    segment_id: str
     asset_id: str
     asset_index: int
     source_anchor: str
@@ -79,6 +107,7 @@ class ChunkImageAsset:
     def to_search_document(self) -> dict[str, object]:
         """构造可写入 ES 的图片资产投影。"""
         return {
+            "segment_id": self.segment_id,
             "asset_id": self.asset_id,
             "source_anchor": self.source_anchor,
             "storage_key": self.storage_key,
@@ -93,6 +122,7 @@ class ChunkImageAsset:
 class DocumentSegment:
     """文档片段，可以是段落或表格。"""
 
+    segment_id: str
     content: str
     segment_type: SegmentType
     heading_context: str
@@ -144,6 +174,10 @@ class DocumentChunk:
     chunk_id: str
     # 文件内的切块顺序号
     chunk_index: int
+    # chunk 类型，区分正文和图片语义。
+    chunk_type: str
+    # 原始解析片段标识，用于图片去重和跨 chunk 归并。
+    segment_id: str
     # 切块后的正文内容
     content: str
     # 切块的字符数
@@ -158,6 +192,8 @@ class DocumentChunk:
     visibility_scope: str = ""
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=_empty_str_list)
+    # 与当前 chunk 关联的图片引用键。
+    image_asset_refs: list[ChunkImageAssetRef] = field(default_factory=_empty_image_asset_ref_list)
     # 与当前 chunk 绑定的图片资产元数据。
     image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
     # 向量化
@@ -172,10 +208,13 @@ class DocumentChunk:
             "storage_key": self.storage_key,
             "uploader_user_id": self.uploader_user_id,
             "visibility_scope": self.visibility_scope,
+            "chunk_type": self.chunk_type,
+            "segment_id": self.segment_id,
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
             "content": self.content,
             "merged_terms": self.merged_terms,
+            "image_asset_refs": [item.to_search_document() for item in self.image_asset_refs],
             "image_assets": [asset.to_search_document() for asset in self.image_assets],
         }
 
@@ -198,7 +237,7 @@ class DocumentChunkService:
             chunk_overlap: 相邻切块之间保留的重叠字符数。
             convert_temp_dir: `.doc` 转 `.docx` 时使用的临时目录。
             doc_convert_timeout_seconds: `soffice` 转换超时时间，单位为秒。
-            term_matcher: 领域词匹配器；未传时使用默认金融保险词典。
+            term_matcher: 领域词匹配器；未传时使用默认领域词典。
 
         返回:
             None。
@@ -309,25 +348,32 @@ class DocumentChunkService:
 
         chunks: list[DocumentChunk] = []
         paragraph_buffer: list[str] = []
+        paragraph_buffer_segment_ids: list[str] = []
 
         for segment in segments:
             if segment.segment_type is SegmentType.PARAGRAPH:
                 if not segment.image_assets:
                     paragraph_buffer.append(segment.content)
+                    paragraph_buffer_segment_ids.append(segment.segment_id)
                     continue
 
                 # 带图片的段落单独切块，避免图片和无关段落被混装到同一个 chunk。
                 if paragraph_buffer:
+                    buffered_segment_id = self._build_buffer_segment_id(
+                        paragraph_buffer_segment_ids
+                    )
                     chunks.extend(
                         self._build_chunks(
                             text="\n\n".join(paragraph_buffer),
                             source_filename=source_filename,
                             storage_key=storage_key,
                             file_id=file_id,
+                            segment_id=buffered_segment_id,
                             start_index=len(chunks),
                         )
                     )
                     paragraph_buffer.clear()
+                    paragraph_buffer_segment_ids.clear()
 
                 chunks.extend(
                     self._build_chunks(
@@ -335,6 +381,7 @@ class DocumentChunkService:
                         source_filename=source_filename,
                         storage_key=storage_key,
                         file_id=file_id,
+                        segment_id=segment.segment_id,
                         start_index=len(chunks),
                         image_assets=segment.image_assets,
                     )
@@ -342,16 +389,19 @@ class DocumentChunkService:
                 continue
 
             if paragraph_buffer:
+                buffered_segment_id = self._build_buffer_segment_id(paragraph_buffer_segment_ids)
                 chunks.extend(
                     self._build_chunks(
                         text="\n\n".join(paragraph_buffer),
                         source_filename=source_filename,
                         storage_key=storage_key,
                         file_id=file_id,
+                        segment_id=buffered_segment_id,
                         start_index=len(chunks),
                     )
                 )
                 paragraph_buffer.clear()
+                paragraph_buffer_segment_ids.clear()
 
             chunks.extend(
                 self._build_table_chunks(
@@ -359,6 +409,7 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    segment_id=segment.segment_id,
                     start_index=len(chunks),
                     heading_context=segment.heading_context,
                     comment_texts=segment.comment_texts,
@@ -367,12 +418,14 @@ class DocumentChunkService:
             )
 
         if paragraph_buffer:
+            buffered_segment_id = self._build_buffer_segment_id(paragraph_buffer_segment_ids)
             chunks.extend(
                 self._build_chunks(
                     text="\n\n".join(paragraph_buffer),
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    segment_id=buffered_segment_id,
                     start_index=len(chunks),
                 )
             )
@@ -551,6 +604,7 @@ class DocumentChunkService:
         headings: list[str],
         comment_texts: list[str],
         image_assets: list[ChunkImageAsset],
+        segment_id: str,
     ) -> tuple[DocumentSegment | None, list[str]]:
         """处理单个段落，返回 DocumentSegment 和更新后的 headings。
 
@@ -572,6 +626,7 @@ class DocumentChunkService:
             updated_headings = headings[: heading_level - 1] + [text]
             content = self._append_comment_block(" / ".join(updated_headings), comment_texts)
             segment = DocumentSegment(
+                segment_id=segment_id,
                 content=content,
                 segment_type=SegmentType.PARAGRAPH,
                 heading_context=" / ".join(updated_headings),
@@ -585,6 +640,7 @@ class DocumentChunkService:
         content = f"{context}\n{text}" if context else text
         content = self._append_comment_block(content, comment_texts)
         segment = DocumentSegment(
+            segment_id=segment_id,
             content=content,
             segment_type=SegmentType.PARAGRAPH,
             heading_context=" / ".join(headings),
@@ -599,6 +655,7 @@ class DocumentChunkService:
         headings: list[str],
         comment_texts: list[str],
         image_assets: list[ChunkImageAsset],
+        segment_id: str,
     ) -> DocumentSegment | None:
         """处理单个表格，转换为 Markdown 格式。
 
@@ -614,6 +671,7 @@ class DocumentChunkService:
             return None
 
         return DocumentSegment(
+            segment_id=segment_id,
             content=markdown,
             segment_type=SegmentType.TABLE,
             heading_context=" / ".join(headings),
@@ -638,6 +696,7 @@ class DocumentChunkService:
         comment_lookup = self._build_comment_lookup(document)
         # 先按顶层 body 元素收集批注锚点，确保后续与 python-docx 的遍历顺序一致。
         for element_index, element in enumerate(body_elements):
+            segment_id = f"seg-{element_index + 1}"
             # 当前元素可能命中多个批注，这里统一去重后再交给段落/表格处理逻辑。
             comment_texts = self._resolve_comment_texts(
                 body_comment_ids.get(element_index, []),
@@ -656,13 +715,20 @@ class DocumentChunkService:
                     headings,
                     comment_texts,
                     image_assets,
+                    segment_id,
                 )
                 if segment:
                     segments.append(segment)
             elif isinstance(element, CT_Tbl):
                 # 处理表格
                 table = Table(element, document)
-                segment = self._process_table(table, headings, comment_texts, image_assets)
+                segment = self._process_table(
+                    table,
+                    headings,
+                    comment_texts,
+                    image_assets,
+                    segment_id,
+                )
                 if segment:
                     segments.append(segment)
 
@@ -755,10 +821,12 @@ class DocumentChunkService:
 
             content_type = str(getattr(related_part, "content_type", "")).strip()
             extension = self._guess_image_extension(content_type)
-            source_anchor = f"body:{element_index}:image:{asset_index}"
+            segment_id = f"seg-{element_index + 1}"
+            source_anchor = f"{segment_id}:image:{asset_index}"
             image_assets.append(
                 ChunkImageAsset(
-                    asset_id=f"preview-{element_index}-{asset_index}",
+                    segment_id=segment_id,
+                    asset_id=f"preview-{segment_id}-{asset_index}",
                     asset_index=asset_index,
                     source_anchor=source_anchor,
                     content_type=content_type,
@@ -983,6 +1051,8 @@ class DocumentChunkService:
         source_filename: str,
         storage_key: str,
         file_id: str,
+        chunk_type: ChunkType,
+        segment_id: str,
         image_assets: list[ChunkImageAsset] | None = None,
     ) -> DocumentChunk:
         """基于统一元数据创建单个 chunk。
@@ -1002,13 +1072,40 @@ class DocumentChunkService:
             file_id=file_id,
             chunk_id=f"{file_id}-chunk-{chunk_index}",
             chunk_index=chunk_index,
+            chunk_type=chunk_type.value,
+            segment_id=segment_id,
             content=content,
             char_count=len(content),
             source_filename=source_filename,
             storage_key=storage_key,
             merged_terms=term_match_result.merged_terms,
+            image_asset_refs=self._build_image_asset_refs(image_assets or []),
             image_assets=list(image_assets or []),
         )
+
+    def _build_image_asset_refs(
+        self,
+        image_assets: list[ChunkImageAsset],
+    ) -> list[ChunkImageAssetRef]:
+        """根据图片资产构造 chunk 引用键列表。"""
+        return [
+            ChunkImageAssetRef(
+                segment_id=asset.segment_id,
+                asset_id=asset.asset_id,
+            )
+            for asset in image_assets
+        ]
+
+    def _build_buffer_segment_id(
+        self,
+        segment_ids: list[str],
+    ) -> str:
+        """为缓冲合并后的纯文本片段构造稳定 segment_id。"""
+        if not segment_ids:
+            return "seg-buffer-empty"
+        if len(segment_ids) == 1:
+            return segment_ids[0]
+        return f"{segment_ids[0]}__{segment_ids[-1]}"
 
     def _build_chunks(
         self,
@@ -1016,6 +1113,7 @@ class DocumentChunkService:
         source_filename: str,
         storage_key: str,
         file_id: str,
+        segment_id: str,
         start_index: int = 0,
         image_assets: list[ChunkImageAsset] | None = None,
     ) -> list[DocumentChunk]:
@@ -1047,7 +1145,6 @@ class DocumentChunkService:
             end = min(start + self._chunk_size, len(normalized_text))
             chunk_content = normalized_text[start:end].strip()
             if chunk_content:
-                chunk_image_assets = image_assets if not chunks else None
                 chunks.append(
                     self._create_chunk(
                         content=chunk_content,
@@ -1055,7 +1152,9 @@ class DocumentChunkService:
                         source_filename=source_filename,
                         storage_key=storage_key,
                         file_id=file_id,
-                        image_assets=chunk_image_assets,
+                        chunk_type=ChunkType.TEXT,
+                        segment_id=segment_id,
+                        image_assets=image_assets,
                     )
                 )
 
@@ -1073,6 +1172,7 @@ class DocumentChunkService:
         source_filename: str,
         storage_key: str,
         file_id: str,
+        segment_id: str,
         start_index: int = 0,
         heading_context: str = "",
         comment_texts: list[str] | None = None,
@@ -1113,6 +1213,8 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    chunk_type=ChunkType.TEXT,
+                    segment_id=segment_id,
                     image_assets=image_assets,
                 )
             ]
@@ -1128,6 +1230,8 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
+                    chunk_type=ChunkType.TEXT,
+                    segment_id=segment_id,
                     image_assets=image_assets,
                 )
             ]
@@ -1144,7 +1248,6 @@ class DocumentChunkService:
 
         chunks: list[DocumentChunk] = []
         for offset, table_part in enumerate(split_tables):
-            chunk_image_assets = image_assets if offset == 0 else None
             chunks.append(
                 self._create_chunk(
                     content=table_part,
@@ -1152,7 +1255,9 @@ class DocumentChunkService:
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
-                    image_assets=chunk_image_assets,
+                    chunk_type=ChunkType.TEXT,
+                    segment_id=segment_id,
+                    image_assets=image_assets,
                 )
             )
 

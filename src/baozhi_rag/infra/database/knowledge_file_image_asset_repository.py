@@ -38,24 +38,27 @@ class SqlAlchemyKnowledgeFileImageAssetRepository:
                 select(KnowledgeFileImageAssetModel)
                 .where(KnowledgeFileImageAssetModel.file_id == file_id)
                 .order_by(
-                    KnowledgeFileImageAssetModel.chunk_index.asc(),
+                    KnowledgeFileImageAssetModel.segment_id.asc(),
                     KnowledgeFileImageAssetModel.asset_index.asc(),
                     KnowledgeFileImageAssetModel.id.asc(),
                 )
             )
             return [self._to_domain(model) for model in session.scalars(stmt).all()]
 
-    def list_assets_by_chunk_ids(self, chunk_ids: list[str]) -> list[KnowledgeFileImageAsset]:
-        """按 chunk ID 列表查询图片资产。"""
-        if not chunk_ids:
+    def list_assets_by_semantic_chunk_ids(
+        self,
+        semantic_chunk_ids: list[str],
+    ) -> list[KnowledgeFileImageAsset]:
+        """按图片语义 chunk ID 列表查询图片资产。"""
+        if not semantic_chunk_ids:
             return []
 
         with self._session_factory() as session:
             stmt = (
                 select(KnowledgeFileImageAssetModel)
-                .where(KnowledgeFileImageAssetModel.chunk_id.in_(chunk_ids))
+                .where(KnowledgeFileImageAssetModel.semantic_chunk_id.in_(semantic_chunk_ids))
                 .order_by(
-                    KnowledgeFileImageAssetModel.chunk_index.asc(),
+                    KnowledgeFileImageAssetModel.segment_id.asc(),
                     KnowledgeFileImageAssetModel.asset_index.asc(),
                     KnowledgeFileImageAssetModel.id.asc(),
                 )
@@ -97,8 +100,8 @@ class SqlAlchemyKnowledgeFileImageAssetRepository:
         return KnowledgeFileImageAssetModel(
             id=asset.id,
             file_id=asset.file_id,
-            chunk_id=asset.chunk_id,
-            chunk_index=asset.chunk_index,
+            segment_id=asset.segment_id,
+            semantic_chunk_id=asset.semantic_chunk_id,
             asset_index=asset.asset_index,
             uploader_user_id=asset.uploader_user_id,
             source_anchor=asset.source_anchor,
@@ -122,8 +125,8 @@ class SqlAlchemyKnowledgeFileImageAssetRepository:
         return KnowledgeFileImageAsset(
             id=model.id,
             file_id=model.file_id,
-            chunk_id=model.chunk_id,
-            chunk_index=model.chunk_index,
+            segment_id=model.segment_id,
+            semantic_chunk_id=model.semantic_chunk_id,
             asset_index=model.asset_index,
             uploader_user_id=model.uploader_user_id,
             source_anchor=model.source_anchor,

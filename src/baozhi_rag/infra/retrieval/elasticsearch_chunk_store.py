@@ -389,11 +389,15 @@ class ElasticsearchChunkStore:
             "uploader_user_id": {"type": "keyword"},
             # 文件可见范围，控制 owner_only/global 检索边界。
             "visibility_scope": {"type": "keyword"},
+            # chunk 类型，区分正文 chunk 与图片语义 chunk。
+            "chunk_type": {"type": "keyword"},
+            # 原始解析片段 ID，用于命中后合并图片与正文关系。
+            "segment_id": {"type": "keyword"},
             # chunk 在原文件中的顺序编号。
             "chunk_index": {"type": "integer"},
             # chunk 字符数，便于前端展示与检索调试。
             "char_count": {"type": "integer"},
-            # chunk 正文，后续若引入图片语义投影也会并入该字段参与检索。
+            # chunk 正文；文本 chunk 存正文，图片语义 chunk 存图片稳定语义文本。
             "content": {
                 "type": "text",
                 "analyzer": "ik_max_word",
@@ -401,10 +405,22 @@ class ElasticsearchChunkStore:
             },
             # 领域词命中结果，服务混合召回加权。
             "merged_terms": {"type": "keyword"},
+            # 文本 chunk 上挂载的图片引用键列表。
+            "image_asset_refs": {
+                "type": "nested",
+                "properties": {
+                    # 图片所属原始片段 ID。
+                    "segment_id": {"type": "keyword"},
+                    # 图片资产唯一标识。
+                    "asset_id": {"type": "keyword"},
+                },
+            },
             # 图片资产投影，供检索命中后补全前端渲染信息。
             "image_assets": {
                 "type": "nested",
                 "properties": {
+                    # 图片所属原始片段 ID。
+                    "segment_id": {"type": "keyword"},
                     # 图片资产唯一标识。
                     "asset_id": {"type": "keyword"},
                     # 图片在原文中的稳定锚点。
@@ -446,10 +462,13 @@ class ElasticsearchChunkStore:
             "storage_key",
             "uploader_user_id",
             "visibility_scope",
+            "chunk_type",
+            "segment_id",
             "chunk_index",
             "char_count",
             "content",
             "merged_terms",
+            "image_asset_refs",
             "image_assets",
         ]
 
@@ -485,6 +504,8 @@ class ElasticsearchChunkStore:
         return ChunkSearchHit(
             chunk_id=str(source.get("chunk_id", "")),
             file_id=str(source.get("file_id", "")),
+            chunk_type=str(source.get("chunk_type", "text")),
+            segment_id=str(source.get("segment_id", "")),
             source_filename=str(source.get("source_filename", "")),
             storage_key=str(source.get("storage_key", "")),
             uploader_user_id=str(source.get("uploader_user_id", "")),
@@ -516,6 +537,7 @@ def _as_image_assets(value: object) -> list[ChunkImageAsset]:
             continue
         image_assets.append(
             ChunkImageAsset(
+                segment_id=str(item.get("segment_id", "")),
                 asset_id=str(item.get("asset_id", "")),
                 asset_index=index,
                 source_anchor=str(item.get("source_anchor", "")),

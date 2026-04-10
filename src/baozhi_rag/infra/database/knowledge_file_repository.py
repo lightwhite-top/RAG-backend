@@ -84,6 +84,20 @@ class SqlAlchemyKnowledgeFileRepository:
             file_model = session.scalar(stmt)
             return self._to_domain(file_model) if file_model is not None else None
 
+    def get_file_by_user_and_text_sha256(
+        self,
+        uploader_user_id: str,
+        text_sha256: str,
+    ) -> KnowledgeFile | None:
+        """按上传者和正文稳定哈希查询文件。"""
+        with self._session_factory() as session:
+            stmt = select(KnowledgeFileModel).where(
+                KnowledgeFileModel.uploader_user_id == uploader_user_id,
+                KnowledgeFileModel.text_sha256 == text_sha256,
+            )
+            file_model = session.scalar(stmt)
+            return self._to_domain(file_model) if file_model is not None else None
+
     def get_files_by_ids(self, file_ids: list[str]) -> list[KnowledgeFile]:
         """批量查询文件元数据。"""
         if not file_ids:
@@ -132,6 +146,7 @@ class SqlAlchemyKnowledgeFileRepository:
         size: int | None = None,
         sha256: str | None = None,
         raw_sha256: str | None = None,
+        text_sha256: str | None = None,
         content_sha256: str | None = None,
         storage_provider: FileStorageProvider | None = None,
         storage_key: str | None = None,
@@ -154,6 +169,8 @@ class SqlAlchemyKnowledgeFileRepository:
             normalized_content_sha256 = content_sha256 or sha256
             if raw_sha256 is not None:
                 file_model.raw_sha256 = raw_sha256
+            if text_sha256 is not None:
+                file_model.text_sha256 = text_sha256
             if normalized_content_sha256 is not None:
                 file_model.content_sha256 = normalized_content_sha256
             if storage_provider is not None:
@@ -218,6 +235,8 @@ class SqlAlchemyKnowledgeFileRepository:
             or "original_filename" in message
         ):
             raise KnowledgeFileConflictError("同一用户的同名文件记录冲突") from exc
+        if "uq_knowledge_files_uploader_text_sha256" in message or "text_sha256" in message:
+            raise KnowledgeFileConflictError("同一用户的同正文文件记录冲突") from exc
         if "uq_knowledge_files_uploader_content_sha256" in message or "content_sha256" in message:
             raise KnowledgeFileConflictError("同一用户的同内容文件记录冲突") from exc
         raise KnowledgeFileConflictError() from exc
@@ -253,6 +272,7 @@ class SqlAlchemyKnowledgeFileRepository:
             content_type=file.content_type,
             size=file.size,
             raw_sha256=file.raw_sha256,
+            text_sha256=file.text_sha256,
             content_sha256=file.content_sha256 or file.sha256,
             storage_provider=file.storage_provider.value,
             storage_key=file.storage_key,
@@ -277,5 +297,6 @@ class SqlAlchemyKnowledgeFileRepository:
             uploaded_at=file_model.uploaded_at,
             updated_at=file_model.updated_at,
             raw_sha256=file_model.raw_sha256,
+            text_sha256=file_model.text_sha256,
             content_sha256=file_model.content_sha256,
         )

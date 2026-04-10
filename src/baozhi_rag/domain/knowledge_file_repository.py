@@ -47,6 +47,14 @@ class KnowledgeFileRepository(Protocol):
         """按上传者和内容哈希查询文件。"""
         ...
 
+    def get_file_by_user_and_text_sha256(
+        self,
+        uploader_user_id: str,
+        text_sha256: str,
+    ) -> KnowledgeFile | None:
+        """按上传者和正文稳定哈希查询文件。"""
+        ...
+
     def get_files_by_ids(self, file_ids: list[str]) -> list[KnowledgeFile]:
         """批量查询文件元数据。"""
         ...
@@ -79,6 +87,7 @@ class KnowledgeFileRepository(Protocol):
         size: int | None = None,
         sha256: str | None = None,
         raw_sha256: str | None = None,
+        text_sha256: str | None = None,
         content_sha256: str | None = None,
         storage_provider: FileStorageProvider | None = None,
         storage_key: str | None = None,

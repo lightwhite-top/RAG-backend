@@ -12,8 +12,8 @@ class KnowledgeFileImageAsset:
 
     id: str
     file_id: str
-    chunk_id: str
-    chunk_index: int
+    segment_id: str
+    semantic_chunk_id: str
     asset_index: int
     uploader_user_id: str
     source_anchor: str

@@ -21,6 +21,7 @@ class DocumentImageUnderstandingResult:
     width: int | None
     height: int | None
     ocr_text: str
+    normalized_ocr_text: str
     summary: str
     image_type: str
     content_type: str
@@ -55,13 +56,15 @@ class DocumentImageUnderstandingService:
             content_type=self._NORMALIZED_CONTENT_TYPE,
             model_name=self._model_name,
         )
+        ocr_text = self._normalize_ocr_text(recognition_result.get("ocr_text", ""))
         return DocumentImageUnderstandingResult(
             image_sha256=hashlib.sha256(image_bytes).hexdigest(),
             normalized_image_sha256=hashlib.sha256(normalized_image_bytes).hexdigest(),
             normalized_image_bytes=normalized_image_bytes,
             width=width,
             height=height,
-            ocr_text=recognition_result.get("ocr_text", "").strip(),
+            ocr_text=ocr_text,
+            normalized_ocr_text=ocr_text,
             summary=recognition_result.get("summary", "").strip(),
             image_type=recognition_result.get("image_type", "unknown").strip() or "unknown",
             content_type=content_type.strip() or self._NORMALIZED_CONTENT_TYPE,
@@ -83,3 +86,11 @@ class DocumentImageUnderstandingService:
             output_buffer = BytesIO()
             normalized_image.save(output_buffer, format=self._NORMALIZED_IMAGE_FORMAT)
             return output_buffer.getvalue(), width, height
+
+    def _normalize_ocr_text(self, raw_text: str) -> str:
+        """把 OCR 文本规整为稳定的单行文本，降低空白差异对哈希的影响。"""
+        return " / ".join(
+            normalized_line
+            for normalized_line in (" ".join(part.split()) for part in raw_text.splitlines())
+            if normalized_line
+        )

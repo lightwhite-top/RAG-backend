@@ -69,6 +69,8 @@ class MilvusChunkVectorStore:
     _FILE_ID_FIELD_NAME = "file_id"
     _UPLOADER_USER_ID_FIELD_NAME = "uploader_user_id"
     _VISIBILITY_SCOPE_FIELD_NAME = "visibility_scope"
+    _CHUNK_TYPE_FIELD_NAME = "chunk_type"
+    _SEGMENT_ID_FIELD_NAME = "segment_id"
     _VECTOR_FIELD_NAME = "content_embedding"
     _VECTOR_INDEX_NAME = "content_embedding_idx"
     _VECTOR_INDEX_TYPE = "AUTOINDEX"
@@ -181,7 +183,11 @@ class MilvusChunkVectorStore:
             "data": [query_embedding],
             "limit": size,
             "anns_field": self._VECTOR_FIELD_NAME,
-            "output_fields": [self._FILE_ID_FIELD_NAME],
+            "output_fields": [
+                self._FILE_ID_FIELD_NAME,
+                self._CHUNK_TYPE_FIELD_NAME,
+                self._SEGMENT_ID_FIELD_NAME,
+            ],
             "search_params": {"metric_type": "COSINE", "params": {}},
         }
         if viewer_user_id:
@@ -243,7 +249,19 @@ class MilvusChunkVectorStore:
             datatype=milvus_data_type.VARCHAR,
             max_length=32,
         )
-        # chunk 正文对应的向量表示，后续图片语义也是通过正文融合进入该向量。
+        # chunk 类型，区分正文 chunk 和图片语义 chunk。
+        schema.add_field(
+            field_name=self._CHUNK_TYPE_FIELD_NAME,
+            datatype=milvus_data_type.VARCHAR,
+            max_length=32,
+        )
+        # 原始解析片段 ID，用于命中后关联图片与正文。
+        schema.add_field(
+            field_name=self._SEGMENT_ID_FIELD_NAME,
+            datatype=milvus_data_type.VARCHAR,
+            max_length=64,
+        )
+        # chunk 正文对应的向量表示；文本 chunk 与图片语义 chunk 共用该向量字段。
         schema.add_field(
             field_name=self._VECTOR_FIELD_NAME,
             datatype=milvus_data_type.FLOAT_VECTOR,
@@ -294,6 +312,8 @@ class MilvusChunkVectorStore:
             self._FILE_ID_FIELD_NAME: chunk.file_id,
             self._UPLOADER_USER_ID_FIELD_NAME: chunk.uploader_user_id,
             self._VISIBILITY_SCOPE_FIELD_NAME: chunk.visibility_scope,
+            self._CHUNK_TYPE_FIELD_NAME: chunk.chunk_type,
+            self._SEGMENT_ID_FIELD_NAME: chunk.segment_id,
             self._VECTOR_FIELD_NAME: chunk.content_embedding,
         }
 

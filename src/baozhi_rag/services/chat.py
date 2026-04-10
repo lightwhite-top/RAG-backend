@@ -14,6 +14,7 @@ from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchHit
 from baozhi_rag.services.document_chunking import ChunkImageAsset
 from baozhi_rag.services.llm import ChatMessage, ChatModelClient
+from baozhi_rag.services.rerank import ChunkRerankService, ImageRerankService
 
 
 def _empty_image_asset_list() -> list[ChunkImageAsset]:
@@ -35,6 +36,8 @@ class ChatCitation:
 
     chunk_id: str
     file_id: str
+    chunk_type: str
+    segment_id: str
     source_filename: str
     storage_key: str
     chunk_index: int
@@ -120,7 +123,7 @@ class ChatService:
     _MAX_SNIPPET_CHARS = 180
     _FALLBACK_ANSWER = (
         "当前知识库中未检索到足以支撑结论的材料，暂时不能直接给出确定答复。"
-        "建议补充问题细节、上传相关条款，或转人工进一步核实。"
+        "建议补充问题细节、上传相关文档，或转人工进一步核实。"
     )
 
     def __init__(
@@ -128,13 +131,15 @@ class ChatService:
         chat_client: ChatModelClient,
         chunk_search_service: ChatChunkSearcher,
         system_prompt: str,
+        chunk_rerank_service: ChunkRerankService | None = None,
+        image_rerank_service: ImageRerankService | None = None,
     ) -> None:
         """初始化聊天服务。
 
         参数:
             chat_client: 负责调用底层聊天模型的客户端。
             chunk_search_service: 负责执行检索增强的 chunk 检索服务。
-            system_prompt: 传给模型的基础系统提示词，用于约束金融保险场景回答。
+            system_prompt: 传给模型的基础系统提示词，用于约束高风险知识问答场景回答。
 
         返回:
             None。
@@ -142,6 +147,8 @@ class ChatService:
         self._chat_client = chat_client
         self._chunk_search_service = chunk_search_service
         self._system_prompt = system_prompt
+        self._chunk_rerank_service = chunk_rerank_service
+        self._image_rerank_service = image_rerank_service
 
     def complete(
         self,
@@ -180,6 +187,8 @@ class ChatService:
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
+            original_query=completion.original_query,
+            retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
         )
 
@@ -252,6 +261,12 @@ class ChatService:
                     start_sequence=emitted_block_count + 1,
                 )
                 content_blocks = self._inject_image_blocks(block_candidates, completion.citations)
+                content_blocks = self._rerank_block_images(
+                    blocks=content_blocks,
+                    citations=completion.citations,
+                    original_query=completion.original_query,
+                    retrieval_query=completion.retrieval_query,
+                )
                 for block in content_blocks:
                     emitted_block_count += 1
                     yield ChatStreamEvent(
@@ -271,6 +286,8 @@ class ChatService:
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
+            original_query=completion.original_query,
+            retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
         )
         for block in content_blocks[emitted_block_count:]:
@@ -319,6 +336,11 @@ class ChatService:
             retrieval_size,
             viewer_user_id=viewer_user_id,
         )
+        if self._chunk_rerank_service is not None:
+            hits = self._chunk_rerank_service.rerank(
+                query_text=retrieval_query,
+                hits=hits,
+            )
         citations = [
             self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
         ]
@@ -421,11 +443,11 @@ class ChatService:
                 (
                     "你仍然需要回答，但必须遵守以下约束："
                     "对问候、身份说明、能力介绍、通用概念解释，可以直接给出简洁中文回答；"
-                    "对涉及具体产品条款、保障责任、免责、理赔、承保、金额计算等高风险问题，"
-                    "不得伪造依据或给出确定性承诺。"
+                    "对涉及具体规则、权限、金额计算、合规要求或业务结论等高风险问题，"
+                    "不得伪造依据或给出超出证据的确定性承诺。"
                 ),
                 (
-                    "如果当前问题需要保单条款、业务系统记录或知识库材料支撑，"
+                    "如果当前问题需要系统记录、业务规则或知识库材料支撑，"
                     "必须明确说明“当前没有检索到可支撑结论的知识库材料”，"
                     "只能提供一般性说明，并建议补充材料或转人工核实。"
                 ),
@@ -439,6 +461,8 @@ class ChatService:
             citation_id=f"cit-{index}",
             chunk_id=hit.chunk_id,
             file_id=hit.file_id,
+            chunk_type=hit.chunk_type,
+            segment_id=hit.segment_id,
             source_filename=hit.source_filename,
             storage_key=hit.storage_key,
             chunk_index=hit.chunk_index,
@@ -460,6 +484,8 @@ class ChatService:
             "id": citation.citation_id,
             "chunk_id": citation.chunk_id,
             "file_id": citation.file_id,
+            "chunk_type": citation.chunk_type,
+            "segment_id": citation.segment_id,
             "source_filename": citation.source_filename,
             "storage_key": citation.storage_key,
             "chunk_index": citation.chunk_index,
@@ -489,6 +515,7 @@ class ChatService:
     def _serialize_image_asset(self, asset: ChunkImageAsset) -> dict[str, object]:
         """把图片资产转换为可序列化结构。"""
         return {
+            "segment_id": asset.segment_id,
             "asset_id": asset.asset_id,
             "source_anchor": asset.source_anchor,
             "storage_key": asset.storage_key,
@@ -500,7 +527,7 @@ class ChatService:
 
     def _truncate_content(self, content: str) -> str:
         """限制单条证据进入提示词的长度，避免上下文失控。"""
-        # 证据要尽量保持原意，但也要控制 token，避免少量长条款挤掉其他召回结果。
+        # 证据要尽量保持原意，但也要控制 token，避免少量长文档片段挤掉其他召回结果。
         normalized = " ".join(content.split())
         if len(normalized) <= self._MAX_CONTEXT_CHARS:
             return normalized
@@ -518,6 +545,8 @@ class ChatService:
         answer: str,
         citations: list[ChatCitation],
         *,
+        original_query: str,
+        retrieval_query: str,
         finish_reason: str,
     ) -> tuple[str, list[ChatContentBlock]]:
         """把模型回答解析为可渲染正文块，并完成引用编号校验。"""
@@ -591,6 +620,12 @@ class ChatService:
             parsed_blocks = self._inject_image_blocks(parsed_blocks, citations)
         else:
             parsed_blocks = self._inject_image_blocks(parsed_blocks, citations)
+        parsed_blocks = self._rerank_block_images(
+            blocks=parsed_blocks,
+            citations=citations,
+            original_query=original_query,
+            retrieval_query=retrieval_query,
+        )
 
         plain_text = "\n\n".join(
             block.text for block in parsed_blocks if block.block_type != "image_gallery"
@@ -717,13 +752,65 @@ class ChatService:
             if citation.citation_id not in citation_ids:
                 continue
             for image_asset in citation.image_assets:
-                unique_key = image_asset.asset_id or image_asset.source_anchor
+                unique_key = (
+                    f"{image_asset.segment_id}::{image_asset.asset_id}"
+                    if image_asset.segment_id
+                    else image_asset.asset_id or image_asset.source_anchor
+                )
                 if unique_key in seen_asset_ids:
                     continue
                 seen_asset_ids.add(unique_key)
                 image_assets.append(image_asset)
 
         return image_assets
+
+    def _rerank_block_images(
+        self,
+        *,
+        blocks: list[ChatContentBlock],
+        citations: list[ChatCitation],
+        original_query: str,
+        retrieval_query: str,
+    ) -> list[ChatContentBlock]:
+        """按当前正文块上下文对图片块做二次排序。"""
+        if self._image_rerank_service is None:
+            return blocks
+
+        markdown_blocks_by_id = {
+            block.block_id: block for block in blocks if block.block_type == "markdown"
+        }
+        reranked_blocks: list[ChatContentBlock] = []
+
+        for block in blocks:
+            if block.block_type != "image_gallery":
+                reranked_blocks.append(block)
+                continue
+
+            owner_block = markdown_blocks_by_id.get(block.block_id.removesuffix("-imgs"))
+            context_sections = [
+                citation.snippet or citation.content
+                for citation in citations
+                if citation.citation_id in block.citation_ids
+            ]
+            reranked_assets = self._image_rerank_service.rerank(
+                user_query=original_query,
+                retrieval_query=retrieval_query,
+                block_text=owner_block.text if owner_block is not None else "",
+                context_sections=context_sections,
+                image_assets=list(block.image_assets),
+            )
+            reranked_blocks.append(
+                ChatContentBlock(
+                    block_id=block.block_id,
+                    block_type=block.block_type,
+                    text=block.text,
+                    citation_ids=list(block.citation_ids),
+                    sequence=block.sequence,
+                    image_assets=reranked_assets,
+                )
+            )
+
+        return reranked_blocks
 
     def _extract_completed_stream_blocks(self, buffer: str) -> tuple[list[str], str]:
         """从流式缓冲区中提取已闭合的正文块。"""

@@ -39,6 +39,8 @@ from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchStore
 from baozhi_rag.services.document_chunking import (
     ChunkImageAsset,
+    ChunkImageAssetRef,
+    ChunkType,
     DocumentChunk,
     DocumentChunkService,
 )
@@ -347,8 +349,12 @@ class KnowledgeUploadProcessor:
                 storage_key=task.source_storage_key,
                 file_id=task.id,
             )
-            content_sha256 = self._build_content_sha256(preview_chunks)
-            prepared_chunk_image_assets = self._prepare_chunk_image_assets(preview_chunks)
+            prepared_segment_image_assets = self._prepare_segment_image_assets(preview_chunks)
+            text_sha256 = self._build_text_sha256(preview_chunks)
+            content_sha256 = self._build_content_sha256(
+                preview_chunks,
+                prepared_segment_image_assets,
+            )
             task = self._task_repository.get_task_by_id(task.id) or task
             self._task_repository.update_task_progress(
                 task.id,
@@ -359,9 +365,10 @@ class KnowledgeUploadProcessor:
             process_result = self._resolve_task_result(
                 task=task,
                 worker_id=worker_id,
+                text_sha256=text_sha256,
                 content_sha256=content_sha256,
                 preview_chunks=preview_chunks,
-                prepared_chunk_image_assets=prepared_chunk_image_assets,
+                prepared_segment_image_assets=prepared_segment_image_assets,
                 local_file_path=local_file_path,
             )
             self._task_repository.mark_succeeded(
@@ -415,12 +422,13 @@ class KnowledgeUploadProcessor:
         *,
         task: KnowledgeUploadTask,
         worker_id: str,
+        text_sha256: str,
         content_sha256: str,
         preview_chunks: list[DocumentChunk],
-        prepared_chunk_image_assets: dict[int, list[PreparedChunkImageAsset]],
+        prepared_segment_image_assets: dict[str, list[PreparedChunkImageAsset]],
         local_file_path: Path,
     ) -> UploadTaskProcessResult:
-        """根据内容哈希与现有文件状态决定最终处理结果。"""
+        """根据正文哈希、图片稳定语义和文件名综合决定最终处理结果。"""
         latest_task = self._task_repository.get_task_by_id(task.id) or task
         requested_filename = latest_task.requested_filename
         existing_same_name = self._knowledge_file_repository.get_file_by_user_and_filename(
@@ -431,8 +439,9 @@ class KnowledgeUploadProcessor:
             latest_task.uploader_user_id,
             content_sha256,
         )
-        preview_image_signature = self._build_image_signature_from_prepared_assets(
-            prepared_chunk_image_assets
+        existing_same_text = self._knowledge_file_repository.get_file_by_user_and_text_sha256(
+            latest_task.uploader_user_id,
+            text_sha256,
         )
         existing_same_name_assets = (
             self._knowledge_file_image_asset_repository.list_assets_by_file_id(
@@ -441,27 +450,8 @@ class KnowledgeUploadProcessor:
             if existing_same_name is not None
             else []
         )
-        existing_same_name_image_signature = self._build_image_signature_from_persisted_assets(
-            existing_same_name_assets
-        )
-        existing_same_content_assets = (
-            self._knowledge_file_image_asset_repository.list_assets_by_file_id(
-                existing_same_content.id
-            )
-            if existing_same_content is not None
-            else []
-        )
-        existing_same_content_image_signature = self._build_image_signature_from_persisted_assets(
-            existing_same_content_assets
-        )
-        alias_cleanup_file: KnowledgeFile | None = None
-        alias_cleanup_assets: list[KnowledgeFileImageAsset] = []
 
-        if (
-            existing_same_name is not None
-            and existing_same_name.content_sha256 == content_sha256
-            and preview_image_signature == existing_same_name_image_signature
-        ):
+        if existing_same_name is not None and existing_same_name.content_sha256 == content_sha256:
             return UploadTaskProcessResult(
                 file_id=existing_same_name.id,
                 content_sha256=content_sha256,
@@ -473,73 +463,60 @@ class KnowledgeUploadProcessor:
                 cleanup_storage_keys=[],
             )
 
-        if existing_same_content is not None and (
-            existing_same_name is None or existing_same_name.id == existing_same_content.id
-        ):
-            if preview_image_signature != existing_same_content_image_signature:
-                existing_same_name = existing_same_content
-            else:
-                title_updated = existing_same_content.original_filename != requested_filename
-                if title_updated:
-                    updated_file = self._knowledge_file_repository.update_file(
-                        existing_same_content.id,
-                        original_filename=requested_filename,
-                    )
-                    existing_same_content = updated_file or existing_same_content
-                return UploadTaskProcessResult(
-                    file_id=existing_same_content.id,
-                    content_sha256=content_sha256,
-                    chunk_count=existing_same_content.chunk_count,
-                    deduplicated=True,
-                    replaced=False,
-                    title_updated=title_updated,
-                    cleanup_file_ids=[],
-                    cleanup_storage_keys=[],
-                )
-
-        if (
-            existing_same_name is not None
-            and existing_same_content is not None
-            and existing_same_name.id != existing_same_content.id
-        ):
-            if preview_image_signature == existing_same_content_image_signature:
+        if existing_same_content is not None:
+            title_updated = existing_same_content.original_filename != requested_filename
+            cleanup_file_ids: list[str] = []
+            cleanup_storage_keys: list[str] = []
+            if existing_same_name is not None and existing_same_name.id != existing_same_content.id:
                 self._knowledge_file_repository.delete_file(existing_same_name.id)
                 self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
                     existing_same_name.id
                 )
+                cleanup_file_ids.append(existing_same_name.id)
+                cleanup_storage_keys.extend(
+                    [
+                        existing_same_name.storage_key,
+                        *self._collect_asset_storage_keys(existing_same_name_assets),
+                    ]
+                )
+                title_updated = True
+            if title_updated:
                 updated_file = self._knowledge_file_repository.update_file(
                     existing_same_content.id,
                     original_filename=requested_filename,
                 )
-                resolved_file = updated_file or existing_same_content
-                return UploadTaskProcessResult(
-                    file_id=resolved_file.id,
-                    content_sha256=content_sha256,
-                    chunk_count=resolved_file.chunk_count,
-                    deduplicated=True,
-                    replaced=False,
-                    title_updated=True,
-                    cleanup_file_ids=[existing_same_name.id],
-                    cleanup_storage_keys=[
-                        existing_same_name.storage_key,
-                        *self._collect_asset_storage_keys(existing_same_name_assets),
-                    ],
-                )
+                existing_same_content = updated_file or existing_same_content
+            return UploadTaskProcessResult(
+                file_id=existing_same_content.id,
+                content_sha256=content_sha256,
+                chunk_count=existing_same_content.chunk_count,
+                deduplicated=True,
+                replaced=False,
+                title_updated=title_updated,
+                cleanup_file_ids=cleanup_file_ids,
+                cleanup_storage_keys=cleanup_storage_keys,
+            )
 
-            alias_cleanup_file = existing_same_name
-            alias_cleanup_assets = existing_same_name_assets
-            existing_same_name = existing_same_content
-            existing_same_name_assets = existing_same_content_assets
+        replacement_target = existing_same_name
+        replacement_target_assets = existing_same_name_assets
+        if replacement_target is None and existing_same_text is not None:
+            replacement_target = existing_same_text
+            replacement_target_assets = (
+                self._knowledge_file_image_asset_repository.list_assets_by_file_id(
+                    existing_same_text.id
+                )
+            )
 
         candidate_file = self._build_knowledge_file(
             task=latest_task,
             original_filename=requested_filename,
+            text_sha256=text_sha256,
             content_sha256=content_sha256,
         )
         uploaded_final_object = False
         indexed = False
         uploaded_image_storage_keys: list[str] = []
-        persisted_assets_by_chunk: dict[int, list[KnowledgeFileImageAsset]] = {}
+        persisted_assets_by_segment: dict[str, list[KnowledgeFileImageAsset]] = {}
         try:
             # 原始上传文件直接在本地源目录完成解析，OSS 只承接最终知识文件对象，
             # 这样既避免“先上传再回下载”的带宽往返，也能保持检索与审计对象键稳定。
@@ -548,14 +525,15 @@ class KnowledgeUploadProcessor:
                 storage_key=candidate_file.storage_key,
             )
             uploaded_final_object = True
-            persisted_assets_by_chunk, uploaded_image_storage_keys = self._persist_image_assets(
+            persisted_assets_by_segment, uploaded_image_storage_keys = self._persist_image_assets(
                 knowledge_file=candidate_file,
-                prepared_assets_by_chunk=prepared_chunk_image_assets,
+                preview_chunks=preview_chunks,
+                prepared_assets_by_segment=prepared_segment_image_assets,
             )
             chunks = self._materialize_chunks(
                 preview_chunks=preview_chunks,
                 knowledge_file=candidate_file,
-                persisted_assets_by_chunk=persisted_assets_by_chunk,
+                persisted_assets_by_segment=persisted_assets_by_segment,
             )
             self._task_repository.update_task_progress(
                 latest_task.id,
@@ -568,19 +546,14 @@ class KnowledgeUploadProcessor:
             self._chunk_store.ensure_index()
             self._chunk_store.index_chunks(chunks)
             indexed = True
-            if existing_same_name is not None:
+            if replacement_target is not None:
                 persisted_file = self._knowledge_file_repository.replace_file(
-                    existing_same_name.id,
+                    replacement_target.id,
                     replace(candidate_file, chunk_count=len(chunks)),
                 )
                 self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
-                    existing_same_name.id
+                    replacement_target.id
                 )
-                if alias_cleanup_file is not None:
-                    self._knowledge_file_repository.delete_file(alias_cleanup_file.id)
-                    self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
-                        alias_cleanup_file.id
-                    )
                 return UploadTaskProcessResult(
                     file_id=persisted_file.id,
                     content_sha256=content_sha256,
@@ -588,19 +561,10 @@ class KnowledgeUploadProcessor:
                     deduplicated=False,
                     replaced=True,
                     title_updated=False,
-                    cleanup_file_ids=[
-                        existing_same_name.id,
-                        *([alias_cleanup_file.id] if alias_cleanup_file is not None else []),
-                    ],
+                    cleanup_file_ids=[replacement_target.id],
                     cleanup_storage_keys=[
-                        existing_same_name.storage_key,
-                        *self._collect_asset_storage_keys(existing_same_name_assets),
-                        *(
-                            [alias_cleanup_file.storage_key]
-                            if alias_cleanup_file is not None
-                            else []
-                        ),
-                        *self._collect_asset_storage_keys(alias_cleanup_assets),
+                        replacement_target.storage_key,
+                        *self._collect_asset_storage_keys(replacement_target_assets),
                     ],
                 )
 
@@ -634,8 +598,8 @@ class KnowledgeUploadProcessor:
             return self._resolve_conflict_after_index(
                 latest_task=latest_task,
                 requested_filename=requested_filename,
+                text_sha256=text_sha256,
                 content_sha256=content_sha256,
-                preview_image_signature=preview_image_signature,
             )
         except Exception:
             if indexed:
@@ -658,8 +622,8 @@ class KnowledgeUploadProcessor:
         *,
         latest_task: KnowledgeUploadTask,
         requested_filename: str,
+        text_sha256: str,
         content_sha256: str,
-        preview_image_signature: str,
     ) -> UploadTaskProcessResult:
         """在数据库唯一键冲突后回读现状，收敛为最终任务结果。"""
         existing_same_name = self._knowledge_file_repository.get_file_by_user_and_filename(
@@ -670,6 +634,10 @@ class KnowledgeUploadProcessor:
             latest_task.uploader_user_id,
             content_sha256,
         )
+        existing_same_text = self._knowledge_file_repository.get_file_by_user_and_text_sha256(
+            latest_task.uploader_user_id,
+            text_sha256,
+        )
         existing_same_name_assets = (
             self._knowledge_file_image_asset_repository.list_assets_by_file_id(
                 existing_same_name.id
@@ -677,25 +645,8 @@ class KnowledgeUploadProcessor:
             if existing_same_name is not None
             else []
         )
-        existing_same_name_image_signature = self._build_image_signature_from_persisted_assets(
-            existing_same_name_assets
-        )
-        existing_same_content_assets = (
-            self._knowledge_file_image_asset_repository.list_assets_by_file_id(
-                existing_same_content.id
-            )
-            if existing_same_content is not None
-            else []
-        )
-        existing_same_content_image_signature = self._build_image_signature_from_persisted_assets(
-            existing_same_content_assets
-        )
 
-        if (
-            existing_same_name is not None
-            and existing_same_name.content_sha256 == content_sha256
-            and preview_image_signature == existing_same_name_image_signature
-        ):
+        if existing_same_name is not None and existing_same_name.content_sha256 == content_sha256:
             return UploadTaskProcessResult(
                 file_id=existing_same_name.id,
                 content_sha256=content_sha256,
@@ -708,17 +659,6 @@ class KnowledgeUploadProcessor:
             )
 
         if existing_same_content is not None:
-            if preview_image_signature != existing_same_content_image_signature:
-                return UploadTaskProcessResult(
-                    file_id=existing_same_content.id,
-                    content_sha256=content_sha256,
-                    chunk_count=existing_same_content.chunk_count,
-                    deduplicated=False,
-                    replaced=True,
-                    title_updated=False,
-                    cleanup_file_ids=[],
-                    cleanup_storage_keys=[],
-                )
             title_updated = existing_same_content.original_filename != requested_filename
             if title_updated:
                 updated_file = self._knowledge_file_repository.update_file(
@@ -729,6 +669,9 @@ class KnowledgeUploadProcessor:
             cleanup_file_ids: list[str] = []
             if existing_same_name is not None and existing_same_name.id != existing_same_content.id:
                 self._knowledge_file_repository.delete_file(existing_same_name.id)
+                self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
+                    existing_same_name.id
+                )
                 cleanup_file_ids.append(existing_same_name.id)
             return UploadTaskProcessResult(
                 file_id=existing_same_content.id,
@@ -738,37 +681,90 @@ class KnowledgeUploadProcessor:
                 replaced=False,
                 title_updated=title_updated,
                 cleanup_file_ids=cleanup_file_ids,
-                cleanup_storage_keys=[existing_same_name.storage_key]
-                if cleanup_file_ids and existing_same_name is not None
-                else [],
+                cleanup_storage_keys=(
+                    [
+                        existing_same_name.storage_key,
+                        *self._collect_asset_storage_keys(existing_same_name_assets),
+                    ]
+                    if existing_same_name is not None
+                    and existing_same_name.id != existing_same_content.id
+                    else []
+                ),
+            )
+
+        if existing_same_text is not None:
+            return UploadTaskProcessResult(
+                file_id=existing_same_text.id,
+                content_sha256=content_sha256,
+                chunk_count=existing_same_text.chunk_count,
+                deduplicated=False,
+                replaced=True,
+                title_updated=False,
+                cleanup_file_ids=[],
+                cleanup_storage_keys=[],
             )
 
         raise KnowledgeFileConflictError("上传任务收敛失败，请稍后重试")
 
-    def _build_content_sha256(self, preview_chunks: list[DocumentChunk]) -> str:
-        """基于解析后的文档内容计算稳定哈希。"""
+    def _build_text_sha256(
+        self,
+        preview_chunks: list[DocumentChunk],
+    ) -> str:
+        """基于正文 chunk 计算稳定文本哈希。"""
         payload = [
             {
                 "chunk_index": chunk.chunk_index,
-                "char_count": chunk.char_count,
+                "segment_id": chunk.segment_id,
                 "content": chunk.content,
-                "merged_terms": chunk.merged_terms,
             }
             for chunk in preview_chunks
         ]
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-    def _prepare_chunk_image_assets(
+    def _build_content_sha256(
         self,
         preview_chunks: list[DocumentChunk],
-    ) -> dict[int, list[PreparedChunkImageAsset]]:
-        """对预览 chunk 中的图片执行规范化和识别。"""
-        prepared_assets_by_chunk: dict[int, list[PreparedChunkImageAsset]] = {}
+        prepared_assets_by_segment: dict[str, list[PreparedChunkImageAsset]],
+    ) -> str:
+        """基于正文与图片稳定语义构造文件级哈希。"""
+        payload = {
+            "text_chunks": [
+                {
+                    "chunk_index": chunk.chunk_index,
+                    "segment_id": chunk.segment_id,
+                    "content": chunk.content,
+                }
+                for chunk in preview_chunks
+            ],
+            "images": [
+                {
+                    "segment_id": segment_id,
+                    "asset_index": prepared_asset.preview_asset.asset_index,
+                    "source_anchor": prepared_asset.preview_asset.source_anchor,
+                    "normalized_image_sha256": prepared_asset.analysis.normalized_image_sha256,
+                    "image_type": prepared_asset.analysis.image_type,
+                    "normalized_ocr_text": prepared_asset.analysis.normalized_ocr_text,
+                }
+                for segment_id, segment_assets in sorted(prepared_assets_by_segment.items())
+                for prepared_asset in sorted(
+                    segment_assets,
+                    key=lambda item: item.preview_asset.asset_index,
+                )
+            ],
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _prepare_segment_image_assets(
+        self,
+        preview_chunks: list[DocumentChunk],
+    ) -> dict[str, list[PreparedChunkImageAsset]]:
+        """按 segment_id 收集图片并完成规范化识别。"""
+        prepared_assets_by_segment: dict[str, list[PreparedChunkImageAsset]] = {}
         seen_source_anchors: set[str] = set()
 
         for chunk in preview_chunks:
-            prepared_assets: list[PreparedChunkImageAsset] = []
             for asset in chunk.image_assets:
                 if asset.image_bytes is None or asset.source_anchor in seen_source_anchors:
                     continue
@@ -776,54 +772,15 @@ class KnowledgeUploadProcessor:
                     image_bytes=asset.image_bytes,
                     content_type=asset.content_type,
                 )
-                prepared_assets.append(
+                prepared_assets_by_segment.setdefault(asset.segment_id, []).append(
                     PreparedChunkImageAsset(
                         preview_asset=asset,
                         analysis=analysis,
                     )
                 )
                 seen_source_anchors.add(asset.source_anchor)
-            if prepared_assets:
-                prepared_assets_by_chunk[chunk.chunk_index] = prepared_assets
 
-        return prepared_assets_by_chunk
-
-    def _build_image_signature_from_prepared_assets(
-        self,
-        prepared_assets_by_chunk: dict[int, list[PreparedChunkImageAsset]],
-    ) -> str:
-        """基于预处理图片资产生成稳定签名。"""
-        payload = [
-            {
-                "chunk_index": chunk_index,
-                "source_anchor": asset.preview_asset.source_anchor,
-                "normalized_image_sha256": asset.analysis.normalized_image_sha256,
-                "ocr_text": asset.analysis.ocr_text,
-                "summary": asset.analysis.summary,
-            }
-            for chunk_index, chunk_assets in sorted(prepared_assets_by_chunk.items())
-            for asset in chunk_assets
-        ]
-        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    def _build_image_signature_from_persisted_assets(
-        self,
-        persisted_assets: list[KnowledgeFileImageAsset],
-    ) -> str:
-        """基于已落库图片资产生成稳定签名。"""
-        payload = [
-            {
-                "chunk_index": asset.chunk_index,
-                "source_anchor": asset.source_anchor,
-                "normalized_image_sha256": asset.normalized_image_sha256,
-                "ocr_text": asset.ocr_text,
-                "summary": asset.summary,
-            }
-            for asset in persisted_assets
-        ]
-        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return prepared_assets_by_segment
 
     def _collect_asset_storage_keys(
         self,
@@ -843,10 +800,10 @@ class KnowledgeUploadProcessor:
         *,
         preview_chunks: list[DocumentChunk],
         knowledge_file: KnowledgeFile,
-        persisted_assets_by_chunk: dict[int, list[KnowledgeFileImageAsset]],
+        persisted_assets_by_segment: dict[str, list[KnowledgeFileImageAsset]],
     ) -> list[DocumentChunk]:
-        """把预览 chunk 转换为最终入库 chunk。"""
-        scoped_chunks = [
+        """把预览文本 chunk 和图片语义 chunk 一起物化为最终入库结果。"""
+        text_chunks = [
             replace(
                 chunk,
                 file_id=knowledge_file.id,
@@ -855,39 +812,20 @@ class KnowledgeUploadProcessor:
                 storage_key=knowledge_file.storage_key,
                 uploader_user_id=knowledge_file.uploader_user_id,
                 visibility_scope=knowledge_file.visibility_scope.value,
-                content=self._append_image_semantic_text(
-                    chunk.content,
-                    persisted_assets_by_chunk.get(chunk.chunk_index, []),
+                image_asset_refs=self._build_materialized_image_asset_refs(
+                    persisted_assets_by_segment.get(chunk.segment_id, []),
                 ),
                 image_assets=self._build_materialized_chunk_image_assets(
-                    persisted_assets_by_chunk.get(chunk.chunk_index, []),
+                    persisted_assets_by_segment.get(chunk.segment_id, []),
                 ),
             )
             for chunk in preview_chunks
         ]
-        return self._chunk_embedding_service.embed_chunks(scoped_chunks)
-
-    def _append_image_semantic_text(
-        self,
-        content: str,
-        assets: list[KnowledgeFileImageAsset],
-    ) -> str:
-        """把图片语义补充到 chunk 正文末尾，用于检索和向量化。"""
-        if not assets:
-            return content
-
-        semantic_lines = [
-            line
-            for asset in assets
-            for line in (
-                asset.summary.strip(),
-                asset.ocr_text.strip(),
-            )
-            if line
-        ]
-        if not semantic_lines:
-            return content
-        return f"{content}\n\n图片语义：\n" + "\n".join(f"- {line}" for line in semantic_lines)
+        semantic_chunks = self._build_image_semantic_chunks(
+            knowledge_file=knowledge_file,
+            persisted_assets_by_segment=persisted_assets_by_segment,
+        )
+        return self._chunk_embedding_service.embed_chunks(text_chunks + semantic_chunks)
 
     def _build_materialized_chunk_image_assets(
         self,
@@ -896,6 +834,7 @@ class KnowledgeUploadProcessor:
         """把已落库图片资产转换为可写入检索侧的 chunk 图片资产。"""
         return [
             ChunkImageAsset(
+                segment_id=asset.segment_id,
                 asset_id=asset.id,
                 asset_index=asset.asset_index,
                 source_anchor=asset.source_anchor,
@@ -916,11 +855,82 @@ class KnowledgeUploadProcessor:
             for asset in assets
         ]
 
+    def _build_materialized_image_asset_refs(
+        self,
+        assets: list[KnowledgeFileImageAsset],
+    ) -> list[ChunkImageAssetRef]:
+        """把已落库图片资产转换为 chunk 引用键列表。"""
+        return [
+            ChunkImageAssetRef(
+                segment_id=asset.segment_id,
+                asset_id=asset.id,
+            )
+            for asset in assets
+        ]
+
+    def _build_image_semantic_chunks(
+        self,
+        *,
+        knowledge_file: KnowledgeFile,
+        persisted_assets_by_segment: dict[str, list[KnowledgeFileImageAsset]],
+    ) -> list[DocumentChunk]:
+        """基于图片资产构造独立的图片语义 chunk。"""
+        semantic_chunks: list[DocumentChunk] = []
+        for segment_id, assets in sorted(persisted_assets_by_segment.items()):
+            for asset in sorted(assets, key=lambda item: item.asset_index):
+                semantic_content = self._build_image_semantic_content(asset)
+                chunk_index = self._parse_chunk_index_from_chunk_id(asset.semantic_chunk_id)
+                semantic_chunks.append(
+                    DocumentChunk(
+                        file_id=knowledge_file.id,
+                        chunk_id=asset.semantic_chunk_id,
+                        chunk_index=chunk_index,
+                        chunk_type=ChunkType.IMAGE_SEMANTIC.value,
+                        segment_id=segment_id,
+                        content=semantic_content,
+                        char_count=len(semantic_content),
+                        source_filename=knowledge_file.original_filename,
+                        storage_key=knowledge_file.storage_key,
+                        uploader_user_id=knowledge_file.uploader_user_id,
+                        visibility_scope=knowledge_file.visibility_scope.value,
+                        merged_terms=[],
+                        image_asset_refs=[
+                            ChunkImageAssetRef(
+                                segment_id=segment_id,
+                                asset_id=asset.id,
+                            )
+                        ],
+                        image_assets=self._build_materialized_chunk_image_assets([asset]),
+                    )
+                )
+        return semantic_chunks
+
+    def _build_image_semantic_content(
+        self,
+        asset: KnowledgeFileImageAsset,
+    ) -> str:
+        """为单张图片构造独立图片语义 chunk 正文。"""
+        semantic_lines = [f"图片类型：{asset.image_type.strip() or 'unknown'}"]
+        if asset.summary.strip():
+            semantic_lines.append(f"图片摘要：{asset.summary.strip()}")
+        if asset.ocr_text.strip():
+            semantic_lines.append(f"图片文本：{asset.ocr_text.strip()}")
+        return "\n".join(semantic_lines)
+
+    def _parse_chunk_index_from_chunk_id(self, chunk_id: str) -> int:
+        """从标准 chunk_id 中解析 chunk_index。"""
+        try:
+            return int(chunk_id.rsplit("-", maxsplit=1)[1])
+        except (IndexError, ValueError):
+            msg = f"非法 chunk_id，无法解析 chunk_index: {chunk_id}"
+            raise KnowledgeFileConflictError(msg) from None
+
     def _build_knowledge_file(
         self,
         *,
         task: KnowledgeUploadTask,
         original_filename: str,
+        text_sha256: str,
         content_sha256: str,
         file_id: str | None = None,
     ) -> KnowledgeFile:
@@ -944,6 +954,7 @@ class KnowledgeUploadProcessor:
             uploaded_at=uploaded_at,
             updated_at=uploaded_at,
             raw_sha256=task.raw_sha256,
+            text_sha256=text_sha256,
             content_sha256=content_sha256,
         )
 
@@ -966,16 +977,30 @@ class KnowledgeUploadProcessor:
         self,
         *,
         knowledge_file: KnowledgeFile,
-        prepared_assets_by_chunk: dict[int, list[PreparedChunkImageAsset]],
-    ) -> tuple[dict[int, list[KnowledgeFileImageAsset]], list[str]]:
+        preview_chunks: list[DocumentChunk],
+        prepared_assets_by_segment: dict[str, list[PreparedChunkImageAsset]],
+    ) -> tuple[dict[str, list[KnowledgeFileImageAsset]], list[str]]:
         """上传图片资源并批量持久化图片资产。"""
         now = datetime.now(UTC)
         persisted_assets: list[KnowledgeFileImageAsset] = []
         uploaded_storage_keys: list[str] = []
+        segment_order = list(
+            dict.fromkeys(
+                chunk.segment_id
+                for chunk in preview_chunks
+                if chunk.segment_id in prepared_assets_by_segment
+            )
+        )
+        next_semantic_chunk_index = len(preview_chunks)
 
-        for chunk_index, chunk_assets in sorted(prepared_assets_by_chunk.items()):
-            for prepared_asset in chunk_assets:
+        for segment_id in segment_order:
+            for prepared_asset in sorted(
+                prepared_assets_by_segment.get(segment_id, []),
+                key=lambda item: item.preview_asset.asset_index,
+            ):
                 asset_id = uuid4().hex
+                semantic_chunk_id = f"{knowledge_file.id}-chunk-{next_semantic_chunk_index}"
+                next_semantic_chunk_index += 1
                 original_storage_key = self._build_image_storage_key(
                     uploader_user_id=knowledge_file.uploader_user_id,
                     file_id=knowledge_file.id,
@@ -1006,8 +1031,8 @@ class KnowledgeUploadProcessor:
                     KnowledgeFileImageAsset(
                         id=asset_id,
                         file_id=knowledge_file.id,
-                        chunk_id=f"{knowledge_file.id}-chunk-{chunk_index}",
-                        chunk_index=chunk_index,
+                        segment_id=segment_id,
+                        semantic_chunk_id=semantic_chunk_id,
                         asset_index=prepared_asset.preview_asset.asset_index,
                         uploader_user_id=knowledge_file.uploader_user_id,
                         source_anchor=prepared_asset.preview_asset.source_anchor,
@@ -1028,10 +1053,10 @@ class KnowledgeUploadProcessor:
                 )
 
         created_assets = self._knowledge_file_image_asset_repository.create_assets(persisted_assets)
-        assets_by_chunk: dict[int, list[KnowledgeFileImageAsset]] = {}
+        assets_by_segment: dict[str, list[KnowledgeFileImageAsset]] = {}
         for asset in created_assets:
-            assets_by_chunk.setdefault(asset.chunk_index, []).append(asset)
-        return assets_by_chunk, uploaded_storage_keys
+            assets_by_segment.setdefault(asset.segment_id, []).append(asset)
+        return assets_by_segment, uploaded_storage_keys
 
     def _build_image_storage_key(
         self,

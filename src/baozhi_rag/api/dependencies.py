@@ -55,6 +55,7 @@ from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
+from baozhi_rag.services.rerank import ChunkRerankService, ImageRerankService
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 from baozhi_rag.services.user_admin import UserAdminService
@@ -252,10 +253,19 @@ def get_chat_service(
     chunk_search_service: Annotated[ChunkSearchService, Depends(get_chunk_search_service)],
 ) -> ChatService:
     """构造聊天服务。"""
+    llm_client = OpenAICompatibleLlmClient.from_settings(settings)
     return ChatService(
-        chat_client=OpenAICompatibleLlmClient.from_settings(settings),
+        chat_client=llm_client,
         chunk_search_service=chunk_search_service,
         system_prompt=settings.resolved_chat_system_prompt,
+        chunk_rerank_service=ChunkRerankService(
+            client=llm_client,
+            model_name=settings.rerank_model,
+        ),
+        image_rerank_service=ImageRerankService(
+            client=llm_client,
+            model_name=settings.rerank_model,
+        ),
     )
 
 

@@ -327,6 +327,9 @@ def _build_content_block_item(
             )
             image_assets.append(
                 {
+                    "segment_id": str(item["segment_id"]).strip()
+                    if item.get("segment_id") is not None
+                    else None,
                     "asset_id": str(item.get("asset_id", "")),
                     "source_anchor": str(item["source_anchor"]).strip()
                     if item.get("source_anchor") is not None
@@ -358,6 +361,9 @@ def _build_history_image_assets(
     """把历史消息中的图片资产补齐为可渲染结构。"""
     return [
         ChatImageAssetItem(
+            segment_id=str(item["segment_id"]).strip()
+            if item.get("segment_id") is not None
+            else None,
             asset_id=str(item.get("asset_id", "")),
             source_anchor=str(item["source_anchor"]).strip()
             if item.get("source_anchor") is not None

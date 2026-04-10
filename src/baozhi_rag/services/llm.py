@@ -69,3 +69,21 @@ class ImageRecognitionModelClient(Protocol):
     ) -> dict[str, str]:
         """识别图片并返回结构化语义结果。"""
         ...
+
+
+class StructuredOutputModelClient(Protocol):
+    """支持指定模型返回 JSON 结构的客户端抽象。"""
+
+    def ensure_ready(self) -> None:
+        """校验客户端是否可用于后续模型调用。"""
+        ...
+
+    def complete_json(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_name: str,
+        temperature: float | None = None,
+    ) -> dict[str, object]:
+        """调用指定模型并返回 JSON 对象。"""
+        ...

@@ -234,6 +234,11 @@ class Settings(BaseSettings):
         description="文档图片识别使用的多模态模型名称",
         validation_alias=AliasChoices("IMAGE_RECOGNITION_MODEL"),
     )
+    rerank_model: str | None = Field(
+        default=None,
+        description="通用重排模型名称，可复用于 chunk 与图片候选重排",
+        validation_alias=AliasChoices("RERANK_MODEL"),
+    )
     chat_system_prompt: str = Field(
         default=(
             "你是 {app_name} 的知识库问答助手。"

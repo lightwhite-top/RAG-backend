@@ -716,6 +716,7 @@ def _build_chat_image_asset_items(
     image_assets: list[ChatImageAssetItem] = []
     for item in raw_assets:
         if isinstance(item, dict):
+            segment_id = _read_optional_str(item.get("segment_id"))
             storage_key = str(item.get("storage_key", "")).strip()
             thumbnail_storage_key = _read_optional_str(item.get("thumbnail_storage_key"))
             asset_id = str(item.get("asset_id", ""))
@@ -724,6 +725,7 @@ def _build_chat_image_asset_items(
             summary = str(item.get("summary", ""))
             ocr_text = str(item.get("ocr_text", ""))
         else:
+            segment_id = _read_optional_str(getattr(item, "segment_id", None))
             storage_key = str(getattr(item, "storage_key", "")).strip()
             thumbnail_storage_key = _read_optional_str(getattr(item, "thumbnail_storage_key", None))
             asset_id = str(getattr(item, "asset_id", ""))
@@ -733,6 +735,7 @@ def _build_chat_image_asset_items(
             ocr_text = str(getattr(item, "ocr_text", ""))
         image_assets.append(
             ChatImageAssetItem(
+                segment_id=segment_id,
                 asset_id=asset_id,
                 source_anchor=source_anchor,
                 storage_key=storage_key,

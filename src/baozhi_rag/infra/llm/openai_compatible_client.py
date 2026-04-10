@@ -282,6 +282,52 @@ class OpenAICompatibleLlmClient:
             "image_type": str(parsed_content.get("image_type", "unknown")).strip() or "unknown",
         }
 
+    def complete_json(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_name: str,
+        temperature: float | None = 0.0,
+    ) -> dict[str, object]:
+        """调用指定模型并强制返回 JSON 对象。"""
+        self._validate_api_key()
+        normalized_model_name = model_name.strip()
+        if not normalized_model_name:
+            msg = "未配置结构化输出模型名称"
+            raise OpenAICompatibleLlmConfigurationError(msg)
+
+        try:
+            response = self._get_client().chat.completions.create(
+                model=normalized_model_name,
+                messages=[
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                    }
+                    for message in messages
+                ],
+                temperature=self._normalize_temperature(temperature) or 0.0,
+            )
+        except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
+            self._log_upstream_failure(
+                operation="chat.completions.create_json",
+                model_name=normalized_model_name,
+                exc=exc,
+            )
+            msg = "调用结构化输出模型失败"
+            raise OpenAICompatibleLlmInvocationError(msg) from exc
+
+        choices = getattr(response, "choices", [])
+        if not choices:
+            msg = "结构化输出模型未返回候选结果"
+            raise OpenAICompatibleLlmInvocationError(msg)
+
+        content = getattr(choices[0].message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            msg = "结构化输出模型返回空内容"
+            raise OpenAICompatibleLlmInvocationError(msg)
+        return self._parse_json_object(content)
+
     def stream_chat(
         self,
         messages: list[ChatMessage],
