@@ -330,7 +330,7 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置；服务端 compose 默认开启 ES 认证。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_PASSWORD`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置；服务端 compose 默认开启 Milvus 认证。
-大模型配置通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL`、`IMAGE_RECOGNITION_MODEL` 配置；旧变量 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 仍兼容。
+大模型配置通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL`、`IMAGE_RECOGNITION_MODEL`、`RERANK_MODEL` 配置；旧变量 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`BAILIAN_TIMEOUT_SECONDS`、`BAILIAN_CHAT_MODEL` 仍兼容。
 向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置；如需让向量化单独接入另一家 OpenAI 兼容平台，可额外配置 `CHUNK_EMBEDDING_LLM_API_KEY`、`CHUNK_EMBEDDING_LLM_BASE_URL`、`CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS`。
 
 ## Chunk 检索
@@ -350,7 +350,7 @@ Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_
 示例：
 
 ```powershell
-curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
+curl "http://127.0.0.1:8000/search/chunks?q=向量检索&size=5"
 ```
 
 响应示例：
@@ -360,18 +360,18 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
   "state": "success",
   "message": "检索成功",
   "data": {
-    "query": "免赔额",
+    "query": "向量检索",
     "size": 1,
     "hits": [
       {
         "chunk_id": "chunk-1",
         "file_id": "file-1",
-        "source_filename": "保险条款.docx",
-        "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
+        "source_filename": "检索设计文档.docx",
+        "storage_key": "knowledge-files/user-1/file-1/检索设计文档.docx",
         "chunk_index": 0,
         "char_count": 24,
-        "content": "本条款包含免赔额和保险责任说明。",
-        "merged_terms": ["免赔额", "保险责任"],
+        "content": "向量检索用于根据语义相似度召回相关内容。",
+        "merged_terms": ["向量检索", "语义召回"],
         "score": 0.032786
       }
     ]
@@ -387,7 +387,7 @@ curl "http://127.0.0.1:8000/search/chunks?q=免赔额&size=5"
 - 请求体字段：`messages`
 - 可选字段：`retrieval_size`、`temperature`、`stream`
 - 检索策略：默认使用最后一条 `user` 消息作为检索查询
-- 风控约束：命中证据时优先基于证据回答；未命中证据时仍会调用模型，但高风险问题必须明确说明当前无知识库依据，不能输出条款或理赔类确定性结论
+- 风控约束：命中证据时优先基于证据回答；未命中证据时仍会调用模型，但高风险问题必须明确说明当前无知识库依据，不能输出超出证据的确定性结论
 - 非流式响应优先消费 `data.assistant_message` 与 `data.trace`
 - `data.answer`、`data.citations`、`data.finish_reason` 等旧字段仍保留一段兼容期
 - 流式响应类型：`text/event-stream`
@@ -400,7 +400,7 @@ curl -X POST "http://127.0.0.1:8000/chat/completions" `
   -H "Content-Type: application/json" `
   -d '{
     "messages": [
-      {"role": "user", "content": "什么是免赔额"}
+      {"role": "user", "content": "什么是向量检索"}
     ],
     "retrieval_size": 4
   }'
@@ -413,7 +413,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
   -H "Content-Type: application/json" `
   -d '{
     "messages": [
-      {"role": "user", "content": "什么是免赔额"}
+      {"role": "user", "content": "什么是向量检索"}
     ],
     "retrieval_size": 4,
     "stream": true
@@ -430,12 +430,12 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
     "assistant_message": {
       "message_id": "9d3e0cbbe9f24c4a9fbeb26d61a11c8d",
       "role": "assistant",
-      "plain_text": "免赔额通常指理赔时需要由被保险人自行承担的部分。",
+      "plain_text": "向量检索通常指根据语义相似度而不是关键词完全匹配来召回内容。",
       "content_blocks": [
         {
           "block_id": "blk-1",
           "block_type": "markdown",
-          "text": "免赔额通常指理赔时需要由被保险人自行承担的部分。",
+          "text": "向量检索通常指根据语义相似度而不是关键词完全匹配来召回内容。",
           "citation_ids": ["cit-1"],
           "sequence": 1
         }
@@ -445,13 +445,13 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
           "id": "cit-1",
           "chunk_id": "chunk-1",
           "file_id": "file-1",
-          "source_filename": "保险条款.docx",
-          "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
+          "source_filename": "检索设计文档.docx",
+          "storage_key": "knowledge-files/user-1/file-1/检索设计文档.docx",
           "chunk_index": 0,
           "char_count": 20,
-          "content": "免赔额是指理赔时由被保险人自行承担的金额。",
-          "snippet": "免赔额是指理赔时由被保险人自行承担的金额。",
-          "merged_terms": ["免赔额"],
+          "content": "向量检索是根据文本向量之间的相似度来召回候选内容。",
+          "snippet": "向量检索是根据文本向量之间的相似度来召回候选内容。",
+          "merged_terms": ["向量检索"],
           "score": 0.98,
           "heading_path": [],
           "section_title": null,
@@ -463,28 +463,28 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
     },
     "trace": {
       "request_id": "7f6f4f9f8c5c4f7db38f4f75dcb2f6c1",
-      "original_query": "什么是免赔额",
-      "retrieval_query": "什么是免赔额",
+      "original_query": "什么是向量检索",
+      "retrieval_query": "什么是向量检索",
       "rewrite_applied": false,
       "model": "qwen-plus",
       "usage": null,
       "latency_ms": 128
     },
-    "answer": "免赔额通常指理赔时需要由被保险人自行承担的部分。[1]",
-    "retrieval_query": "什么是免赔额",
+    "answer": "向量检索通常指根据语义相似度而不是关键词完全匹配来召回内容。[1]",
+    "retrieval_query": "什么是向量检索",
     "citation_count": 1,
     "citations": [
       {
         "id": "cit-1",
         "chunk_id": "chunk-1",
         "file_id": "file-1",
-        "source_filename": "保险条款.docx",
-        "storage_key": "knowledge-files/user-1/file-1/保险条款.docx",
+        "source_filename": "检索设计文档.docx",
+        "storage_key": "knowledge-files/user-1/file-1/检索设计文档.docx",
         "chunk_index": 0,
         "char_count": 20,
-        "content": "免赔额是指理赔时由被保险人自行承担的金额。",
-        "snippet": "免赔额是指理赔时由被保险人自行承担的金额。",
-        "merged_terms": ["免赔额"],
+        "content": "向量检索是根据文本向量之间的相似度来召回候选内容。",
+        "snippet": "向量检索是根据文本向量之间的相似度来召回候选内容。",
+        "merged_terms": ["向量检索"],
         "score": 0.98,
         "heading_path": [],
         "section_title": null,
