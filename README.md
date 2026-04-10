@@ -330,7 +330,7 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 
 ES 连接和索引配置通过 `ES_URL`、`ES_INDEX_NAME`、`ES_USERNAME`、`ES_PASSWORD`、`ES_API_KEY`、`ES_VERIFY_CERTS` 配置；服务端 compose 默认开启 ES 认证。
 Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_PASSWORD`、`MILVUS_DB_NAME`、`MILVUS_COLLECTION_NAME` 配置；服务端 compose 默认开启 Milvus 认证。
-大模型配置统一采用 `LLM_*` 前缀，当前通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL`、`LLM_IMAGE_RECOGNITION_MODEL`、`LLM_IMAGE_RERANK_MODEL` 配置。
+大模型配置统一采用 `LLM_*` 前缀，当前通过 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_TIMEOUT_SECONDS`、`LLM_CHAT_MODEL`、`LLM_IMAGE_RECOGNITION_MODEL`、`LLM_RERANK_MODEL`、`LLM_DEEP_RERANK_MODEL`、`LLM_IMAGE_RERANK_MODEL` 配置。
 向量化模型参数通过 `CHUNK_EMBEDDING_MODEL`、`CHUNK_EMBEDDING_DIMENSIONS`、`CHUNK_EMBEDDING_BATCH_SIZE` 配置；如需让向量化单独接入另一家 OpenAI 兼容平台，可额外配置 `CHUNK_EMBEDDING_LLM_API_KEY`、`CHUNK_EMBEDDING_LLM_BASE_URL`、`CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS`。
 
 ## Chunk 检索
@@ -340,10 +340,14 @@ Milvus 连接和集合配置通过 `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_ROOT_
 - 查询参数：`q`
 - 可选参数：`size`
 - 默认返回条数：`SEARCH_DEFAULT_SIZE`
+- 词法候选池大小：`SEARCH_LEXICAL_CANDIDATE_SIZE`
+- 向量候选池大小：`SEARCH_VECTOR_CANDIDATE_SIZE`
+- 深度重排触发得分阈值：`SEARCH_DEEP_RERANK_SCORE_THRESHOLD`
+- 深度重排触发分差阈值：`SEARCH_DEEP_RERANK_MARGIN_THRESHOLD`
 - ES 检索字段：`content`、`merged_terms`、`uploader_user_id`、`visibility_scope`
   - `content` 使用 `ik_max_word` 建索引，`ik_smart` 做查询分析
 - Milvus 检索字段：`content_embedding`，并结合 `uploader_user_id`、`visibility_scope` 执行权限过滤
-- 结果融合策略：基于 ES 和 Milvus 的 Reciprocal Rank Fusion
+- 结果融合策略：基于 ES 和 Milvus 的 Weighted Reciprocal Rank Fusion
 - 成功响应中的业务结果放在 `data` 字段
 - 检索权限规则：`visibility_scope = global` 的文件所有用户可见，`visibility_scope = owner_only` 的文件仅上传者本人可见
 
@@ -387,11 +391,15 @@ curl "http://127.0.0.1:8000/search/chunks?q=向量检索&size=5"
 - 请求体字段：`messages`
 - 可选字段：`retrieval_size`、`temperature`、`stream`
 - 检索策略：默认使用最后一条 `user` 消息作为检索查询
+- 检索改写：对明显依赖上文的短追问，服务端会使用上一条用户问题做轻量规则改写
 - 风控约束：命中证据时优先基于证据回答；未命中证据时仍会调用模型，但高风险问题必须明确说明当前无知识库依据，不能输出超出证据的确定性结论
 - 非流式响应优先消费 `data.assistant_message` 与 `data.trace`
 - `data.answer`、`data.citations`、`data.finish_reason` 等旧字段仍保留一段兼容期
 - 流式响应类型：`text/event-stream`
 - 流式事件类型：`message.start`、`citation.add`、`message.delta`、`message.end`、`message.error`
+- `assistant_message.content_blocks[].text` 按 Markdown 文本返回，前端可直接按 Markdown 渲染
+- `trace` 现在会额外返回 `query_intent`、`retrieval_mode`、`lane_count`、`evidence_sufficient`、`evidence_reason` 等检索摘要字段
+- 当触发深度重排时，`trace.deep_rerank_triggered` 会标记为 `true`
 
 非流式示例：
 
@@ -604,6 +612,8 @@ chmod +x deploy_server.sh
 - `LLM_API_KEY`
 - `LLM_CHAT_MODEL`
 - `LLM_IMAGE_RECOGNITION_MODEL`
+- `LLM_RERANK_MODEL`
+- `LLM_DEEP_RERANK_MODEL`
 - `LLM_IMAGE_RERANK_MODEL`
 - `CHUNK_EMBEDDING_MODEL`
 - `CHUNK_EMBEDDING_DIMENSIONS`
