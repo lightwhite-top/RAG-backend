@@ -127,20 +127,14 @@ class KnowledgeUploadService:
                     self._ingest_version,
                 )
                 if existing_task is not None:
-                    next_source_storage_key: str | None = None
-                    if existing_task.status in {
-                        KnowledgeUploadTaskStatus.QUEUED,
-                        KnowledgeUploadTaskStatus.FAILED,
-                    }:
-                        next_source_storage_key = staged_file.temp_storage_key
-                        retained_storage_keys.add(next_source_storage_key)
-                        superseded_storage_keys.append(existing_task.source_storage_key)
-                    updated_task = self._task_repository.update_submission_context(
-                        existing_task.id,
-                        requested_filename=staged_file.original_filename,
-                        source_storage_key=next_source_storage_key,
+                    reused_task = self._reuse_existing_task(
+                        existing_task=existing_task,
+                        staged_file=staged_file,
+                        uploader_user_id=current_user.id,
+                        retained_storage_keys=retained_storage_keys,
+                        superseded_storage_keys=superseded_storage_keys,
                     )
-                    results.append(updated_task or existing_task)
+                    results.append(reused_task)
                     continue
 
                 task = self._build_task(
@@ -159,25 +153,12 @@ class KnowledgeUploadService:
                     )
                     if existing_task is None:
                         raise
-                    next_source_storage_key = (
-                        staged_file.temp_storage_key
-                        if existing_task.status
-                        in {
-                            KnowledgeUploadTaskStatus.QUEUED,
-                            KnowledgeUploadTaskStatus.FAILED,
-                        }
-                        else None
-                    )
-                    if next_source_storage_key is not None:
-                        retained_storage_keys.add(next_source_storage_key)
-                        superseded_storage_keys.append(existing_task.source_storage_key)
-                    persisted_task = (
-                        self._task_repository.update_submission_context(
-                            existing_task.id,
-                            requested_filename=staged_file.original_filename,
-                            source_storage_key=next_source_storage_key,
-                        )
-                        or existing_task
+                    persisted_task = self._reuse_existing_task(
+                        existing_task=existing_task,
+                        staged_file=staged_file,
+                        uploader_user_id=current_user.id,
+                        retained_storage_keys=retained_storage_keys,
+                        superseded_storage_keys=superseded_storage_keys,
                     )
                 else:
                     retained_storage_keys.add(task.source_storage_key)
@@ -187,6 +168,44 @@ class KnowledgeUploadService:
             self._cleanup_storage_keys(superseded_storage_keys)
 
         return results
+
+    def _reuse_existing_task(
+        self,
+        *,
+        existing_task: KnowledgeUploadTask,
+        staged_file: StagedUploadFileResult,
+        uploader_user_id: str,
+        retained_storage_keys: set[str],
+        superseded_storage_keys: list[str],
+    ) -> KnowledgeUploadTask:
+        """复用同原始文件哈希的已有任务，并在失败时重新入队。"""
+        next_source_storage_key: str | None = None
+        if existing_task.status in {
+            KnowledgeUploadTaskStatus.QUEUED,
+            KnowledgeUploadTaskStatus.FAILED,
+        }:
+            next_source_storage_key = staged_file.temp_storage_key
+            retained_storage_keys.add(next_source_storage_key)
+            superseded_storage_keys.append(existing_task.source_storage_key)
+
+        updated_task = (
+            self._task_repository.update_submission_context(
+                existing_task.id,
+                requested_filename=staged_file.original_filename,
+                source_storage_key=next_source_storage_key,
+            )
+            or existing_task
+        )
+
+        if existing_task.status is KnowledgeUploadTaskStatus.FAILED:
+            retried_task = self._task_repository.retry_task(
+                existing_task.id,
+                uploader_user_id=uploader_user_id,
+                queued_at=datetime.now(UTC),
+            )
+            return retried_task or updated_task
+
+        return updated_task
 
     def get_task(self, *, task_id: str, current_user: CurrentUser) -> KnowledgeUploadTask:
         """查询当前用户的单条上传任务。"""
