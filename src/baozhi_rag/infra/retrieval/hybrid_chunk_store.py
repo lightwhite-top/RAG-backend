@@ -120,6 +120,11 @@ class HybridChunkStore(ChunkSearchStore):
         self,
         document_store: HybridDocumentStore,
         vector_store: HybridVectorStore,
+        *,
+        lexical_candidate_size: int,
+        vector_candidate_size: int,
+        lexical_rrf_weight: float,
+        vector_rrf_weight: float,
     ) -> None:
         """初始化混合检索存储。
 
@@ -132,6 +137,10 @@ class HybridChunkStore(ChunkSearchStore):
         """
         self._document_store = document_store
         self._vector_store = vector_store
+        self._lexical_candidate_size = max(1, lexical_candidate_size)
+        self._vector_candidate_size = max(1, vector_candidate_size)
+        self._lexical_rrf_weight = max(0.0, lexical_rrf_weight)
+        self._vector_rrf_weight = max(0.0, vector_rrf_weight)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> HybridChunkStore:
@@ -146,6 +155,10 @@ class HybridChunkStore(ChunkSearchStore):
         return cls(
             document_store=ElasticsearchChunkStore.from_settings(settings),
             vector_store=MilvusChunkVectorStore.from_settings(settings),
+            lexical_candidate_size=settings.search_lexical_candidate_size,
+            vector_candidate_size=settings.search_vector_candidate_size,
+            lexical_rrf_weight=settings.search_rrf_lexical_weight,
+            vector_rrf_weight=settings.search_rrf_vector_weight,
         )
 
     def ensure_ready(self) -> None:
@@ -257,21 +270,50 @@ class HybridChunkStore(ChunkSearchStore):
             HybridChunkStoreDependencyError: 当底层依赖不可用时抛出。
             HybridChunkStoreSearchError: 当检索执行失败时抛出。
         """
+        lexical_weight, vector_weight = self._resolve_rrf_weights(request.query_intent)
+        if request.lexical_rrf_weight is not None:
+            lexical_weight = request.lexical_rrf_weight
+        if request.vector_rrf_weight is not None:
+            vector_weight = request.vector_rrf_weight
+
+        lexical_candidate_size = (
+            self._lexical_candidate_size
+            if request.lexical_candidate_size is None
+            else max(0, request.lexical_candidate_size)
+        )
+        vector_candidate_size = (
+            self._vector_candidate_size
+            if request.vector_candidate_size is None
+            else max(0, request.vector_candidate_size)
+        )
+
         try:
             # 文档检索
-            lexical_hits = self._document_store.search(request)
+            lexical_hits: list[ChunkSearchHit] = []
+            if lexical_candidate_size > 0 and lexical_weight > 0:
+                lexical_hits = self._document_store.search(
+                    replace(
+                        request,
+                        size=max(request.size, lexical_candidate_size),
+                    )
+                )
             # 向量检索
-            semantic_hits = self._vector_store.search(
-                request.query_embedding,
-                request.size,
-                viewer_user_id=request.viewer_user_id,
-            )
+            semantic_hits: list[MilvusVectorSearchHit] = []
+            if vector_candidate_size > 0 and vector_weight > 0 and request.query_embedding:
+                semantic_hits = self._vector_store.search(
+                    request.query_embedding,
+                    max(request.size, vector_candidate_size),
+                    viewer_user_id=request.viewer_user_id,
+                )
 
             # 结果融合：使用 RRF 算法对词法检索结果和向量检索结果进行融合排序，并补全文档载荷
             return self._fuse_hits(
                 lexical_hits=lexical_hits,
                 semantic_hits=semantic_hits,
                 size=request.size,
+                query_intent=request.query_intent,
+                lexical_weight=lexical_weight,
+                vector_weight=vector_weight,
             )
         except (ElasticsearchDependencyError, MilvusDependencyError) as exc:
             raise HybridChunkStoreDependencyError(str(exc)) from exc
@@ -302,6 +344,9 @@ class HybridChunkStore(ChunkSearchStore):
         lexical_hits: list[ChunkSearchHit],
         semantic_hits: list[MilvusVectorSearchHit],
         size: int,
+        query_intent: str,
+        lexical_weight: float,
+        vector_weight: float,
     ) -> list[ChunkSearchHit]:
         """使用 RRF 融合词法结果与向量结果。
 
@@ -317,13 +362,19 @@ class HybridChunkStore(ChunkSearchStore):
         hit_map = {hit.chunk_id: hit for hit in lexical_hits}
 
         for rank, hit in enumerate(lexical_hits, start=1):
-            fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + self._rrf_score(rank)
+            fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + self._rrf_score(
+                rank,
+                lexical_weight,
+            )
 
         for rank, semantic_hit in enumerate(semantic_hits, start=1):
             fused_scores[semantic_hit.chunk_id] = fused_scores.get(
                 semantic_hit.chunk_id,
                 0.0,
-            ) + self._rrf_score(rank)
+            ) + self._rrf_score(
+                rank,
+                vector_weight,
+            )
 
         semantic_only_ids = [hit.chunk_id for hit in semantic_hits if hit.chunk_id not in hit_map]
         if semantic_only_ids:
@@ -349,13 +400,31 @@ class HybridChunkStore(ChunkSearchStore):
             )
         return fused_hits
 
-    def _rrf_score(self, rank: int) -> float:
+    def _rrf_score(self, rank: int, weight: float) -> float:
         """计算 Reciprocal Rank Fusion 分值。
 
         参数:
             rank: 某条结果在对应检索通道中的排名，从 1 开始。
+            weight: 当前检索通道的融合权重。
 
         返回:
             当前排名对应的 RRF 分值。
         """
-        return 1.0 / (self._RRF_K + rank)
+        return weight / (self._RRF_K + rank)
+
+    def _resolve_rrf_weights(self, query_intent: str) -> tuple[float, float]:
+        """根据查询意图动态调整词法与向量通道的融合权重。"""
+        lexical_weight = self._lexical_rrf_weight
+        vector_weight = self._vector_rrf_weight
+
+        if query_intent == "document_location":
+            return lexical_weight * 1.25, vector_weight * 0.9
+        if query_intent == "definition":
+            return lexical_weight * 0.95, vector_weight * 1.15
+        if query_intent == "comparison":
+            return lexical_weight * 0.95, vector_weight * 1.2
+        if query_intent == "procedure":
+            return lexical_weight, vector_weight * 1.15
+        if query_intent == "structured":
+            return lexical_weight * 1.1, vector_weight * 1.05
+        return lexical_weight, vector_weight

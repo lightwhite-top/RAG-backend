@@ -49,13 +49,18 @@ from baozhi_rag.services.chat_sessions import ChatSessionService
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.chunk_search import ChunkSearchService
 from baozhi_rag.services.conversation_chat import ConversationChatService
+from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
 from baozhi_rag.services.document_preview import DocumentPreviewService
+from baozhi_rag.services.fast_rerank import FastRerankService
 from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
+from baozhi_rag.services.query_intent import QueryIntentService
+from baozhi_rag.services.query_rewrite import QueryRewriteService
 from baozhi_rag.services.rerank import ChunkRerankService, ImageRerankService
+from baozhi_rag.services.retrieval_plan import RetrievalPlanner
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 from baozhi_rag.services.user_admin import UserAdminService
@@ -245,6 +250,14 @@ def get_chunk_search_service(
         store=HybridChunkStore.from_settings(settings),
         chunk_embedding_service=_build_chunk_embedding_service(settings),
         knowledge_file_repository=knowledge_file_repository,
+        query_intent_service=QueryIntentService(),
+        retrieval_planner=RetrievalPlanner(
+            lexical_candidate_size=settings.search_lexical_candidate_size,
+            vector_candidate_size=settings.search_vector_candidate_size,
+            lexical_rrf_weight=settings.search_rrf_lexical_weight,
+            vector_rrf_weight=settings.search_rrf_vector_weight,
+        ),
+        fast_rerank_service=FastRerankService(),
     )
 
 
@@ -258,14 +271,19 @@ def get_chat_service(
         chat_client=llm_client,
         chunk_search_service=chunk_search_service,
         system_prompt=settings.resolved_chat_system_prompt,
-        chunk_rerank_service=ChunkRerankService(
-            client=llm_client,
-            model_name=settings.rerank_model,
+        deep_rerank_service=DeepRerankService(
+            client=ChunkRerankService(
+                client=llm_client,
+                model_name=settings.deep_rerank_model or settings.rerank_model,
+            ),
+            score_threshold=settings.search_deep_rerank_score_threshold,
+            margin_threshold=settings.search_deep_rerank_margin_threshold,
         ),
         image_rerank_service=ImageRerankService(
             client=llm_client,
-            model_name=settings.rerank_model,
+            model_name=settings.image_rerank_model or settings.rerank_model,
         ),
+        query_rewrite_service=QueryRewriteService(),
     )
 
 

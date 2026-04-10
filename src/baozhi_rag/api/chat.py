@@ -169,6 +169,24 @@ def _build_completion_response(
         original_query=result.original_query or fallback_original_query,
         retrieval_query=result.retrieval_query,
         rewrite_applied=result.rewrite_applied,
+        query_intent=result.query_intent,
+        retrieval_mode=result.retrieval_trace.mode if result.retrieval_trace is not None else None,
+        lane_count=result.retrieval_trace.lane_count
+        if result.retrieval_trace is not None
+        else None,
+        final_hit_count=result.retrieval_trace.final_hit_count
+        if result.retrieval_trace is not None
+        else None,
+        evidence_sufficient=result.evidence_assessment.sufficient
+        if result.evidence_assessment is not None
+        else None,
+        evidence_reason=result.evidence_assessment.reason_code
+        if result.evidence_assessment is not None
+        else None,
+        deep_rerank_triggered=result.retrieval_trace.deep_rerank_triggered
+        if result.retrieval_trace is not None
+        else None,
+        lanes=_read_trace_lanes(result.retrieval_trace),
         model_name=model_name,
         latency_ms=latency_ms,
     )
@@ -198,6 +216,14 @@ def _stream_events(
     citations: list[ChatCitationItem] = []
     retrieval_query = original_query
     rewrite_applied = False
+    query_intent: str | None = None
+    retrieval_mode: str | None = None
+    lane_count: int | None = None
+    final_hit_count: int | None = None
+    evidence_sufficient: bool | None = None
+    evidence_reason: str | None = None
+    deep_rerank_triggered: bool | None = None
+    retrieval_lanes: list[dict[str, object]] | None = None
     delta_seq = 0
     offset = 0
     message_started = False
@@ -210,10 +236,28 @@ def _stream_events(
             if event.event == "context":
                 retrieval_query = str(event.data.get("retrieval_query", original_query))
                 rewrite_applied = bool(event.data.get("rewrite_applied", False))
+                query_intent = _read_optional_str(event.data.get("query_intent"))
                 citations = _build_citation_items(
                     event.data.get("citations", []),
                     file_url_builder=file_url_builder,
                 )
+                retrieval_trace = event.data.get("retrieval_trace")
+                if isinstance(retrieval_trace, dict):
+                    retrieval_mode = _read_optional_str(retrieval_trace.get("mode"))
+                    lane_count = _read_optional_int(retrieval_trace.get("lane_count"))
+                    final_hit_count = _read_optional_int(retrieval_trace.get("final_hit_count"))
+                    evidence_sufficient = _read_optional_bool(
+                        retrieval_trace.get("evidence_sufficient")
+                    )
+                    evidence_reason = _read_optional_str(retrieval_trace.get("evidence_reason"))
+                    deep_rerank_triggered = _read_optional_bool(
+                        retrieval_trace.get("deep_rerank_triggered")
+                    )
+                    retrieval_lanes = _read_trace_lanes_from_payload(retrieval_trace.get("lanes"))
+                evidence_payload = event.data.get("evidence_assessment")
+                if isinstance(evidence_payload, dict):
+                    evidence_sufficient = _read_optional_bool(evidence_payload.get("sufficient"))
+                    evidence_reason = _read_optional_str(evidence_payload.get("reason_code"))
                 session_id = _read_optional_str(event.data.get("session_id"))
                 sequence_no = _read_optional_int(event.data.get("sequence_no"))
                 if not message_started:
@@ -225,6 +269,7 @@ def _stream_events(
                             "original_query": original_query,
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
+                            "query_intent": query_intent,
                             "model": model_name,
                             "session_id": session_id,
                             "sequence_no": sequence_no,
@@ -250,6 +295,7 @@ def _stream_events(
                             "original_query": original_query,
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
+                            "query_intent": query_intent,
                             "model": model_name,
                             "session_id": session_id,
                             "sequence_no": sequence_no,
@@ -346,6 +392,14 @@ def _stream_events(
                     original_query=str(event.data.get("original_query", original_query)),
                     retrieval_query=str(event.data.get("retrieval_query", retrieval_query)),
                     rewrite_applied=bool(event.data.get("rewrite_applied", rewrite_applied)),
+                    query_intent=_read_optional_str(event.data.get("query_intent")) or query_intent,
+                    retrieval_mode=retrieval_mode,
+                    lane_count=lane_count,
+                    final_hit_count=final_hit_count,
+                    evidence_sufficient=evidence_sufficient,
+                    evidence_reason=evidence_reason,
+                    deep_rerank_triggered=deep_rerank_triggered,
+                    lanes=retrieval_lanes,
                     model_name=model_name,
                     latency_ms=_calculate_latency_ms(started_at),
                 )
@@ -604,6 +658,14 @@ def _build_trace_item(
     original_query: str,
     retrieval_query: str,
     rewrite_applied: bool,
+    query_intent: str | None = None,
+    retrieval_mode: str | None = None,
+    lane_count: int | None = None,
+    final_hit_count: int | None = None,
+    evidence_sufficient: bool | None = None,
+    evidence_reason: str | None = None,
+    deep_rerank_triggered: bool | None = None,
+    lanes: list[dict[str, object]] | None = None,
     model_name: str | None,
     latency_ms: int | None,
 ) -> ChatTraceItem:
@@ -613,6 +675,14 @@ def _build_trace_item(
         original_query=original_query,
         retrieval_query=retrieval_query,
         rewrite_applied=rewrite_applied,
+        query_intent=query_intent,
+        retrieval_mode=retrieval_mode,
+        lane_count=lane_count,
+        final_hit_count=final_hit_count,
+        evidence_sufficient=evidence_sufficient,
+        evidence_reason=evidence_reason,
+        deep_rerank_triggered=deep_rerank_triggered,
+        lanes=lanes,
         model=model_name,
         usage=None,
         latency_ms=latency_ms,
@@ -630,6 +700,56 @@ def _resolve_original_query(messages: list[ChatMessage]) -> str:
 def _calculate_latency_ms(started_at: float) -> int:
     """计算毫秒级耗时。"""
     return int((time.perf_counter() - started_at) * 1000)
+
+
+def _read_optional_bool(value: object) -> bool | None:
+    """安全读取可选布尔值。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
+def _read_trace_lanes(retrieval_trace: object) -> list[dict[str, object]] | None:
+    """把服务层 trace 对象转成 API trace lane 摘要。"""
+    lanes = getattr(retrieval_trace, "lanes", None)
+    if not isinstance(lanes, list):
+        return None
+    serialized_lanes: list[dict[str, object]] = []
+    for lane in lanes:
+        serialized_lanes.append(
+            {
+                "lane_id": getattr(lane, "lane_id", ""),
+                "query_text": getattr(lane, "query_text", ""),
+                "lane_weight": getattr(lane, "lane_weight", 0.0),
+                "result_count": getattr(lane, "result_count", 0),
+                "top_chunk_ids": list(getattr(lane, "top_chunk_ids", [])),
+            }
+        )
+    return serialized_lanes
+
+
+def _read_trace_lanes_from_payload(value: object) -> list[dict[str, object]] | None:
+    """安全读取流式事件中的 trace lane 摘要。"""
+    if not isinstance(value, list):
+        return None
+    lanes: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        lanes.append(
+            {
+                "lane_id": str(item.get("lane_id", "")),
+                "query_text": str(item.get("query_text", "")),
+                "lane_weight": float(item.get("lane_weight", 0.0)),
+                "result_count": int(item.get("result_count", 0)),
+                "top_chunk_ids": [str(chunk_id) for chunk_id in item.get("top_chunk_ids", [])]
+                if isinstance(item.get("top_chunk_ids"), list)
+                else [],
+            }
+        )
+    return lanes or None
 
 
 def _read_optional_str(value: object) -> str | None:

@@ -306,6 +306,8 @@ class ElasticsearchChunkStore:
                 }
             )
 
+        should_queries.extend(cls._build_structure_queries(request))
+
         if request.viewer_user_id:
             filter_queries.append(
                 {
@@ -397,6 +399,20 @@ class ElasticsearchChunkStore:
             "chunk_index": {"type": "integer"},
             # chunk 字符数，便于前端展示与检索调试。
             "char_count": {"type": "integer"},
+            # chunk 所属标题路径，支持按章节上下文召回。
+            "heading_path": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # chunk 所属末级标题，支持标题命中提权。
+            "section_title": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # chunk 内容类型，当前主要区分 paragraph / table。
+            "content_type": {"type": "keyword"},
             # chunk 正文；文本 chunk 存正文，图片语义 chunk 存图片稳定语义文本。
             "content": {
                 "type": "text",
@@ -466,6 +482,9 @@ class ElasticsearchChunkStore:
             "segment_id",
             "chunk_index",
             "char_count",
+            "heading_path",
+            "section_title",
+            "content_type",
             "content",
             "merged_terms",
             "image_asset_refs",
@@ -512,11 +531,59 @@ class ElasticsearchChunkStore:
             visibility_scope=str(source.get("visibility_scope", "")),
             chunk_index=int(source.get("chunk_index", 0)),
             char_count=int(source.get("char_count", 0)),
+            heading_path=_as_string_list(source.get("heading_path")),
+            section_title=str(source["section_title"]).strip()
+            if source.get("section_title") is not None
+            else None,
+            content_type=str(source.get("content_type", "paragraph")),
             content=str(source.get("content", "")),
             merged_terms=_as_string_list(source.get("merged_terms")),
             image_assets=_as_image_assets(source.get("image_assets")),
             score=float(score) if isinstance(score, (int, float)) else None,
         )
+
+    @classmethod
+    def _build_structure_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """构造标题、章节和内容类型相关的结构化检索子句。"""
+        title_boost = 2.0
+        heading_boost = 1.5
+        if request.query_intent == "document_location":
+            title_boost = 4.0
+            heading_boost = 3.0
+        elif request.query_intent == "procedure":
+            title_boost = 2.6
+            heading_boost = 2.0
+
+        structure_queries: list[dict[str, object]] = [
+            {
+                "match": {
+                    "section_title": {
+                        "query": request.query_text,
+                        "boost": title_boost,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "heading_path": {
+                        "query": request.query_text,
+                        "boost": heading_boost,
+                    }
+                }
+            },
+        ]
+
+        if request.query_intent == "structured":
+            structure_queries.append(
+                {
+                    "constant_score": {
+                        "filter": {"term": {"content_type": "table"}},
+                        "boost": 2.5,
+                    }
+                }
+            )
+
+        return structure_queries
 
 
 def _as_string_list(value: object) -> list[str]:

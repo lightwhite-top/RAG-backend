@@ -11,10 +11,15 @@ from typing import Protocol
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
-from baozhi_rag.services.chunk_search import ChunkSearchHit
+from baozhi_rag.services.chunk_search import ChunkSearchExecutionResult, ChunkSearchHit
+from baozhi_rag.services.context_packing import ContextPackingService
+from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import ChunkImageAsset
+from baozhi_rag.services.evidence_sufficiency import EvidenceAssessment
 from baozhi_rag.services.llm import ChatMessage, ChatModelClient
-from baozhi_rag.services.rerank import ChunkRerankService, ImageRerankService
+from baozhi_rag.services.query_rewrite import QueryRewriteService
+from baozhi_rag.services.rerank import ImageRerankService
+from baozhi_rag.services.retrieval_trace import RetrievalTrace
 
 
 def _empty_image_asset_list() -> list[ChunkImageAsset]:
@@ -78,6 +83,9 @@ class ChatCompletionResult:
     content_blocks: list[ChatContentBlock] = field(default_factory=list)
     original_query: str = ""
     rewrite_applied: bool = False
+    query_intent: str = "general"
+    retrieval_trace: RetrievalTrace | None = None
+    evidence_assessment: EvidenceAssessment | None = None
     message_id: str | None = None
     session_id: str | None = None
     sequence_no: int | None = None
@@ -97,9 +105,25 @@ class ChatChunkSearcher(Protocol):
     """聊天服务依赖的检索协议。"""
 
     def search(
-        self, query_text: str, size: int, *, viewer_user_id: str = ""
+        self,
+        query_text: str,
+        size: int,
+        *,
+        viewer_user_id: str = "",
+        retrieval_mode: str = "search",
     ) -> list[ChunkSearchHit]:
         """按查询文本返回相关 chunk。"""
+        ...
+
+    def search_with_trace(
+        self,
+        query_text: str,
+        size: int,
+        *,
+        viewer_user_id: str = "",
+        retrieval_mode: str = "search",
+    ) -> ChunkSearchExecutionResult:
+        """按查询文本返回带 trace 的相关 chunk。"""
         ...
 
 
@@ -112,6 +136,9 @@ class _PreparedChatCompletion:
     citations: list[ChatCitation]
     model_messages: list[ChatMessage]
     rewrite_applied: bool = False
+    query_intent: str = "general"
+    retrieval_trace: RetrievalTrace | None = None
+    evidence_assessment: EvidenceAssessment | None = None
 
 
 class ChatService:
@@ -119,6 +146,7 @@ class ChatService:
 
     _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
     _BLOCK_SPLIT_PATTERN = re.compile(r"\n\s*\n+")
+    _EXCESSIVE_BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
     _MAX_CONTEXT_CHARS = 1200
     _MAX_SNIPPET_CHARS = 180
     _FALLBACK_ANSWER = (
@@ -131,8 +159,10 @@ class ChatService:
         chat_client: ChatModelClient,
         chunk_search_service: ChatChunkSearcher,
         system_prompt: str,
-        chunk_rerank_service: ChunkRerankService | None = None,
+        deep_rerank_service: DeepRerankService | None = None,
         image_rerank_service: ImageRerankService | None = None,
+        query_rewrite_service: QueryRewriteService | None = None,
+        context_packing_service: ContextPackingService | None = None,
     ) -> None:
         """初始化聊天服务。
 
@@ -147,8 +177,12 @@ class ChatService:
         self._chat_client = chat_client
         self._chunk_search_service = chunk_search_service
         self._system_prompt = system_prompt
-        self._chunk_rerank_service = chunk_rerank_service
+        self._deep_rerank_service = deep_rerank_service
         self._image_rerank_service = image_rerank_service
+        self._query_rewrite_service = query_rewrite_service or QueryRewriteService()
+        self._context_packing_service = context_packing_service or ContextPackingService(
+            max_context_chars=self._MAX_CONTEXT_CHARS
+        )
 
     def complete(
         self,
@@ -184,6 +218,11 @@ class ChatService:
             if not completion.citations:
                 # 即使已经放开“无命中仍调用模型”，也要为模型空输出保留明确兜底。
                 finish_reason = "context_exhausted"
+        elif (
+            completion.evidence_assessment is not None
+            and not completion.evidence_assessment.sufficient
+        ):
+            finish_reason = "evidence_insufficient"
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
@@ -201,6 +240,9 @@ class ChatService:
             citations=completion.citations,
             finish_reason=finish_reason,
             rewrite_applied=completion.rewrite_applied,
+            query_intent=completion.query_intent,
+            retrieval_trace=completion.retrieval_trace,
+            evidence_assessment=completion.evidence_assessment,
         )
 
     def stream(
@@ -236,6 +278,11 @@ class ChatService:
                 "original_query": completion.original_query,
                 "retrieval_query": completion.retrieval_query,
                 "rewrite_applied": completion.rewrite_applied,
+                "query_intent": completion.query_intent,
+                "retrieval_trace": self._serialize_retrieval_trace(completion.retrieval_trace),
+                "evidence_assessment": self._serialize_evidence_assessment(
+                    completion.evidence_assessment
+                ),
                 "citations": citations_payload,
             },
         )
@@ -283,6 +330,11 @@ class ChatService:
             answer = self._FALLBACK_ANSWER
             if not completion.citations:
                 finish_reason = "context_exhausted"
+        elif (
+            completion.evidence_assessment is not None
+            and not completion.evidence_assessment.sufficient
+        ):
+            finish_reason = "evidence_insufficient"
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
@@ -309,6 +361,11 @@ class ChatService:
                 "citations": citations_payload,
                 "finish_reason": finish_reason,
                 "rewrite_applied": completion.rewrite_applied,
+                "query_intent": completion.query_intent,
+                "retrieval_trace": self._serialize_retrieval_trace(completion.retrieval_trace),
+                "evidence_assessment": self._serialize_evidence_assessment(
+                    completion.evidence_assessment
+                ),
             },
         )
 
@@ -330,20 +387,35 @@ class ChatService:
         normalized_messages = self._normalize_messages(messages)
         # 当前最稳定的检索查询是最后一条用户追问，而不是整段会话拼接文本。
         original_query = self._resolve_retrieval_query(normalized_messages)
-        retrieval_query = original_query
-        hits = self._chunk_search_service.search(
+        rewrite_result = self._query_rewrite_service.rewrite(
+            normalized_messages,
+            original_query=original_query,
+        )
+        retrieval_query = rewrite_result.rewritten_query
+        rewrite_applied = rewrite_result.rewrite_applied
+        search_result = self._chunk_search_service.search_with_trace(
             retrieval_query,
             retrieval_size,
             viewer_user_id=viewer_user_id,
+            retrieval_mode="chat",
         )
-        if self._chunk_rerank_service is not None:
-            hits = self._chunk_rerank_service.rerank(
+        hits = search_result.hits
+        deep_rerank_triggered = False
+        if self._deep_rerank_service is not None:
+            hits, deep_rerank_triggered = self._deep_rerank_service.rerank(
                 query_text=retrieval_query,
                 hits=hits,
             )
         citations = [
             self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
         ]
+        retrieval_trace = search_result.retrieval_trace
+        if retrieval_trace is not None and deep_rerank_triggered:
+            retrieval_trace = replace(
+                retrieval_trace,
+                deep_rerank_triggered=True,
+                final_hit_count=len(hits),
+            )
 
         return _PreparedChatCompletion(
             original_query=original_query,
@@ -353,8 +425,12 @@ class ChatService:
                 messages=normalized_messages,
                 retrieval_query=retrieval_query,
                 citations=citations,
+                evidence_assessment=search_result.evidence_assessment,
             ),
-            rewrite_applied=False,
+            rewrite_applied=rewrite_applied,
+            query_intent=search_result.query_intent,
+            retrieval_trace=retrieval_trace,
+            evidence_assessment=search_result.evidence_assessment,
         )
 
     def _normalize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -386,19 +462,29 @@ class ChatService:
         messages: list[ChatMessage],
         retrieval_query: str,
         citations: list[ChatCitation],
+        evidence_assessment: EvidenceAssessment | None = None,
     ) -> list[ChatMessage]:
         """构造传给聊天模型的消息列表。"""
         prompt_messages = [
             ChatMessage(role="system", content=self._build_system_prompt()),
             ChatMessage(
                 role="system",
+                content=self._build_render_contract_prompt(),
+            ),
+            ChatMessage(
+                role="system",
                 # 把召回证据前置为 system 消息，尽量降低后续多轮对话对证据约束的稀释。
-                content=self._build_context_prompt(
+                content=self._context_packing_service.build_context_prompt(
                     retrieval_query=retrieval_query,
                     citations=citations,
                 ),
             ),
         ]
+        evidence_prompt = self._context_packing_service.build_evidence_guidance_prompt(
+            evidence_assessment=evidence_assessment,
+        )
+        if evidence_prompt:
+            prompt_messages.append(ChatMessage(role="system", content=evidence_prompt))
         prompt_messages.extend(messages)
         return prompt_messages
 
@@ -406,52 +492,16 @@ class ChatService:
         """返回配置注入的风控系统提示词。"""
         return self._system_prompt
 
-    def _build_context_prompt(
-        self,
-        *,
-        retrieval_query: str,
-        citations: list[ChatCitation],
-    ) -> str:
-        """把检索结果格式化为模型可消费的证据上下文。"""
-        if not citations:
-            return self._build_no_knowledge_context_prompt(retrieval_query=retrieval_query)
-
-        sections = [f"用户当前问题：{retrieval_query}", "以下是可引用的知识库证据："]
-
-        for index, citation in enumerate(citations, start=1):
-            sections.append(
-                "\n".join(
-                    [
-                        f"[{index}] 文件：{citation.source_filename}",
-                        f"chunk_id：{citation.chunk_id}",
-                        f"chunk_index：{citation.chunk_index}",
-                        f"score：{citation.score if citation.score is not None else 'null'}",
-                        f"内容：{self._truncate_content(citation.content)}",
-                    ]
-                )
-            )
-
-        sections.append("请只基于上述证据回答，不要引用未提供的外部知识。")
-        return "\n\n".join(sections)
-
-    def _build_no_knowledge_context_prompt(self, *, retrieval_query: str) -> str:
-        """构造未命中知识库时的模型约束提示。"""
-        return "\n\n".join(
+    def _build_render_contract_prompt(self) -> str:
+        """约束模型直接输出更稳定的 Markdown 正文。"""
+        return "\n".join(
             [
-                f"用户当前问题：{retrieval_query}",
-                "当前轮未检索到可引用的知识库证据。",
-                (
-                    "你仍然需要回答，但必须遵守以下约束："
-                    "对问候、身份说明、能力介绍、通用概念解释，可以直接给出简洁中文回答；"
-                    "对涉及具体规则、权限、金额计算、合规要求或业务结论等高风险问题，"
-                    "不得伪造依据或给出超出证据的确定性承诺。"
-                ),
-                (
-                    "如果当前问题需要系统记录、业务规则或知识库材料支撑，"
-                    "必须明确说明“当前没有检索到可支撑结论的知识库材料”，"
-                    "只能提供一般性说明，并建议补充材料或转人工核实。"
-                ),
-                "当前没有证据可引用，不要输出 [1][2] 这类引用编号。",
+                "输出格式要求：",
+                "1. 正文请直接输出 Markdown，不要输出 HTML。",
+                "2. 标题、列表、表格、引用段落请使用标准 Markdown 语法。",
+                "3. 不要输出 JSON、字段名或额外解释。",
+                "4. 保留文中的证据编号格式，例如 [1][2]。",
+                "5. 除非内容确实需要代码示例，否则不要使用代码块围栏。",
             ]
         )
 
@@ -471,9 +521,9 @@ class ChatService:
             merged_terms=hit.merged_terms,
             score=hit.score,
             snippet=self._build_snippet(hit.content),
-            heading_path=[],
-            section_title=None,
-            content_type="paragraph",
+            heading_path=list(hit.heading_path),
+            section_title=hit.section_title,
+            content_type="table" if hit.content_type == "table" else "paragraph",
             source_anchor=f"chunk:{hit.chunk_index}",
             image_assets=hit.image_assets,
         )
@@ -525,13 +575,46 @@ class ChatService:
             "ocr_text": asset.ocr_text,
         }
 
-    def _truncate_content(self, content: str) -> str:
-        """限制单条证据进入提示词的长度，避免上下文失控。"""
-        # 证据要尽量保持原意，但也要控制 token，避免少量长文档片段挤掉其他召回结果。
-        normalized = " ".join(content.split())
-        if len(normalized) <= self._MAX_CONTEXT_CHARS:
-            return normalized
-        return f"{normalized[: self._MAX_CONTEXT_CHARS]}..."
+    def _serialize_evidence_assessment(
+        self,
+        assessment: EvidenceAssessment | None,
+    ) -> dict[str, object] | None:
+        """把证据充分性判断结果转换为可序列化结构。"""
+        if assessment is None:
+            return None
+        return {
+            "sufficient": assessment.sufficient,
+            "reason_code": assessment.reason_code,
+            "citation_count": assessment.citation_count,
+            "top_score": assessment.top_score,
+        }
+
+    def _serialize_retrieval_trace(
+        self,
+        retrieval_trace: RetrievalTrace | None,
+    ) -> dict[str, object] | None:
+        """把检索 trace 转换为可序列化结构。"""
+        if retrieval_trace is None:
+            return None
+        return {
+            "mode": retrieval_trace.mode,
+            "query_intent": retrieval_trace.query_intent,
+            "lane_count": retrieval_trace.lane_count,
+            "final_hit_count": retrieval_trace.final_hit_count,
+            "evidence_sufficient": retrieval_trace.evidence_sufficient,
+            "evidence_reason": retrieval_trace.evidence_reason,
+            "deep_rerank_triggered": retrieval_trace.deep_rerank_triggered,
+            "lanes": [
+                {
+                    "lane_id": lane.lane_id,
+                    "query_text": lane.query_text,
+                    "lane_weight": lane.lane_weight,
+                    "result_count": lane.result_count,
+                    "top_chunk_ids": list(lane.top_chunk_ids),
+                }
+                for lane in retrieval_trace.lanes
+            ],
+        }
 
     def _build_snippet(self, content: str) -> str:
         """为引用卡片构造简短摘要。"""
@@ -555,11 +638,12 @@ class ChatService:
             return "", []
 
         if finish_reason != "stop":
+            normalized_notice = self._normalize_markdown_text(cleaned_answer)
             return cleaned_answer, [
                 ChatContentBlock(
                     block_id="blk-1",
                     block_type="notice",
-                    text=cleaned_answer,
+                    text=normalized_notice,
                     citation_ids=[],
                     sequence=1,
                 )
@@ -590,11 +674,12 @@ class ChatService:
 
         if not parsed_blocks:
             stripped_answer = self._strip_citation_markers(cleaned_answer).strip() or cleaned_answer
+            normalized_block_text = self._normalize_markdown_text(stripped_answer)
             return stripped_answer, [
                 ChatContentBlock(
                     block_id="blk-1",
                     block_type="markdown",
-                    text=stripped_answer,
+                    text=normalized_block_text,
                     citation_ids=[],
                     sequence=1,
                 )
@@ -627,9 +712,7 @@ class ChatService:
             retrieval_query=retrieval_query,
         )
 
-        plain_text = "\n\n".join(
-            block.text for block in parsed_blocks if block.block_type != "image_gallery"
-        ).strip()
+        plain_text = self._build_plain_text_from_raw_blocks(raw_blocks)
         return plain_text or cleaned_answer, parsed_blocks
 
     def _build_uncited_render_content(
@@ -643,7 +726,9 @@ class ChatService:
         parsed_blocks: list[ChatContentBlock] = []
 
         for sequence, raw_block in enumerate(raw_blocks, start=1):
-            block_text = self._strip_citation_markers(raw_block).strip()
+            block_text = self._normalize_markdown_text(
+                self._strip_citation_markers(raw_block).strip()
+            )
             if not block_text:
                 continue
             parsed_blocks.append(
@@ -658,17 +743,18 @@ class ChatService:
 
         if not parsed_blocks:
             stripped_answer = self._strip_citation_markers(answer).strip() or answer
+            normalized_block_text = self._normalize_markdown_text(stripped_answer)
             return stripped_answer, [
                 ChatContentBlock(
                     block_id="blk-1",
                     block_type="markdown",
-                    text=stripped_answer,
+                    text=normalized_block_text,
                     citation_ids=[],
                     sequence=1,
                 )
             ]
 
-        plain_text = "\n\n".join(block.text for block in parsed_blocks).strip()
+        plain_text = self._build_plain_text_from_raw_blocks(raw_blocks)
         return plain_text or answer, parsed_blocks
 
     def _build_stream_content_blocks_from_raw_block(
@@ -683,7 +769,7 @@ class ChatService:
         has_valid_reference = bool(citation_ids)
         if not citation_ids and len(citations) == 1:
             citation_ids = [citations[0].citation_id]
-        block_text = self._strip_citation_markers(raw_block).strip()
+        block_text = self._normalize_markdown_text(self._strip_citation_markers(raw_block).strip())
         if not block_text:
             return [], has_valid_reference
 
@@ -699,6 +785,28 @@ class ChatService:
             ],
             has_valid_reference,
         )
+
+    def _normalize_markdown_text(self, text: str) -> str:
+        """对模型直出的 Markdown 做最小必要规整，尽量保持原貌。"""
+        stripped_text = text.strip()
+        if not stripped_text:
+            return ""
+
+        normalized_newlines = stripped_text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.rstrip() for line in normalized_newlines.split("\n")]
+        normalized_text = "\n".join(lines).strip()
+        normalized_text = self._EXCESSIVE_BLANK_LINE_PATTERN.sub("\n\n", normalized_text)
+        return normalized_text
+
+    def _build_plain_text_from_raw_blocks(self, raw_blocks: list[str]) -> str:
+        """从原始正文块构造纯文本返回值。"""
+        plain_blocks: list[str] = []
+        for raw_block in raw_blocks:
+            normalized_block = self._strip_citation_markers(raw_block).strip()
+            if not normalized_block:
+                continue
+            plain_blocks.append(normalized_block)
+        return "\n\n".join(plain_blocks).strip()
 
     def _inject_image_blocks(
         self,

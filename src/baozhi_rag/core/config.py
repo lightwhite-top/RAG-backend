@@ -218,7 +218,17 @@ class Settings(BaseSettings):
     )
     rerank_model: str | None = Field(
         default=None,
-        description="通用重排模型名称，可复用于 chunk 与图片候选重排",
+        description="通用文本重排模型名称，用于 chunk 候选重排",
+        validation_alias="LLM_RERANK_MODEL",
+    )
+    deep_rerank_model: str | None = Field(
+        default=None,
+        description="深度重排模型名称，用于困难查询的二阶段重排",
+        validation_alias="LLM_DEEP_RERANK_MODEL",
+    )
+    image_rerank_model: str | None = Field(
+        default=None,
+        description="图片重排模型名称，用于图片候选重排",
         validation_alias="LLM_IMAGE_RERANK_MODEL",
     )
     chat_system_prompt: str = Field(
@@ -268,6 +278,36 @@ class Settings(BaseSettings):
         default=10,
         description="chunk 检索默认返回条数",
         validation_alias="SEARCH_DEFAULT_SIZE",
+    )
+    search_lexical_candidate_size: int = Field(
+        default=40,
+        description="词法检索候选池大小",
+        validation_alias="SEARCH_LEXICAL_CANDIDATE_SIZE",
+    )
+    search_vector_candidate_size: int = Field(
+        default=40,
+        description="向量检索候选池大小",
+        validation_alias="SEARCH_VECTOR_CANDIDATE_SIZE",
+    )
+    search_rrf_lexical_weight: float = Field(
+        default=1.0,
+        description="词法检索 RRF 融合权重",
+        validation_alias="SEARCH_RRF_LEXICAL_WEIGHT",
+    )
+    search_rrf_vector_weight: float = Field(
+        default=1.1,
+        description="向量检索 RRF 融合权重",
+        validation_alias="SEARCH_RRF_VECTOR_WEIGHT",
+    )
+    search_deep_rerank_score_threshold: float = Field(
+        default=0.12,
+        description="触发深度重排的最低得分阈值",
+        validation_alias="SEARCH_DEEP_RERANK_SCORE_THRESHOLD",
+    )
+    search_deep_rerank_margin_threshold: float = Field(
+        default=0.02,
+        description="触发深度重排的前二结果分差阈值",
+        validation_alias="SEARCH_DEEP_RERANK_MARGIN_THRESHOLD",
     )
     mysql_host: str = Field(
         default="127.0.0.1",

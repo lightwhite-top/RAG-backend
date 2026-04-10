@@ -190,6 +190,12 @@ class DocumentChunk:
     uploader_user_id: str = ""
     # 文件可见性范围
     visibility_scope: str = ""
+    # chunk 所属标题路径
+    heading_path: list[str] = field(default_factory=_empty_str_list)
+    # chunk 所属末级标题
+    section_title: str | None = None
+    # chunk 内容类型，当前主要区分 paragraph / table
+    content_type: str = "paragraph"
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=_empty_str_list)
     # 与当前 chunk 关联的图片引用键。
@@ -212,6 +218,9 @@ class DocumentChunk:
             "segment_id": self.segment_id,
             "chunk_index": self.chunk_index,
             "char_count": self.char_count,
+            "heading_path": self.heading_path,
+            "section_title": self.section_title,
+            "content_type": self.content_type,
             "content": self.content,
             "merged_terms": self.merged_terms,
             "image_asset_refs": [item.to_search_document() for item in self.image_asset_refs],
@@ -349,12 +358,34 @@ class DocumentChunkService:
         chunks: list[DocumentChunk] = []
         paragraph_buffer: list[str] = []
         paragraph_buffer_segment_ids: list[str] = []
+        paragraph_buffer_heading_context = ""
 
         for segment in segments:
             if segment.segment_type is SegmentType.PARAGRAPH:
+                if paragraph_buffer and paragraph_buffer_heading_context != segment.heading_context:
+                    buffered_segment_id = self._build_buffer_segment_id(
+                        paragraph_buffer_segment_ids
+                    )
+                    chunks.extend(
+                        self._build_chunks(
+                            text="\n\n".join(paragraph_buffer),
+                            source_filename=source_filename,
+                            storage_key=storage_key,
+                            file_id=file_id,
+                            segment_id=buffered_segment_id,
+                            start_index=len(chunks),
+                            heading_context=paragraph_buffer_heading_context,
+                            content_type="paragraph",
+                        )
+                    )
+                    paragraph_buffer.clear()
+                    paragraph_buffer_segment_ids.clear()
+                    paragraph_buffer_heading_context = ""
+
                 if not segment.image_assets:
                     paragraph_buffer.append(segment.content)
                     paragraph_buffer_segment_ids.append(segment.segment_id)
+                    paragraph_buffer_heading_context = segment.heading_context
                     continue
 
                 # 带图片的段落单独切块，避免图片和无关段落被混装到同一个 chunk。
@@ -370,10 +401,13 @@ class DocumentChunkService:
                             file_id=file_id,
                             segment_id=buffered_segment_id,
                             start_index=len(chunks),
+                            heading_context=paragraph_buffer_heading_context,
+                            content_type="paragraph",
                         )
                     )
                     paragraph_buffer.clear()
                     paragraph_buffer_segment_ids.clear()
+                    paragraph_buffer_heading_context = ""
 
                 chunks.extend(
                     self._build_chunks(
@@ -383,6 +417,8 @@ class DocumentChunkService:
                         file_id=file_id,
                         segment_id=segment.segment_id,
                         start_index=len(chunks),
+                        heading_context=segment.heading_context,
+                        content_type="paragraph",
                         image_assets=segment.image_assets,
                     )
                 )
@@ -398,10 +434,13 @@ class DocumentChunkService:
                         file_id=file_id,
                         segment_id=buffered_segment_id,
                         start_index=len(chunks),
+                        heading_context=paragraph_buffer_heading_context,
+                        content_type="paragraph",
                     )
                 )
                 paragraph_buffer.clear()
                 paragraph_buffer_segment_ids.clear()
+                paragraph_buffer_heading_context = ""
 
             chunks.extend(
                 self._build_table_chunks(
@@ -427,6 +466,8 @@ class DocumentChunkService:
                     file_id=file_id,
                     segment_id=buffered_segment_id,
                     start_index=len(chunks),
+                    heading_context=paragraph_buffer_heading_context,
+                    content_type="paragraph",
                 )
             )
 
@@ -1053,6 +1094,8 @@ class DocumentChunkService:
         file_id: str,
         chunk_type: ChunkType,
         segment_id: str,
+        heading_context: str = "",
+        content_type: str = "paragraph",
         image_assets: list[ChunkImageAsset] | None = None,
     ) -> DocumentChunk:
         """基于统一元数据创建单个 chunk。
@@ -1068,6 +1111,7 @@ class DocumentChunkService:
             已补齐 `chunk_id`、字符数和领域词抽取结果的标准化 chunk。
         """
         term_match_result = self._term_matcher.extract_terms(content)
+        heading_path = self._parse_heading_path(heading_context)
         return DocumentChunk(
             file_id=file_id,
             chunk_id=f"{file_id}-chunk-{chunk_index}",
@@ -1078,10 +1122,19 @@ class DocumentChunkService:
             char_count=len(content),
             source_filename=source_filename,
             storage_key=storage_key,
+            heading_path=heading_path,
+            section_title=heading_path[-1] if heading_path else None,
+            content_type=content_type,
             merged_terms=term_match_result.merged_terms,
             image_asset_refs=self._build_image_asset_refs(image_assets or []),
             image_assets=list(image_assets or []),
         )
+
+    def _parse_heading_path(self, heading_context: str) -> list[str]:
+        """把标题上下文字符串解析为层级标题路径。"""
+        if not heading_context.strip():
+            return []
+        return [item.strip() for item in heading_context.split(" / ") if item.strip()]
 
     def _build_image_asset_refs(
         self,
@@ -1115,6 +1168,8 @@ class DocumentChunkService:
         file_id: str,
         segment_id: str,
         start_index: int = 0,
+        heading_context: str = "",
+        content_type: str = "paragraph",
         image_assets: list[ChunkImageAsset] | None = None,
     ) -> list[DocumentChunk]:
         """按固定窗口与 overlap 生成切块。
@@ -1154,6 +1209,8 @@ class DocumentChunkService:
                         file_id=file_id,
                         chunk_type=ChunkType.TEXT,
                         segment_id=segment_id,
+                        heading_context=heading_context,
+                        content_type=content_type,
                         image_assets=image_assets,
                     )
                 )
@@ -1215,6 +1272,8 @@ class DocumentChunkService:
                     file_id=file_id,
                     chunk_type=ChunkType.TEXT,
                     segment_id=segment_id,
+                    heading_context=heading_context,
+                    content_type="table",
                     image_assets=image_assets,
                 )
             ]
@@ -1232,6 +1291,8 @@ class DocumentChunkService:
                     file_id=file_id,
                     chunk_type=ChunkType.TEXT,
                     segment_id=segment_id,
+                    heading_context=heading_context,
+                    content_type="table",
                     image_assets=image_assets,
                 )
             ]
@@ -1257,6 +1318,8 @@ class DocumentChunkService:
                     file_id=file_id,
                     chunk_type=ChunkType.TEXT,
                     segment_id=segment_id,
+                    heading_context=heading_context,
+                    content_type="table",
                     image_assets=image_assets,
                 )
             )
