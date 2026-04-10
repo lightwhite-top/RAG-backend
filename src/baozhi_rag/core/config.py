@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote_plus
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from baozhi_rag.core.request_context import REQUEST_ID_HEADER_NAME
@@ -28,223 +28,198 @@ class Settings(BaseSettings):
     app_name: str = Field(
         default="RAG Service",
         description="服务名称",
-        validation_alias=AliasChoices("APP_NAME"),
+        validation_alias="APP_NAME",
     )
     app_env: str = Field(
         default="local",
         description="运行环境",
-        validation_alias=AliasChoices("APP_ENV"),
+        validation_alias="APP_ENV",
     )
     debug: bool = Field(
         default=False,
         description="是否开启调试模式",
-        validation_alias=AliasChoices("APP_DEBUG"),
+        validation_alias="APP_DEBUG",
     )
     version: str = Field(
         default="0.1.0",
         description="服务版本",
-        validation_alias=AliasChoices("APP_VERSION"),
+        validation_alias="APP_VERSION",
     )
     log_level: str = Field(
         default="INFO",
         description="日志级别",
-        validation_alias=AliasChoices("APP_LOG_LEVEL"),
+        validation_alias="APP_LOG_LEVEL",
     )
     cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description="允许跨域访问的来源列表，多个来源通过逗号分隔",
-        validation_alias=AliasChoices("CORS_ALLOW_ORIGINS"),
+        validation_alias="CORS_ALLOW_ORIGINS",
     )
     cors_allow_origin_regex: str | None = Field(
         default=None,
         description="允许跨域访问的来源正则表达式",
-        validation_alias=AliasChoices("CORS_ALLOW_ORIGIN_REGEX"),
+        validation_alias="CORS_ALLOW_ORIGIN_REGEX",
     )
     cors_allow_credentials: bool = Field(
         default=False,
         description="是否允许跨域请求携带凭证",
-        validation_alias=AliasChoices("CORS_ALLOW_CREDENTIALS"),
+        validation_alias="CORS_ALLOW_CREDENTIALS",
     )
     cors_allow_methods: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         description="允许跨域访问的方法列表，多个方法通过逗号分隔",
-        validation_alias=AliasChoices("CORS_ALLOW_METHODS"),
+        validation_alias="CORS_ALLOW_METHODS",
     )
     cors_allow_headers: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["*"],
         description="允许跨域访问时携带的请求头列表，多个请求头通过逗号分隔",
-        validation_alias=AliasChoices("CORS_ALLOW_HEADERS"),
+        validation_alias="CORS_ALLOW_HEADERS",
     )
     cors_expose_headers: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [REQUEST_ID_HEADER_NAME],
         description="允许前端读取的响应头列表，多个响应头通过逗号分隔",
-        validation_alias=AliasChoices("CORS_EXPOSE_HEADERS"),
+        validation_alias="CORS_EXPOSE_HEADERS",
     )
     upload_root_dir: Path = Field(
         default=Path("data/uploads"),
         description="上传文件本地存储根目录",
-        validation_alias=AliasChoices("UPLOAD_ROOT_DIR"),
+        validation_alias="UPLOAD_ROOT_DIR",
     )
     doc_chunk_size: int = Field(
         default=800,
         description="Word 文档切块大小",
-        validation_alias=AliasChoices("DOC_CHUNK_SIZE"),
+        validation_alias="DOC_CHUNK_SIZE",
     )
     doc_chunk_overlap: int = Field(
         default=150,
         description="Word 文档切块重叠长度",
-        validation_alias=AliasChoices("DOC_CHUNK_OVERLAP"),
+        validation_alias="DOC_CHUNK_OVERLAP",
     )
     doc_convert_temp_dir: Path = Field(
         default=Path("data/tmp/converted"),
         description="旧版 Word 转换临时目录",
-        validation_alias=AliasChoices("DOC_CONVERT_TEMP_DIR"),
+        validation_alias="DOC_CONVERT_TEMP_DIR",
     )
     doc_convert_timeout_seconds: int = Field(
         default=120,
         description="旧版 Word 转换超时时间（秒）",
-        validation_alias=AliasChoices("DOC_CONVERT_TIMEOUT_SECONDS"),
+        validation_alias="DOC_CONVERT_TIMEOUT_SECONDS",
         ge=1,
     )
     upload_ingest_version: str = Field(
         default="v1",
         description="上传任务 ingest 版本，用于控制重复文件重新处理",
-        validation_alias=AliasChoices("UPLOAD_INGEST_VERSION"),
+        validation_alias="UPLOAD_INGEST_VERSION",
         min_length=1,
     )
     upload_worker_concurrency: int = Field(
         default=1,
         description="后台上传 worker 并发数",
-        validation_alias=AliasChoices("UPLOAD_WORKER_CONCURRENCY"),
+        validation_alias="UPLOAD_WORKER_CONCURRENCY",
         ge=1,
     )
     upload_worker_poll_interval_seconds: float = Field(
         default=1.0,
         description="后台上传 worker 轮询间隔（秒）",
-        validation_alias=AliasChoices("UPLOAD_WORKER_POLL_INTERVAL_SECONDS"),
+        validation_alias="UPLOAD_WORKER_POLL_INTERVAL_SECONDS",
         gt=0,
     )
     upload_task_lease_seconds: int = Field(
         default=180,
         description="上传任务租约时长（秒）",
-        validation_alias=AliasChoices("UPLOAD_TASK_LEASE_SECONDS"),
+        validation_alias="UPLOAD_TASK_LEASE_SECONDS",
         ge=1,
     )
     upload_task_heartbeat_interval_seconds: float = Field(
         default=30.0,
         description="上传任务心跳刷新间隔（秒）",
-        validation_alias=AliasChoices("UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS"),
+        validation_alias="UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS",
         gt=0,
     )
     domain_dictionary_path: Path | None = Field(
         default=Path("data/domain_dictionary.txt"),
         description="领域词典文件路径，按行存储词项",
-        validation_alias=AliasChoices("DOMAIN_DICTIONARY_PATH"),
+        validation_alias="DOMAIN_DICTIONARY_PATH",
     )
     es_url: str = Field(
         default="http://127.0.0.1:9200",
         description="Elasticsearch 地址",
-        validation_alias=AliasChoices("ES_URL"),
+        validation_alias="ES_URL",
     )
     es_index_name: str = Field(
         default="document_chunks",
         description="chunk 索引名称",
-        validation_alias=AliasChoices("ES_INDEX_NAME"),
+        validation_alias="ES_INDEX_NAME",
     )
     es_username: str | None = Field(
         default=None,
         description="Elasticsearch 用户名",
-        validation_alias=AliasChoices("ES_USERNAME"),
+        validation_alias="ES_USERNAME",
     )
     es_password: str | None = Field(
         default=None,
         description="Elasticsearch 密码",
-        validation_alias=AliasChoices("ES_PASSWORD"),
+        validation_alias="ES_PASSWORD",
     )
     es_api_key: str | None = Field(
         default=None,
         description="Elasticsearch API Key",
-        validation_alias=AliasChoices("ES_API_KEY"),
+        validation_alias="ES_API_KEY",
     )
     es_verify_certs: bool = Field(
         default=True,
         description="是否校验 Elasticsearch 证书",
-        validation_alias=AliasChoices("ES_VERIFY_CERTS"),
+        validation_alias="ES_VERIFY_CERTS",
     )
     milvus_uri: str = Field(
         default="http://127.0.0.1:19530",
         description="Milvus 连接地址",
-        validation_alias=AliasChoices("MILVUS_URI"),
+        validation_alias="MILVUS_URI",
     )
     milvus_token: str | None = Field(
         default=None,
         description="Milvus 认证令牌，格式通常为 user:password",
-        validation_alias=AliasChoices("MILVUS_TOKEN"),
+        validation_alias="MILVUS_TOKEN",
     )
     milvus_db_name: str = Field(
         default="default",
         description="Milvus 数据库名称",
-        validation_alias=AliasChoices("MILVUS_DB_NAME"),
+        validation_alias="MILVUS_DB_NAME",
     )
     milvus_collection_name: str = Field(
         default="document_chunk_vectors",
         description="Milvus 向量集合名称",
-        validation_alias=AliasChoices("MILVUS_COLLECTION_NAME"),
+        validation_alias="MILVUS_COLLECTION_NAME",
     )
     llm_api_key: str | None = Field(
         default=None,
         description="大模型服务 API Key",
-        validation_alias=AliasChoices(
-            "LLM_API_KEY",
-            "MODEL_API_KEY",
-            "DASHSCOPE_API_KEY",
-            "BAILIAN_API_KEY",
-        ),
+        validation_alias="LLM_API_KEY",
     )
     llm_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         description="大模型服务 OpenAI 兼容接口地址",
-        validation_alias=AliasChoices(
-            "LLM_BASE_URL",
-            "MODEL_BASE_URL",
-            "DASHSCOPE_BASE_URL",
-            "BAILIAN_BASE_URL",
-        ),
+        validation_alias="LLM_BASE_URL",
     )
     llm_timeout_seconds: float = Field(
         default=30.0,
         description="大模型调用超时时间（秒）",
-        validation_alias=AliasChoices(
-            "LLM_TIMEOUT_SECONDS",
-            "MODEL_TIMEOUT_SECONDS",
-            "BAILIAN_TIMEOUT_SECONDS",
-        ),
+        validation_alias="LLM_TIMEOUT_SECONDS",
     )
     llm_chat_model: str | None = Field(
         default=None,
         description="聊天模型名称",
-        validation_alias=AliasChoices(
-            "LLM_CHAT_MODEL",
-            "CHAT_MODEL",
-            "BAILIAN_CHAT_MODEL",
-        ),
+        validation_alias="LLM_CHAT_MODEL",
     )
     image_recognition_model: str | None = Field(
         default=None,
         description="文档图片识别使用的多模态模型名称",
-        validation_alias=AliasChoices(
-            "LLM_IMAGE_RECOGNITION_MODEL",
-            "IMAGE_RECOGNITION_MODEL",
-        ),
+        validation_alias="LLM_IMAGE_RECOGNITION_MODEL",
     )
     rerank_model: str | None = Field(
         default=None,
         description="通用重排模型名称，可复用于 chunk 与图片候选重排",
-        validation_alias=AliasChoices(
-            "LLM_IMAGE_RERANK_MODEL",
-            "LLM_RERANK_MODEL",
-            "RERANK_MODEL",
-        ),
+        validation_alias="LLM_IMAGE_RERANK_MODEL",
     )
     chat_system_prompt: str = Field(
         default=(
@@ -256,207 +231,198 @@ class Settings(BaseSettings):
             "如果问题需要具体制度、条款、业务规则或数据支撑，请建议用户补充材料或转人工核实。"
         ),
         description="聊天接口默认使用的系统提示词",
-        validation_alias=AliasChoices("CHAT_SYSTEM_PROMPT"),
+        validation_alias="CHAT_SYSTEM_PROMPT",
         min_length=1,
     )
     chunk_embedding_model: str = Field(
         default="text-embedding-v4",
         description="chunk 向量化模型名称",
-        validation_alias=AliasChoices("CHUNK_EMBEDDING_MODEL"),
+        validation_alias="CHUNK_EMBEDDING_MODEL",
     )
     chunk_embedding_llm_api_key: str | None = Field(
         default=None,
         description="向量化专用大模型服务 API Key；未配置时回退到通用 LLM_API_KEY",
-        validation_alias=AliasChoices(
-            "CHUNK_EMBEDDING_LLM_API_KEY",
-            "CHUNK_EMBEDDING_API_KEY",
-        ),
+        validation_alias="CHUNK_EMBEDDING_LLM_API_KEY",
     )
     chunk_embedding_llm_base_url: str | None = Field(
         default=None,
         description="向量化专用 OpenAI 兼容接口地址；未配置时回退到通用 LLM_BASE_URL",
-        validation_alias=AliasChoices(
-            "CHUNK_EMBEDDING_LLM_BASE_URL",
-            "CHUNK_EMBEDDING_BASE_URL",
-        ),
+        validation_alias="CHUNK_EMBEDDING_LLM_BASE_URL",
     )
     chunk_embedding_llm_timeout_seconds: float | None = Field(
         default=None,
         description="向量化专用调用超时时间（秒）；未配置时回退到通用 LLM_TIMEOUT_SECONDS",
-        validation_alias=AliasChoices(
-            "CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS",
-            "CHUNK_EMBEDDING_TIMEOUT_SECONDS",
-        ),
+        validation_alias="CHUNK_EMBEDDING_LLM_TIMEOUT_SECONDS",
     )
     chunk_embedding_dimensions: int = Field(
         default=1024,
         description="chunk 向量维度",
-        validation_alias=AliasChoices("CHUNK_EMBEDDING_DIMENSIONS"),
+        validation_alias="CHUNK_EMBEDDING_DIMENSIONS",
     )
     chunk_embedding_batch_size: int = Field(
         default=10,
         description="单次批量向量化请求的最大文本条数",
-        validation_alias=AliasChoices("CHUNK_EMBEDDING_BATCH_SIZE"),
+        validation_alias="CHUNK_EMBEDDING_BATCH_SIZE",
     )
     search_default_size: int = Field(
         default=10,
         description="chunk 检索默认返回条数",
-        validation_alias=AliasChoices("SEARCH_DEFAULT_SIZE"),
+        validation_alias="SEARCH_DEFAULT_SIZE",
     )
     mysql_host: str = Field(
         default="127.0.0.1",
         description="MySQL 主机地址",
-        validation_alias=AliasChoices("MYSQL_HOST"),
+        validation_alias="MYSQL_HOST",
     )
     mysql_port: int = Field(
         default=3306,
         description="MySQL 端口",
-        validation_alias=AliasChoices("MYSQL_PORT"),
+        validation_alias="MYSQL_PORT",
     )
     mysql_database: str = Field(
         default="rag",
         description="MySQL 数据库名称",
-        validation_alias=AliasChoices("MYSQL_DATABASE"),
+        validation_alias="MYSQL_DATABASE",
     )
     mysql_username: str = Field(
         default="root",
         description="MySQL 用户名",
-        validation_alias=AliasChoices("MYSQL_USERNAME"),
+        validation_alias="MYSQL_USERNAME",
     )
     mysql_password: str = Field(
         default="",
         description="MySQL 密码",
-        validation_alias=AliasChoices("MYSQL_PASSWORD"),
+        validation_alias="MYSQL_PASSWORD",
     )
     jwt_secret_key: str = Field(
         default="change-me",
         description="JWT 签名密钥",
-        validation_alias=AliasChoices("JWT_SECRET_KEY"),
+        validation_alias="JWT_SECRET_KEY",
         min_length=1,
     )
     jwt_algorithm: str = Field(
         default="HS256",
         description="JWT 签名算法",
-        validation_alias=AliasChoices("JWT_ALGORITHM"),
+        validation_alias="JWT_ALGORITHM",
         min_length=1,
     )
     jwt_access_token_expire_days: int = Field(
         default=7,
         description="JWT 访问令牌有效期（天）",
-        validation_alias=AliasChoices("JWT_ACCESS_TOKEN_EXPIRE_DAYS"),
+        validation_alias="JWT_ACCESS_TOKEN_EXPIRE_DAYS",
         ge=1,
     )
     smtp_host: str | None = Field(
         default=None,
         description="SMTP 服务器地址",
-        validation_alias=AliasChoices("SMTP_HOST"),
+        validation_alias="SMTP_HOST",
     )
     smtp_port: int = Field(
         default=587,
         description="SMTP 服务器端口",
-        validation_alias=AliasChoices("SMTP_PORT"),
+        validation_alias="SMTP_PORT",
         ge=1,
         le=65535,
     )
     smtp_username: str | None = Field(
         default=None,
         description="SMTP 登录用户名",
-        validation_alias=AliasChoices("SMTP_USERNAME"),
+        validation_alias="SMTP_USERNAME",
     )
     smtp_password: str | None = Field(
         default=None,
         description="SMTP 登录密码",
-        validation_alias=AliasChoices("SMTP_PASSWORD"),
+        validation_alias="SMTP_PASSWORD",
     )
     smtp_use_tls: bool = Field(
         default=True,
         description="是否对 SMTP 明文连接启用 STARTTLS",
-        validation_alias=AliasChoices("SMTP_USE_TLS"),
+        validation_alias="SMTP_USE_TLS",
     )
     smtp_use_ssl: bool = Field(
         default=False,
         description="是否直接使用 SMTPS 连接",
-        validation_alias=AliasChoices("SMTP_USE_SSL"),
+        validation_alias="SMTP_USE_SSL",
     )
     smtp_from_email: str | None = Field(
         default=None,
         description="注册验证码邮件发件地址",
-        validation_alias=AliasChoices("SMTP_FROM_EMAIL"),
+        validation_alias="SMTP_FROM_EMAIL",
     )
     smtp_from_name: str = Field(
         default="",
         description="注册验证码邮件发件人名称；留空时回退到 APP_NAME",
-        validation_alias=AliasChoices("SMTP_FROM_NAME"),
+        validation_alias="SMTP_FROM_NAME",
     )
     smtp_timeout_seconds: float = Field(
         default=10.0,
         description="SMTP 连接与发送超时时间（秒）",
-        validation_alias=AliasChoices("SMTP_TIMEOUT_SECONDS"),
+        validation_alias="SMTP_TIMEOUT_SECONDS",
         gt=0,
     )
     registration_code_secret: str = Field(
         default="change-me-registration-code-secret",
         description="注册验证码摘要签名密钥",
-        validation_alias=AliasChoices("REGISTRATION_CODE_SECRET"),
+        validation_alias="REGISTRATION_CODE_SECRET",
         min_length=1,
     )
     registration_code_length: int = Field(
         default=6,
         description="注册验证码长度",
-        validation_alias=AliasChoices("REGISTRATION_CODE_LENGTH"),
+        validation_alias="REGISTRATION_CODE_LENGTH",
         ge=4,
         le=8,
     )
     registration_code_expire_minutes: int = Field(
         default=10,
         description="注册验证码有效期（分钟）",
-        validation_alias=AliasChoices("REGISTRATION_CODE_EXPIRE_MINUTES"),
+        validation_alias="REGISTRATION_CODE_EXPIRE_MINUTES",
         ge=1,
         le=60,
     )
     registration_code_resend_interval_seconds: int = Field(
         default=60,
         description="注册验证码重发冷却时间（秒）",
-        validation_alias=AliasChoices("REGISTRATION_CODE_RESEND_INTERVAL_SECONDS"),
+        validation_alias="REGISTRATION_CODE_RESEND_INTERVAL_SECONDS",
         ge=0,
         le=3600,
     )
     registration_code_max_attempts: int = Field(
         default=5,
         description="单个验证码允许的最大错误尝试次数",
-        validation_alias=AliasChoices("REGISTRATION_CODE_MAX_ATTEMPTS"),
+        validation_alias="REGISTRATION_CODE_MAX_ATTEMPTS",
         ge=1,
         le=10,
     )
     oss_region: str = Field(
         default="cn-hangzhou",
         description="阿里云 OSS 所属地域",
-        validation_alias=AliasChoices("OSS_REGION"),
+        validation_alias="OSS_REGION",
     )
     oss_endpoint: str = Field(
         default="https://oss-cn-hangzhou.aliyuncs.com",
         description="阿里云 OSS 访问域名",
-        validation_alias=AliasChoices("OSS_ENDPOINT"),
+        validation_alias="OSS_ENDPOINT",
     )
     oss_bucket_name: str = Field(
         default="",
         description="阿里云 OSS Bucket 名称",
-        validation_alias=AliasChoices("OSS_BUCKET_NAME"),
+        validation_alias="OSS_BUCKET_NAME",
     )
     oss_access_key_id: str = Field(
         default="",
         description="阿里云 OSS AccessKey ID",
-        validation_alias=AliasChoices("OSS_ACCESS_KEY_ID"),
+        validation_alias="OSS_ACCESS_KEY_ID",
     )
     oss_access_key_secret: str = Field(
         default="",
         description="阿里云 OSS AccessKey Secret",
-        validation_alias=AliasChoices("OSS_ACCESS_KEY_SECRET"),
+        validation_alias="OSS_ACCESS_KEY_SECRET",
     )
     oss_object_prefix: str = Field(
         default="knowledge-files",
         description="阿里云 OSS 对象统一前缀",
-        validation_alias=AliasChoices("OSS_OBJECT_PREFIX"),
+        validation_alias="OSS_OBJECT_PREFIX",
     )
 
     @field_validator(
