@@ -501,26 +501,6 @@ class Settings(BaseSettings):
         """返回注入了应用名称的聊天系统提示词。"""
         return self.chat_system_prompt.replace("{app_name}", self.app_name)
 
-    @property
-    def bailian_api_key(self) -> str | None:
-        """兼容旧命名，返回大模型服务 API Key。"""
-        return self.llm_api_key
-
-    @property
-    def bailian_base_url(self) -> str:
-        """兼容旧命名，返回大模型服务接口地址。"""
-        return self.llm_base_url
-
-    @property
-    def bailian_timeout_seconds(self) -> float:
-        """兼容旧命名，返回大模型调用超时时间。"""
-        return self.llm_timeout_seconds
-
-    @property
-    def bailian_chat_model(self) -> str | None:
-        """兼容旧命名，返回聊天模型名称。"""
-        return self.llm_chat_model
-
 
 def _normalize_app_env_for_env_file(app_env: str | None) -> str | None:
     """把运行环境标识归一化为环境文件后缀。
