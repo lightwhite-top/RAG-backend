@@ -6,9 +6,8 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from http import HTTPStatus
 from typing import Protocol
-
-from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchExecutionResult, ChunkSearchHit
@@ -32,7 +31,7 @@ class ChatCompletionValidationError(AppError):
 
     default_message = "聊天请求参数非法"
     default_error_code = "chat_completion_validation_error"
-    default_status_code = status.HTTP_400_BAD_REQUEST
+    default_status_code = int(HTTPStatus.BAD_REQUEST)
 
 
 @dataclass(frozen=True, slots=True)
