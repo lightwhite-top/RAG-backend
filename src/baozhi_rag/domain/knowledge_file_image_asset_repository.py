@@ -21,6 +21,10 @@ class KnowledgeFileImageAssetRepository(Protocol):
         """按文件 ID 查询图片资产。"""
         ...
 
+    def get_asset_by_id(self, asset_id: str) -> KnowledgeFileImageAsset | None:
+        """按图片资产 ID 查询单个图片资产。"""
+        ...
+
     def list_assets_by_semantic_chunk_ids(
         self,
         semantic_chunk_ids: list[str],

@@ -351,23 +351,26 @@ class ConversationChatService:
         return citation_records
 
     def _serialize_content_block(self, block: object) -> dict[str, object]:
+        """把服务层正文块序列化为可落库的稳定结构。"""
         return {
             "block_id": getattr(block, "block_id", ""),
             "block_type": getattr(block, "block_type", "markdown"),
             "text": getattr(block, "text", ""),
             "citation_ids": list(getattr(block, "citation_ids", [])),
             "sequence": int(getattr(block, "sequence", 0)),
-            "image_assets": [
+            "files_assets": [
                 {
-                    "segment_id": getattr(asset, "segment_id", None),
                     "asset_id": getattr(asset, "asset_id", ""),
-                    "source_anchor": getattr(asset, "source_anchor", None),
+                    "display_name": getattr(asset, "display_name", ""),
                     "storage_key": getattr(asset, "storage_key", ""),
-                    "thumbnail_storage_key": getattr(asset, "thumbnail_storage_key", None),
-                    "image_type": getattr(asset, "image_type", ""),
-                    "summary": getattr(asset, "summary", ""),
-                    "ocr_text": getattr(asset, "ocr_text", ""),
+                    "content_type": getattr(asset, "content_type", None),
+                    "extension": getattr(asset, "extension", None),
+                    "size": getattr(asset, "size", None),
+                    "preview_storage_key": getattr(asset, "preview_storage_key", None),
+                    "source_anchor": getattr(asset, "source_anchor", None),
+                    "summary": getattr(asset, "summary", None),
+                    "ocr_text": getattr(asset, "ocr_text", None),
                 }
-                for asset in list(getattr(block, "image_assets", []))
+                for asset in list(getattr(block, "files_assets", []))
             ],
         }

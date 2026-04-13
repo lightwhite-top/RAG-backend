@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from baozhi_rag.schemas.common import NormalizedExtension
+
 
 class UploadedFileItem(BaseModel):
     """单个上传文件结果。"""
@@ -37,6 +39,10 @@ class UploadTaskItem(BaseModel):
     stage: str = Field(description="任务阶段")
     original_filename: str = Field(description="当前任务对应的原始文件名")
     content_type: str = Field(description="文件内容类型")
+    extension: NormalizedExtension = Field(
+        description="标准化文件扩展名，不含点，例如 pdf、docx；无法识别时为 null",
+        title="文件扩展名",
+    )
     size: int = Field(description="文件字节数")
     file_id: str | None = Field(default=None, description="处理完成后的文件标识")
     chunk_count: int = Field(description="处理完成后的切块数量")
@@ -71,6 +77,10 @@ class KnowledgeFileItem(BaseModel):
     uploader_user_id: str = Field(description="上传者用户 ID")
     original_filename: str = Field(description="原始文件名")
     content_type: str = Field(description="文件内容类型")
+    extension: NormalizedExtension = Field(
+        description="标准化文件扩展名，不含点，例如 pdf、docx；无法识别时为 null",
+        title="文件扩展名",
+    )
     size: int = Field(description="文件字节数")
     storage_key: str = Field(description="OSS 对象键")
     file_url: str = Field(description="文件可访问地址")

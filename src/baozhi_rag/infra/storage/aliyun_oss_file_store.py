@@ -131,6 +131,37 @@ class AliyunOssFileStore:
                 with suppress(Exception):
                     body.close()
 
+    def iter_download_file(self, *, storage_key: str) -> Iterator[bytes]:
+        """按块读取 OSS 对象内容，供接口直接流式回传。
+
+        参数:
+            storage_key: 目标对象键。
+        返回:
+            可逐块读取文件内容的字节迭代器。
+        异常:
+            ObjectStorageError: OSS 拉取对象失败时抛出。
+        """
+        oss_module = self._get_oss_module()
+        body: Any | None = None
+        try:
+            response = self._get_client().get_object(
+                cast(
+                    Any,
+                    oss_module.GetObjectRequest(
+                        bucket=self._bucket_name,
+                        key=storage_key,
+                    ),
+                )
+            )
+            body = getattr(response, "body", response)
+            yield from self._iter_download_chunks(body=body)
+        except Exception as exc:  # pragma: no cover - 绗笁鏂瑰紓甯哥被鍨嬩笉绋冲畾
+            raise ObjectStorageError(f"涓嬭浇 OSS 瀵硅薄澶辫触: {storage_key}") from exc
+        finally:
+            if body is not None and hasattr(body, "close"):
+                with suppress(Exception):
+                    body.close()
+
     def _iter_download_chunks(self, *, body: Any) -> Iterator[bytes]:
         """把 OSS 响应体统一转换为可写入文件的字节块。
 

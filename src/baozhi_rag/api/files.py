@@ -1,17 +1,25 @@
-"""文件上传与上传任务路由。"""
+"""文件上传、列表查询与同源访问路由。"""
 
 from __future__ import annotations
 
+import unicodedata
+from collections.abc import Iterator
+from pathlib import PurePath
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Path, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 
+from baozhi_rag.api.chat import _resolve_extension
 from baozhi_rag.api.dependencies import (
     get_current_user,
+    get_knowledge_file_access_service,
     get_knowledge_file_delete_service,
     get_knowledge_file_query_service,
     get_knowledge_upload_service,
 )
+from baozhi_rag.api.file_access import build_backend_file_access_payload
 from baozhi_rag.core.request_context import ensure_request_id
 from baozhi_rag.domain.knowledge_upload_task import KnowledgeUploadTask
 from baozhi_rag.domain.user import CurrentUser
@@ -24,6 +32,7 @@ from baozhi_rag.schemas.files import (
     UploadTaskListResponseData,
 )
 from baozhi_rag.services.file_upload import AsyncFileUploadInput
+from baozhi_rag.services.knowledge_file_access import KnowledgeFileAccessService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import (
     KnowledgeFileListItemResult,
@@ -52,7 +61,7 @@ def list_global_files(
         message="获取全局文件列表成功",
         request_id=ensure_request_id(request),
         data=KnowledgeFileListResponseData(
-            items=[_to_knowledge_file_item(item) for item in result.items]
+            items=[_to_knowledge_file_item(request, item) for item in result.items]
         ),
         meta=_build_page_meta(result),
     )
@@ -76,7 +85,7 @@ def list_my_files(
         message="获取我的文件列表成功",
         request_id=ensure_request_id(request),
         data=KnowledgeFileListResponseData(
-            items=[_to_knowledge_file_item(item) for item in result.items]
+            items=[_to_knowledge_file_item(request, item) for item in result.items]
         ),
         meta=_build_page_meta(result),
     )
@@ -190,6 +199,75 @@ def retry_upload_task(
     )
 
 
+@router.get(
+    "/{file_id}/content",
+    summary="访问知识文件内容",
+)
+def get_file_content(
+    file_id: Annotated[str, Path(description="文件 ID")],
+    service: Annotated[
+        KnowledgeFileAccessService,
+        Depends(get_knowledge_file_access_service),
+    ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> StreamingResponse:
+    """通过后端同源接口输出知识文件内容，避免前端直连对象存储。"""
+    access_result = service.open_file(file_id=file_id, current_user=current_user)
+    knowledge_file = access_result.knowledge_file
+    normalized_content_type = knowledge_file.content_type.strip() or "application/octet-stream"
+    return _build_binary_stream_response(
+        filename=knowledge_file.original_filename,
+        content_type=normalized_content_type,
+        content_iter=access_result.content_iter,
+    )
+
+
+@router.get(
+    "/image-assets/{asset_id}/content",
+    summary="访问图片原图内容",
+)
+def get_image_asset_content(
+    asset_id: Annotated[str, Path(description="图片资产 ID")],
+    service: Annotated[
+        KnowledgeFileAccessService,
+        Depends(get_knowledge_file_access_service),
+    ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> StreamingResponse:
+    """通过后端同源接口输出图片原图内容。"""
+    access_result = service.open_image_asset(asset_id=asset_id, current_user=current_user)
+    return _build_binary_stream_response(
+        filename=access_result.filename,
+        content_type=access_result.content_type,
+        content_iter=access_result.content_iter,
+    )
+
+
+@router.get(
+    "/image-assets/{asset_id}/preview",
+    summary="访问图片缩略图内容",
+)
+def get_image_asset_preview(
+    asset_id: Annotated[str, Path(description="图片资产 ID")],
+    service: Annotated[
+        KnowledgeFileAccessService,
+        Depends(get_knowledge_file_access_service),
+    ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> StreamingResponse:
+    """通过后端同源接口输出图片缩略图内容。"""
+    access_result = service.open_image_asset(
+        asset_id=asset_id,
+        current_user=current_user,
+        use_preview=True,
+    )
+    return _build_binary_stream_response(
+        filename=access_result.filename,
+        content_type=access_result.content_type,
+        content_iter=access_result.content_iter,
+    )
+
+
 @router.delete(
     "/{file_id}",
     response_model=SuccessResponse[None],
@@ -210,6 +288,56 @@ def delete_my_file(
     )
 
 
+def _build_content_disposition(filename: str) -> str:
+    """构造兼容中文文件名的 Content-Disposition。"""
+    safe_filename = filename.strip() or "download.bin"
+    ascii_fallback = _build_ascii_filename_fallback(safe_filename)
+    encoded_filename = quote(safe_filename, safe="")
+    return f"inline; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded_filename}"
+
+
+def _build_ascii_filename_fallback(filename: str) -> str:
+    """生成仅包含 ASCII 的文件名兜底值，避免响应头编码失败。"""
+    # Starlette 会把响应头按 latin-1 编码；这里必须保证 filename= 部分可安全编码。
+    file_path = PurePath(filename)
+    normalized_stem = unicodedata.normalize("NFKD", file_path.stem)
+    sanitized_stem = (
+        normalized_stem.encode("ascii", "ignore")
+        .decode("ascii")
+        .replace("\\", "_")
+        .replace("/", "_")
+        .replace('"', "_")
+        .replace(";", "_")
+        .strip(" ._")
+    )
+    if not sanitized_stem:
+        sanitized_stem = "download"
+
+    safe_suffix = file_path.suffix
+    if safe_suffix and safe_suffix.isascii():
+        safe_suffix = safe_suffix.replace('"', "").replace(";", "").replace(" ", "")
+    else:
+        safe_suffix = ".bin"
+    return f"{sanitized_stem}{safe_suffix or '.bin'}"
+
+
+def _build_binary_stream_response(
+    *,
+    filename: str,
+    content_type: str,
+    content_iter: Iterator[bytes],
+) -> StreamingResponse:
+    """构造统一的同源二进制流响应。"""
+    return StreamingResponse(
+        content_iter,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": _build_content_disposition(filename),
+        },
+    )
+
+
 def _to_upload_task_item(task: KnowledgeUploadTask) -> UploadTaskItem:
     """把上传任务实体转换为接口响应结构。"""
     return UploadTaskItem(
@@ -218,6 +346,7 @@ def _to_upload_task_item(task: KnowledgeUploadTask) -> UploadTaskItem:
         stage=task.stage.value,
         original_filename=task.original_filename,
         content_type=task.content_type,
+        extension=_resolve_extension(None, source_filename=task.original_filename),
         size=task.size,
         file_id=task.file_id,
         chunk_count=task.chunk_count,
@@ -232,16 +361,21 @@ def _to_upload_task_item(task: KnowledgeUploadTask) -> UploadTaskItem:
     )
 
 
-def _to_knowledge_file_item(item: KnowledgeFileListItemResult) -> KnowledgeFileItem:
+def _to_knowledge_file_item(
+    request: Request,
+    item: KnowledgeFileListItemResult,
+) -> KnowledgeFileItem:
     """把文件列表结果转换为接口模型。"""
+    file_access = build_backend_file_access_payload(request, file_id=item.file_id)
     return KnowledgeFileItem(
         file_id=item.file_id,
         uploader_user_id=item.uploader_user_id,
         original_filename=item.original_filename,
         content_type=item.content_type,
+        extension=_resolve_extension(None, source_filename=item.original_filename),
         size=item.size,
         storage_key=item.storage_key,
-        file_url=item.file_url,
+        file_url=file_access["url"] or item.file_url,
         storage_provider=item.storage_provider,
         visibility_scope=item.visibility_scope,
         chunk_count=item.chunk_count,

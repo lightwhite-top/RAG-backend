@@ -55,6 +55,7 @@ from baozhi_rag.services.document_image_understanding import DocumentImageUnders
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.fast_rerank import FastRerankService
 from baozhi_rag.services.file_upload import FileUploadService
+from baozhi_rag.services.knowledge_file_access import KnowledgeFileAccessService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
 from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
 from baozhi_rag.services.query_intent import QueryIntentService
@@ -213,6 +214,25 @@ def get_knowledge_file_query_service(
     return KnowledgeFileQueryService(
         knowledge_file_repository=knowledge_file_repository,
         file_url_builder=object_store,
+    )
+
+
+def get_knowledge_file_access_service(
+    knowledge_file_repository: Annotated[
+        KnowledgeFileRepository,
+        Depends(get_knowledge_file_repository),
+    ],
+    knowledge_file_image_asset_repository: Annotated[
+        KnowledgeFileImageAssetRepository,
+        Depends(get_knowledge_file_image_asset_repository),
+    ],
+    object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
+) -> KnowledgeFileAccessService:
+    """构造知识文件同源访问服务。"""
+    return KnowledgeFileAccessService(
+        knowledge_file_repository=knowledge_file_repository,
+        knowledge_file_image_asset_repository=knowledge_file_image_asset_repository,
+        object_store=object_store,
     )
 
 

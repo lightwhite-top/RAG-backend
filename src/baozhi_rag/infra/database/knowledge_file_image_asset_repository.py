@@ -45,6 +45,12 @@ class SqlAlchemyKnowledgeFileImageAssetRepository:
             )
             return [self._to_domain(model) for model in session.scalars(stmt).all()]
 
+    def get_asset_by_id(self, asset_id: str) -> KnowledgeFileImageAsset | None:
+        """按图片资产 ID 查询单个图片资产。"""
+        with self._session_factory() as session:
+            model = session.get(KnowledgeFileImageAssetModel, asset_id)
+            return self._to_domain(model) if model is not None else None
+
     def list_assets_by_semantic_chunk_ids(
         self,
         semantic_chunk_ids: list[str],

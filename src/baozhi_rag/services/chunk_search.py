@@ -77,6 +77,9 @@ class ChunkSearchHit:
     heading_path: list[str] = field(default_factory=_empty_str_list)
     section_title: str | None = None
     content_type: str = "paragraph"
+    file_content_type: str | None = None
+    file_extension: str | None = None
+    file_size: int | None = None
     image_assets: list[ChunkImageAsset] = field(default_factory=_empty_image_asset_list)
     uploader_user_id: str = ""
     visibility_scope: str = ""
@@ -281,8 +284,19 @@ class ChunkSearchService:
                     hit,
                     source_filename=knowledge_file.original_filename,
                     storage_key=knowledge_file.storage_key,
+                    file_content_type=knowledge_file.content_type,
+                    file_extension=self._infer_file_extension(knowledge_file.original_filename),
+                    file_size=knowledge_file.size,
                     uploader_user_id=knowledge_file.uploader_user_id,
                     visibility_scope=knowledge_file.visibility_scope.value,
                 )
             )
         return hydrated_hits
+
+    def _infer_file_extension(self, filename: str) -> str | None:
+        """从原始文件名中提取扩展名，供聊天链路展示使用。"""
+        normalized_name = filename.rsplit("/", maxsplit=1)[-1].strip()
+        if "." not in normalized_name:
+            return None
+        extension = normalized_name.rsplit(".", maxsplit=1)[-1].strip().lower()
+        return extension or None

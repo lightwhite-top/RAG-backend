@@ -291,12 +291,12 @@ INSERT INTO users (
 - 最终知识文件对象会落到 `knowledge-files/<用户id>/<file_id>/<文件名>`，OSS 不再承担原始文件中转下载职责
 - `POST /files/upload` 只负责接收文件、计算原始哈希、登记任务和复用重复任务；不会再把原始文件先传 OSS 再回下载
 - 解析、去重、向量化、ES/Milvus 写入全部由后台 worker 异步完成
-- 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态
+- 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态，响应会返回 `extension`（如 `pdf`、`docx`）
 - 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件；前提是本地源文件仍在当前节点保留
 - 可通过 `GET /files/global` 分页查询管理员上传的全局文件
 - 可通过 `GET /files/mine` 分页查询当前用户自己上传的文件
 - 可通过 `DELETE /files/{file_id}` 删除当前用户自己上传的知识文件
-- 两个列表接口都会返回分页信息，以及可直接用于前端渲染的临时文件地址 `file_url`
+- 两个列表接口都会返回分页信息、可直接用于前端渲染的临时文件地址 `file_url`，以及标准化后的文件扩展名 `extension`
 - 去重分为两层：
   - `raw_sha256`：解决同一大文件重复提交、重复重传、双击上传
   - `content_sha256`：解决“二进制不同但正文相同”的重复入库

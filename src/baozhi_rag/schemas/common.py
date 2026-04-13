@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, WithJsonSchema
+
+# 统一扩展名字段的 OpenAPI 展示，避免 Optional[str] 在 Swagger 中渲染为难读的 anyOf 文案。
+NormalizedExtension = Annotated[
+    str | None,
+    WithJsonSchema(
+        {
+            "type": "string",
+            "nullable": True,
+            "example": "pdf",
+        }
+    ),
+]
 
 
 class SuccessResponse[DataT](BaseModel):

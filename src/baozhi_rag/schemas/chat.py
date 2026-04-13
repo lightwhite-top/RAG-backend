@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from baozhi_rag.schemas.common import NormalizedExtension
+
 
 class ChatImageAssetItem(BaseModel):
     """聊天引用与正文块中的图片资产。"""
@@ -21,6 +23,26 @@ class ChatImageAssetItem(BaseModel):
     image_type: str = Field(default="", description="图片类型")
     summary: str = Field(default="", description="图片语义摘要")
     ocr_text: str = Field(default="", description="图片OCR文本")
+
+
+class ChatBlockAssetItem(BaseModel):
+    """结构化正文块中的统一资产。"""
+
+    asset_id: str = Field(description="资产唯一标识")
+    display_name: str = Field(description="资产展示名称")
+    storage_key: str = Field(description="资产原始存储对象键")
+    content_type: str | None = Field(default=None, description="资产 MIME 类型")
+    extension: NormalizedExtension = Field(
+        description="标准化资产扩展名，不含点，例如 png、pdf；无法识别时为 null",
+        title="资产扩展名",
+    )
+    size: int | None = Field(default=None, description="资产大小（字节）")
+    url: str | None = Field(default=None, description="资产访问地址")
+    preview_url: str | None = Field(default=None, description="资产预览地址")
+    expires_at: str | None = Field(default=None, description="资产地址过期时间")
+    source_anchor: str | None = Field(default=None, description="原文锚点")
+    summary: str | None = Field(default=None, description="资产摘要")
+    ocr_text: str | None = Field(default=None, description="资产 OCR 文本")
 
 
 class ChatMessageItem(BaseModel):
@@ -69,6 +91,14 @@ class ChatCitationItem(BaseModel):
         description="证据内容类型",
     )
     source_anchor: str | None = Field(default=None, description="原文定位锚点")
+    file_url: str | None = Field(default=None, description="文件访问地址")
+    file_content_type: str | None = Field(default=None, description="文件 MIME 类型")
+    extension: NormalizedExtension = Field(
+        description="标准化文件扩展名，不含点，例如 pdf、docx；无法识别时为 null",
+        title="文件扩展名",
+    )
+    size: int | None = Field(default=None, description="文件大小（字节）")
+    expires_at: str | None = Field(default=None, description="文件地址过期时间")
     image_assets: list[ChatImageAssetItem] = Field(
         default_factory=list,
         description="关联图片资产",
@@ -79,14 +109,31 @@ class ChatContentBlockItem(BaseModel):
     """结构化正文块。"""
 
     block_id: str = Field(description="正文块唯一标识")
-    block_type: Literal["markdown", "notice", "image_gallery"] = Field(description="正文块类型")
+    block_type: Literal["markdown", "notice", "image_gallery", "source_file"] = Field(
+        description="正文块类型"
+    )
     text: str = Field(description="正文块文本")
     citation_ids: list[str] = Field(default_factory=list, description="关联引用标识列表")
     sequence: int = Field(description="正文块顺序")
-    image_assets: list[ChatImageAssetItem] = Field(
+    files_assets: list[ChatBlockAssetItem] = Field(
         default_factory=list,
-        description="正文块内联图片资产",
+        description="正文块内联资产",
     )
+
+
+ChatStreamDeltaType = Literal["append", "insert", "replace", "complete", "content_block"]
+
+
+class ChatStreamDeltaItem(BaseModel):
+    """流式正文增量协议。"""
+
+    message_id: str = Field(description="消息唯一标识")
+    request_id: str = Field(description="请求链路编号")
+    seq: int = Field(description="消息内全局递增事件序号")
+    delta_type: ChatStreamDeltaType = Field(description="增量类型")
+    offset: int | None = Field(default=None, description="文本增量追加前的偏移量")
+    after_block_id: str | None = Field(default=None, description="新块插入的锚点块 ID")
+    block: ChatContentBlockItem | None = Field(default=None, description="增量关联正文块")
 
 
 class ChatAssistantMessage(BaseModel):
