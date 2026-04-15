@@ -172,7 +172,7 @@ just run pytest -k health
 
 ## 用户认证与用户管理
 
-当前版本已接入基于 `MySQL + JWT` 的用户体系。
+当前版本已接入基于 `MySQL + JWT` 的用户体系，同时把聊天会话记忆切换为 `MongoDB` 持久化。
 
 - 公开接口：`/auth/register/code`、`/auth/register`、`/auth/login`、`/health/live`、`/docs`、`/openapi.json`、`/redoc`
 - 受保护接口：根路径 `/`、`/files/upload`、`/search/chunks`、`/chat/completions`、`/auth/me`、`/auth/password`
@@ -190,6 +190,12 @@ MYSQL_PORT=3306
 MYSQL_DATABASE=rag
 MYSQL_USERNAME=rag
 MYSQL_PASSWORD=change-me
+CHAT_MEMORY_BACKEND=mongodb
+CHAT_MEMORY_MONGODB_URI=mongodb://127.0.0.1:27017
+CHAT_MEMORY_MONGODB_DATABASE=rag_memory
+CHAT_MEMORY_MONGODB_SESSION_COLLECTION=chat_sessions
+CHAT_MEMORY_MONGODB_MESSAGE_COLLECTION=chat_messages
+CHAT_MEMORY_MONGODB_SNAPSHOT_COLLECTION=chat_session_memory_snapshots
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_DAYS=7
@@ -280,8 +286,9 @@ INSERT INTO users (
 - 接口：`POST /files/upload`
 - 请求类型：`multipart/form-data`
 - 字段名：`files`
-- 当前支持：`.docx`、`.doc`
+- 当前支持：`.docx`、`.doc`、`.pdf`
 - Word 解析会保留标题上下文、表格 Markdown 与批注文本，一并进入切块和检索
+- PDF 解析默认采用 `PyMuPDF` 提取数字版正文与原图；扫描版 PDF 会在页图渲染后按需调用阿里云 OCR
 - 成功时返回 `202 Accepted`
 - 业务输入错误返回 `4xx`
 - 下游依赖或系统故障返回 `5xx`
@@ -318,7 +325,10 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 `UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前同时承担上传源文件保留目录与 worker 本地处理目录。当前实现默认面向单机或固定节点处理模型，不适合无共享存储的跨节点抢占式消费。
 阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
+PDF 解析和 OCR 相关配置通过 `PDF_RENDER_DPI`、`PDF_OCR_ENABLED`、`PDF_LOW_TEXT_PAGE_THRESHOLD`、`PDF_MAX_PAGE_COUNT` 提供。
+阿里云 OCR 配置通过 `ALIYUN_OCR_ENDPOINT`、`ALIYUN_OCR_PAGE_STRUCTURE_API`、`ALIYUN_OCR_TEXT_API`、`ALIYUN_OCR_TEXT_API_FALLBACK`、`ALIYUN_OCR_TABLE_API`、`ALIYUN_OCR_HANDWRITING_API` 提供。
 异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
+当前实现中，阿里云 OCR 默认直接复用 `OSS_REGION`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`；只有 OCR 的 `endpoint` 与接口名保持独立配置。
 默认领域词典文件位于 `data/domain_dictionary.txt`，可通过 `DOMAIN_DICTIONARY_PATH` 配置为其他词典文件。
 `APP_NAME` 是对外服务名的统一来源；`SMTP_FROM_NAME` 留空时会自动继承 `APP_NAME`，`CHAT_SYSTEM_PROMPT` 支持使用 `{app_name}` 占位符。
 当前配置加载会先读取项目根目录下的 `.env` 公共配置，再根据 `APP_ENV` 自动叠加 `.env.development` 或 `.env.production`。
@@ -575,7 +585,7 @@ curl -N -X POST "http://127.0.0.1:8000/chat/completions" `
 服务器部署请优先使用 `docker-compose.server.yml`，该编排与本机联调版的主要区别是：
 
 - 仅对外暴露 `Nginx` 的 `6888` 端口
-- `app`、`MySQL`、`MinIO` 默认只在容器内网通信
+- `app`、`MySQL`、`MongoDB`、`MinIO` 默认只在容器内网通信
 - `Elasticsearch` 与 `Milvus` 默认开启认证，并且默认只绑定服务器本机；如需本地电脑直连服务器调试，可通过环境变量按需对外发布端口
 - Nginx 已补充 SSE 代理参数，适配 `/chat/completions` 的流式输出
 
@@ -602,6 +612,11 @@ chmod +x deploy_server.sh
 - `MYSQL_USERNAME`
 - `MYSQL_PASSWORD`
 - `MYSQL_ROOT_PASSWORD`
+- `CHAT_MEMORY_BACKEND`
+- `CHAT_MEMORY_MONGODB_URI`
+- `CHAT_MEMORY_MONGODB_DATABASE`
+- `CHAT_MEMORY_MONGODB_ROOT_USERNAME`
+- `CHAT_MEMORY_MONGODB_ROOT_PASSWORD`
 - `ES_PASSWORD`
 - `MILVUS_ROOT_PASSWORD`
 - `MILVUS_TOKEN`
