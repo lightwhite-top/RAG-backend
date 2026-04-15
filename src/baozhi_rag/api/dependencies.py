@@ -30,6 +30,13 @@ from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowle
 from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
 )
+from baozhi_rag.infra.database.mongodb import MongoChatStorageManager
+from baozhi_rag.infra.database.mongodb_chat_message_repository import (
+    MongoChatMessageRepository,
+)
+from baozhi_rag.infra.database.mongodb_chat_session_repository import (
+    MongoChatSessionRepository,
+)
 from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.database.registration_verification_repository import (
     SqlAlchemyRegistrationVerificationRepository,
@@ -52,6 +59,8 @@ from baozhi_rag.services.conversation_chat import ConversationChatService
 from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
+from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClient
+from baozhi_rag.services.document_parsers.pdf_parser import PdfDocumentParser
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.fast_rerank import FastRerankService
 from baozhi_rag.services.file_upload import FileUploadService
@@ -84,6 +93,18 @@ def _build_document_image_understanding_service(
     )
 
 
+def _build_pdf_document_parser(settings: Settings) -> PdfDocumentParser:
+    """构造 PDF 解析器。"""
+    ocr_client = AliyunOcrClient.from_settings(settings)
+    return PdfDocumentParser(
+        render_dpi=settings.pdf_render_dpi,
+        low_text_page_threshold=settings.pdf_low_text_page_threshold,
+        max_page_count=settings.pdf_max_page_count,
+        ocr_enabled=settings.pdf_ocr_enabled,
+        ocr_client=ocr_client,
+    )
+
+
 def get_database_manager(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> DatabaseManager:
@@ -99,16 +120,24 @@ def get_user_repository(
 
 
 def get_chat_session_repository(
+    settings: Annotated[Settings, Depends(get_settings)],
     database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
 ) -> ChatSessionRepository:
     """构造聊天会话仓储。"""
+    if settings.chat_memory_backend == "mongodb":
+        chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
+        return MongoChatSessionRepository.from_manager(chat_memory_mongo_manager)
     return SqlAlchemyChatSessionRepository(database_manager.session_factory)
 
 
 def get_chat_message_repository(
+    settings: Annotated[Settings, Depends(get_settings)],
     database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
 ) -> ChatMessageRepository:
     """构造聊天消息仓储。"""
+    if settings.chat_memory_backend == "mongodb":
+        chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
+        return MongoChatMessageRepository.from_manager(chat_memory_mongo_manager)
     return SqlAlchemyChatMessageRepository(database_manager.session_factory)
 
 
@@ -176,6 +205,7 @@ def get_document_preview_service(
             convert_temp_dir=settings.doc_convert_temp_dir,
             doc_convert_timeout_seconds=settings.doc_convert_timeout_seconds,
             term_matcher=term_matcher,
+            pdf_parser=_build_pdf_document_parser(settings),
         ),
         temp_file_store=temp_file_store,
         object_store=object_store,

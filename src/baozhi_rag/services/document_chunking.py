@@ -25,6 +25,12 @@ from docx.text.paragraph import Paragraph
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
+from baozhi_rag.services.document_parsers.pdf_parser import (
+    PdfDocumentParser,
+    PdfParsedImageAsset,
+    PdfParsedSegment,
+    PdfParserError,
+)
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
@@ -126,6 +132,8 @@ class DocumentSegment:
     content: str
     segment_type: SegmentType
     heading_context: str
+    page_number: int | None = None
+    source_anchor: str | None = None
     # 锚定到当前片段的批注文本，会在切块前拼接到可检索内容中。
     comment_texts: list[str] = field(default_factory=_empty_str_list)
     # 锚定到当前片段的图片资产，会在切块阶段进一步绑定到 chunk。
@@ -186,6 +194,8 @@ class DocumentChunk:
     source_filename: str
     # 文件在对象存储中的对象键
     storage_key: str
+    page_number: int | None = None
+    source_anchor: str | None = None
     # 上传该文件的用户 ID
     uploader_user_id: str = ""
     # 文件可见性范围
@@ -212,6 +222,8 @@ class DocumentChunk:
             "file_id": self.file_id,
             "source_filename": self.source_filename,
             "storage_key": self.storage_key,
+            "page_number": self.page_number,
+            "source_anchor": self.source_anchor,
             "uploader_user_id": self.uploader_user_id,
             "visibility_scope": self.visibility_scope,
             "chunk_type": self.chunk_type,
@@ -238,6 +250,7 @@ class DocumentChunkService:
         convert_temp_dir: Path,
         doc_convert_timeout_seconds: int = 120,
         term_matcher: MaximumMatchingTermMatcher | None = None,
+        pdf_parser: PdfDocumentParser | None = None,
     ) -> None:
         """初始化切块服务。
 
@@ -269,6 +282,7 @@ class DocumentChunkService:
         self._convert_temp_dir = convert_temp_dir
         self._doc_convert_timeout_seconds = doc_convert_timeout_seconds
         self._term_matcher = term_matcher or build_default_term_matcher()
+        self._pdf_parser = pdf_parser
 
     def chunk_document(
         self,
@@ -305,6 +319,13 @@ class DocumentChunkService:
                 )
             case ".doc":
                 chunks = self.chunk_doc(
+                    file_path=file_path,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                )
+            case ".pdf":
+                chunks = self.chunk_pdf(
                     file_path=file_path,
                     source_filename=source_filename,
                     storage_key=storage_key,
@@ -506,6 +527,220 @@ class DocumentChunkService:
             )
         finally:
             self._cleanup_converted_file(converted_path)
+
+    def chunk_pdf(
+        self,
+        file_path: Path,
+        source_filename: str,
+        storage_key: str,
+        file_id: str,
+    ) -> list[DocumentChunk]:
+        """解析 PDF 文件并生成切块。"""
+        if self._pdf_parser is None:
+            msg = "未配置 PDF 解析器，无法处理 PDF 文件"
+            raise DocumentParseError(msg)
+
+        try:
+            parsed_segments = self._pdf_parser.parse(
+                file_path=str(file_path),
+                source_filename=source_filename,
+            )
+        except PdfParserError as exc:
+            raise DocumentParseError(str(exc)) from exc
+
+        segments = [self._convert_pdf_segment(item) for item in parsed_segments]
+        return self._chunk_segments(
+            segments=segments,
+            source_filename=source_filename,
+            storage_key=storage_key,
+            file_id=file_id,
+        )
+
+    def _convert_pdf_segment(self, segment: PdfParsedSegment) -> DocumentSegment:
+        """把 PDF parser 结果转换为统一 DocumentSegment。"""
+        return DocumentSegment(
+            segment_id=segment.segment_id,
+            content=segment.content,
+            segment_type=SegmentType.TABLE
+            if segment.segment_type == "table"
+            else SegmentType.PARAGRAPH,
+            heading_context=segment.heading_context,
+            page_number=segment.page_number,
+            source_anchor=segment.source_anchor,
+            image_assets=[self._convert_pdf_image_asset(item) for item in segment.image_assets],
+        )
+
+    def _convert_pdf_image_asset(self, asset: PdfParsedImageAsset) -> ChunkImageAsset:
+        """把 PDF 图片资产转换为统一图片资产。"""
+        return ChunkImageAsset(
+            segment_id=asset.segment_id,
+            asset_id=asset.asset_id,
+            asset_index=asset.asset_index,
+            source_anchor=asset.source_anchor,
+            content_type=asset.content_type,
+            extension=asset.extension,
+            image_bytes=asset.image_bytes,
+            width=asset.width,
+            height=asset.height,
+        )
+
+    def _chunk_segments(
+        self,
+        *,
+        segments: list[DocumentSegment],
+        source_filename: str,
+        storage_key: str,
+        file_id: str,
+    ) -> list[DocumentChunk]:
+        """把标准化片段转换为统一切块结果。"""
+        if not segments:
+            msg = f"文档内容为空，无法切块: {source_filename}"
+            raise DocumentParseError(msg)
+
+        chunks: list[DocumentChunk] = []
+        paragraph_buffer: list[str] = []
+        paragraph_buffer_segment_ids: list[str] = []
+        paragraph_buffer_heading_context = ""
+        paragraph_buffer_page_number: int | None = None
+        paragraph_buffer_source_anchor: str | None = None
+
+        for segment in segments:
+            if segment.segment_type is SegmentType.PARAGRAPH:
+                if paragraph_buffer and paragraph_buffer_heading_context != segment.heading_context:
+                    buffered_segment_id = self._build_buffer_segment_id(
+                        paragraph_buffer_segment_ids
+                    )
+                    chunks.extend(
+                        self._build_chunks(
+                            text="\n\n".join(paragraph_buffer),
+                            source_filename=source_filename,
+                            storage_key=storage_key,
+                            file_id=file_id,
+                            segment_id=buffered_segment_id,
+                            start_index=len(chunks),
+                            heading_context=paragraph_buffer_heading_context,
+                            content_type="paragraph",
+                            page_number=paragraph_buffer_page_number,
+                            source_anchor=paragraph_buffer_source_anchor,
+                        )
+                    )
+                    paragraph_buffer.clear()
+                    paragraph_buffer_segment_ids.clear()
+                    paragraph_buffer_heading_context = ""
+                    paragraph_buffer_page_number = None
+                    paragraph_buffer_source_anchor = None
+
+                if not segment.image_assets:
+                    paragraph_buffer.append(segment.content)
+                    paragraph_buffer_segment_ids.append(segment.segment_id)
+                    paragraph_buffer_heading_context = segment.heading_context
+                    paragraph_buffer_page_number = (
+                        paragraph_buffer_page_number
+                        if paragraph_buffer_page_number is not None
+                        else segment.page_number
+                    )
+                    paragraph_buffer_source_anchor = (
+                        paragraph_buffer_source_anchor or segment.source_anchor
+                    )
+                    continue
+
+                if paragraph_buffer:
+                    buffered_segment_id = self._build_buffer_segment_id(
+                        paragraph_buffer_segment_ids
+                    )
+                    chunks.extend(
+                        self._build_chunks(
+                            text="\n\n".join(paragraph_buffer),
+                            source_filename=source_filename,
+                            storage_key=storage_key,
+                            file_id=file_id,
+                            segment_id=buffered_segment_id,
+                            start_index=len(chunks),
+                            heading_context=paragraph_buffer_heading_context,
+                            content_type="paragraph",
+                            page_number=paragraph_buffer_page_number,
+                            source_anchor=paragraph_buffer_source_anchor,
+                        )
+                    )
+                    paragraph_buffer.clear()
+                    paragraph_buffer_segment_ids.clear()
+                    paragraph_buffer_heading_context = ""
+                    paragraph_buffer_page_number = None
+                    paragraph_buffer_source_anchor = None
+
+                chunks.extend(
+                    self._build_chunks(
+                        text=segment.content,
+                        source_filename=source_filename,
+                        storage_key=storage_key,
+                        file_id=file_id,
+                        segment_id=segment.segment_id,
+                        start_index=len(chunks),
+                        heading_context=segment.heading_context,
+                        content_type="paragraph",
+                        image_assets=segment.image_assets,
+                        page_number=segment.page_number,
+                        source_anchor=segment.source_anchor,
+                    )
+                )
+                continue
+
+            if paragraph_buffer:
+                buffered_segment_id = self._build_buffer_segment_id(paragraph_buffer_segment_ids)
+                chunks.extend(
+                    self._build_chunks(
+                        text="\n\n".join(paragraph_buffer),
+                        source_filename=source_filename,
+                        storage_key=storage_key,
+                        file_id=file_id,
+                        segment_id=buffered_segment_id,
+                        start_index=len(chunks),
+                        heading_context=paragraph_buffer_heading_context,
+                        content_type="paragraph",
+                        page_number=paragraph_buffer_page_number,
+                        source_anchor=paragraph_buffer_source_anchor,
+                    )
+                )
+                paragraph_buffer.clear()
+                paragraph_buffer_segment_ids.clear()
+                paragraph_buffer_heading_context = ""
+                paragraph_buffer_page_number = None
+                paragraph_buffer_source_anchor = None
+
+            chunks.extend(
+                self._build_table_chunks(
+                    table_markdown=segment.content,
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                    segment_id=segment.segment_id,
+                    start_index=len(chunks),
+                    heading_context=segment.heading_context,
+                    comment_texts=segment.comment_texts,
+                    image_assets=segment.image_assets,
+                    page_number=segment.page_number,
+                    source_anchor=segment.source_anchor,
+                )
+            )
+
+        if paragraph_buffer:
+            buffered_segment_id = self._build_buffer_segment_id(paragraph_buffer_segment_ids)
+            chunks.extend(
+                self._build_chunks(
+                    text="\n\n".join(paragraph_buffer),
+                    source_filename=source_filename,
+                    storage_key=storage_key,
+                    file_id=file_id,
+                    segment_id=buffered_segment_id,
+                    start_index=len(chunks),
+                    heading_context=paragraph_buffer_heading_context,
+                    content_type="paragraph",
+                    page_number=paragraph_buffer_page_number,
+                    source_anchor=paragraph_buffer_source_anchor,
+                )
+            )
+
+        return chunks
 
     def _convert_doc_to_docx(self, file_path: Path) -> Path:
         """调用 soffice 将 doc 转换为 docx。
@@ -1097,6 +1332,8 @@ class DocumentChunkService:
         heading_context: str = "",
         content_type: str = "paragraph",
         image_assets: list[ChunkImageAsset] | None = None,
+        page_number: int | None = None,
+        source_anchor: str | None = None,
     ) -> DocumentChunk:
         """基于统一元数据创建单个 chunk。
 
@@ -1122,6 +1359,8 @@ class DocumentChunkService:
             char_count=len(content),
             source_filename=source_filename,
             storage_key=storage_key,
+            page_number=page_number,
+            source_anchor=source_anchor,
             heading_path=heading_path,
             section_title=heading_path[-1] if heading_path else None,
             content_type=content_type,
@@ -1171,6 +1410,8 @@ class DocumentChunkService:
         heading_context: str = "",
         content_type: str = "paragraph",
         image_assets: list[ChunkImageAsset] | None = None,
+        page_number: int | None = None,
+        source_anchor: str | None = None,
     ) -> list[DocumentChunk]:
         """按固定窗口与 overlap 生成切块。
 
@@ -1212,6 +1453,8 @@ class DocumentChunkService:
                         heading_context=heading_context,
                         content_type=content_type,
                         image_assets=image_assets,
+                        page_number=page_number,
+                        source_anchor=source_anchor,
                     )
                 )
 
@@ -1234,6 +1477,8 @@ class DocumentChunkService:
         heading_context: str = "",
         comment_texts: list[str] | None = None,
         image_assets: list[ChunkImageAsset] | None = None,
+        page_number: int | None = None,
+        source_anchor: str | None = None,
     ) -> list[DocumentChunk]:
         """为表格生成独立的 chunks。
 
@@ -1275,6 +1520,8 @@ class DocumentChunkService:
                     heading_context=heading_context,
                     content_type="table",
                     image_assets=image_assets,
+                    page_number=page_number,
+                    source_anchor=source_anchor,
                 )
             ]
 
@@ -1294,6 +1541,8 @@ class DocumentChunkService:
                     heading_context=heading_context,
                     content_type="table",
                     image_assets=image_assets,
+                    page_number=page_number,
+                    source_anchor=source_anchor,
                 )
             ]
 
@@ -1321,6 +1570,8 @@ class DocumentChunkService:
                     heading_context=heading_context,
                     content_type="table",
                     image_assets=image_assets,
+                    page_number=page_number,
+                    source_anchor=source_anchor,
                 )
             )
 

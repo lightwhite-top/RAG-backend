@@ -69,6 +69,8 @@ class ChunkSearchHit:
     segment_id: str
     source_filename: str
     storage_key: str
+    page_number: int | None
+    source_anchor: str | None
     chunk_index: int
     char_count: int
     content: str

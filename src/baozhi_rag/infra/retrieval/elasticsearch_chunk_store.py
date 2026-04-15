@@ -387,6 +387,8 @@ class ElasticsearchChunkStore:
             "source_filename": {"type": "keyword"},
             # 文件在对象存储中的稳定对象键。
             "storage_key": {"type": "keyword"},
+            "page_number": {"type": "integer"},
+            "source_anchor": {"type": "keyword"},
             # 上传者用户 ID，用于权限过滤与审计追踪。
             "uploader_user_id": {"type": "keyword"},
             # 文件可见范围，控制 owner_only/global 检索边界。
@@ -476,6 +478,8 @@ class ElasticsearchChunkStore:
             "file_id",
             "source_filename",
             "storage_key",
+            "page_number",
+            "source_anchor",
             "uploader_user_id",
             "visibility_scope",
             "chunk_type",
@@ -527,6 +531,10 @@ class ElasticsearchChunkStore:
             segment_id=str(source.get("segment_id", "")),
             source_filename=str(source.get("source_filename", "")),
             storage_key=str(source.get("storage_key", "")),
+            page_number=int(source.get("page_number", 0))
+            if source.get("page_number") is not None
+            else None,
+            source_anchor=str(source.get("source_anchor", "")).strip() or None,
             uploader_user_id=str(source.get("uploader_user_id", "")),
             visibility_scope=str(source.get("visibility_scope", "")),
             chunk_index=int(source.get("chunk_index", 0)),

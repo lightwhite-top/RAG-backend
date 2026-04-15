@@ -75,6 +75,7 @@ class ChatCitation:
     heading_path: list[str] = field(default_factory=list)
     section_title: str | None = None
     content_type: str = "paragraph"
+    page_number: int | None = None
     source_anchor: str | None = None
     file_content_type: str | None = None
     extension: str | None = None
@@ -597,7 +598,8 @@ class ChatService:
             heading_path=list(hit.heading_path),
             section_title=hit.section_title,
             content_type="table" if hit.content_type == "table" else "paragraph",
-            source_anchor=f"chunk:{hit.chunk_index}",
+            page_number=hit.page_number,
+            source_anchor=hit.source_anchor or f"chunk:{hit.chunk_index}",
             file_content_type=hit.file_content_type,
             extension=hit.file_extension or self._infer_file_extension(hit.source_filename),
             size=hit.file_size,
@@ -623,6 +625,7 @@ class ChatService:
             "heading_path": citation.heading_path,
             "section_title": citation.section_title,
             "content_type": citation.content_type,
+            "page_number": citation.page_number,
             "source_anchor": citation.source_anchor,
             "file_content_type": citation.file_content_type,
             "extension": citation.extension,

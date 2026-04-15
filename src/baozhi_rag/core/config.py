@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import quote_plus
 
 from pydantic import Field, field_validator, model_validator
@@ -105,6 +105,59 @@ class Settings(BaseSettings):
         description="旧版 Word 转换超时时间（秒）",
         validation_alias="DOC_CONVERT_TIMEOUT_SECONDS",
         ge=1,
+    )
+    pdf_render_dpi: int = Field(
+        default=180,
+        description="PDF 页图渲染 DPI",
+        validation_alias="PDF_RENDER_DPI",
+        ge=72,
+    )
+    pdf_ocr_enabled: bool = Field(
+        default=True,
+        description="是否启用 PDF OCR",
+        validation_alias="PDF_OCR_ENABLED",
+    )
+    pdf_low_text_page_threshold: int = Field(
+        default=80,
+        description="判定为扫描页的最低文本长度阈值",
+        validation_alias="PDF_LOW_TEXT_PAGE_THRESHOLD",
+        ge=0,
+    )
+    pdf_max_page_count: int = Field(
+        default=300,
+        description="PDF 最大允许页数",
+        validation_alias="PDF_MAX_PAGE_COUNT",
+        ge=1,
+    )
+    aliyun_ocr_endpoint: str = Field(
+        default="ocr-api.cn-hangzhou.aliyuncs.com",
+        description="阿里云 OCR OpenAPI Endpoint",
+        validation_alias="ALIYUN_OCR_ENDPOINT",
+    )
+    aliyun_ocr_page_structure_api: str = Field(
+        default="RecognizeDocumentStructure",
+        description="阿里云 OCR 页级结构接口名",
+        validation_alias="ALIYUN_OCR_PAGE_STRUCTURE_API",
+    )
+    aliyun_ocr_text_api: str = Field(
+        default="RecognizeGeneral",
+        description="阿里云 OCR 普通文本接口名",
+        validation_alias="ALIYUN_OCR_TEXT_API",
+    )
+    aliyun_ocr_text_api_fallback: str = Field(
+        default="RecognizeAdvanced",
+        description="阿里云 OCR 复杂文本回退接口名",
+        validation_alias="ALIYUN_OCR_TEXT_API_FALLBACK",
+    )
+    aliyun_ocr_table_api: str = Field(
+        default="RecognizeTableOcr",
+        description="阿里云 OCR 表格接口名",
+        validation_alias="ALIYUN_OCR_TABLE_API",
+    )
+    aliyun_ocr_handwriting_api: str = Field(
+        default="RecognizeHandwriting",
+        description="阿里云 OCR 手写接口名",
+        validation_alias="ALIYUN_OCR_HANDWRITING_API",
     )
     upload_ingest_version: str = Field(
         default="v1",
@@ -309,6 +362,36 @@ class Settings(BaseSettings):
         description="触发深度重排的前二结果分差阈值",
         validation_alias="SEARCH_DEEP_RERANK_MARGIN_THRESHOLD",
     )
+    chat_memory_backend: Literal["mongodb", "mysql"] = Field(
+        default="mongodb",
+        description="聊天记忆存储后端",
+        validation_alias="CHAT_MEMORY_BACKEND",
+    )
+    chat_memory_mongodb_uri: str = Field(
+        default="mongodb://127.0.0.1:27017",
+        description="聊天记忆 MongoDB 连接串",
+        validation_alias="CHAT_MEMORY_MONGODB_URI",
+    )
+    chat_memory_mongodb_database: str = Field(
+        default="rag_memory",
+        description="聊天记忆 MongoDB 数据库名",
+        validation_alias="CHAT_MEMORY_MONGODB_DATABASE",
+    )
+    chat_memory_mongodb_session_collection: str = Field(
+        default="chat_sessions",
+        description="聊天会话集合名",
+        validation_alias="CHAT_MEMORY_MONGODB_SESSION_COLLECTION",
+    )
+    chat_memory_mongodb_message_collection: str = Field(
+        default="chat_messages",
+        description="聊天消息集合名",
+        validation_alias="CHAT_MEMORY_MONGODB_MESSAGE_COLLECTION",
+    )
+    chat_memory_mongodb_snapshot_collection: str = Field(
+        default="chat_session_memory_snapshots",
+        description="会话记忆快照集合名",
+        validation_alias="CHAT_MEMORY_MONGODB_SNAPSHOT_COLLECTION",
+    )
     mysql_host: str = Field(
         default="127.0.0.1",
         description="MySQL 主机地址",
@@ -511,6 +594,21 @@ class Settings(BaseSettings):
             f"{quoted_username}:{quoted_password}@{self.mysql_host}:{self.mysql_port}/"
             f"{quoted_database}?charset=utf8mb4"
         )
+
+    @property
+    def chat_memory_mongodb_session_collection_name(self) -> str:
+        """返回清理空白后的聊天会话集合名。"""
+        return self.chat_memory_mongodb_session_collection.strip()
+
+    @property
+    def chat_memory_mongodb_message_collection_name(self) -> str:
+        """返回清理空白后的聊天消息集合名。"""
+        return self.chat_memory_mongodb_message_collection.strip()
+
+    @property
+    def chat_memory_mongodb_snapshot_collection_name(self) -> str:
+        """返回清理空白后的聊天记忆快照集合名。"""
+        return self.chat_memory_mongodb_snapshot_collection.strip()
 
     @property
     def normalized_oss_object_prefix(self) -> str:

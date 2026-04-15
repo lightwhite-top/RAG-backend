@@ -26,6 +26,7 @@ from baozhi_rag.infra.database.knowledge_file_repository import SqlAlchemyKnowle
 from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
 )
+from baozhi_rag.infra.database.mongodb import MongoChatStorageManager
 from baozhi_rag.infra.database.mysql import DatabaseManager
 from baozhi_rag.infra.llm.openai_compatible_client import OpenAICompatibleLlmClient
 from baozhi_rag.infra.retrieval.hybrid_chunk_store import HybridChunkStore
@@ -36,6 +37,8 @@ from baozhi_rag.schemas.system import ServiceInfoResponse
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
+from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClient
+from baozhi_rag.services.document_parsers.pdf_parser import PdfDocumentParser
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadProcessor, KnowledgeUploadWorker
 
@@ -96,6 +99,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_manager = DatabaseManager.from_settings(current_settings)
         database_manager.ensure_ready()
         database_manager.ensure_schema()
+        chat_memory_mongo_manager: MongoChatStorageManager | None = None
+        if current_settings.chat_memory_backend == "mongodb":
+            chat_memory_mongo_manager = MongoChatStorageManager.from_settings(current_settings)
+            chat_memory_mongo_manager.ensure_ready()
+            chat_memory_mongo_manager.ensure_indexes()
         object_store = AliyunOssFileStore.from_settings(current_settings)
         object_store.ensure_ready()
         chat_llm_client = OpenAICompatibleLlmClient.from_settings(current_settings)
@@ -109,6 +117,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image_understanding_service.ensure_ready()
         chunk_store = HybridChunkStore.from_settings(current_settings)
         chunk_store.ensure_ready()
+        pdf_parser = PdfDocumentParser(
+            render_dpi=current_settings.pdf_render_dpi,
+            low_text_page_threshold=current_settings.pdf_low_text_page_threshold,
+            max_page_count=current_settings.pdf_max_page_count,
+            ocr_enabled=current_settings.pdf_ocr_enabled,
+            ocr_client=AliyunOcrClient.from_settings(current_settings),
+        )
 
         worker_tasks: list[asyncio.Task[None]] = []
         worker_instance_id = uuid4().hex[:8]
@@ -134,6 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     term_matcher=build_default_term_matcher(
                         current_settings.domain_dictionary_path
                     ),
+                    pdf_parser=pdf_parser,
                 ),
                 chunk_store=chunk_store,
                 chunk_embedding_service=ChunkEmbeddingService(embedding_llm_client),
@@ -160,6 +176,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             worker_task.cancel()
         if worker_tasks:
             await asyncio.gather(*worker_tasks, return_exceptions=True)
+        if chat_memory_mongo_manager is not None:
+            chat_memory_mongo_manager.close()
         LOGGER.info("service_shutdown")
 
     app = FastAPI(
