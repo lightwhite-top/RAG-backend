@@ -204,6 +204,8 @@ def _build_completion_response(
         deep_rerank_triggered=result.retrieval_trace.deep_rerank_triggered
         if result.retrieval_trace is not None
         else None,
+        applied_retrieval_size=result.applied_retrieval_size,
+        applied_temperature=result.applied_temperature,
         lanes=_read_trace_lanes(result.retrieval_trace),
         model_name=model_name,
         latency_ms=latency_ms,
@@ -243,6 +245,8 @@ def _stream_events(
     evidence_sufficient: bool | None = None
     evidence_reason: str | None = None
     deep_rerank_triggered: bool | None = None
+    applied_retrieval_size: int | None = None
+    applied_temperature: float | None = None
     retrieval_lanes: list[dict[str, object]] | None = None
     delta_seq = 0
     offset = 0
@@ -280,6 +284,10 @@ def _stream_events(
                 if isinstance(evidence_payload, dict):
                     evidence_sufficient = _read_optional_bool(evidence_payload.get("sufficient"))
                     evidence_reason = _read_optional_str(evidence_payload.get("reason_code"))
+                applied_retrieval_size = _read_optional_int(
+                    event.data.get("applied_retrieval_size")
+                )
+                applied_temperature = _read_optional_float(event.data.get("applied_temperature"))
                 session_id = _read_optional_str(event.data.get("session_id"))
                 sequence_no = _read_optional_int(event.data.get("sequence_no"))
                 if not message_started:
@@ -440,6 +448,8 @@ def _stream_events(
                     evidence_sufficient=evidence_sufficient,
                     evidence_reason=evidence_reason,
                     deep_rerank_triggered=deep_rerank_triggered,
+                    applied_retrieval_size=applied_retrieval_size,
+                    applied_temperature=applied_temperature,
                     lanes=retrieval_lanes,
                     model_name=model_name,
                     latency_ms=_calculate_latency_ms(started_at),
@@ -762,6 +772,8 @@ def _build_trace_item(
     evidence_sufficient: bool | None = None,
     evidence_reason: str | None = None,
     deep_rerank_triggered: bool | None = None,
+    applied_retrieval_size: int | None = None,
+    applied_temperature: float | None = None,
     lanes: list[dict[str, object]] | None = None,
     model_name: str | None,
     latency_ms: int | None,
@@ -779,6 +791,8 @@ def _build_trace_item(
         evidence_sufficient=evidence_sufficient,
         evidence_reason=evidence_reason,
         deep_rerank_triggered=deep_rerank_triggered,
+        applied_retrieval_size=applied_retrieval_size,
+        applied_temperature=applied_temperature,
         lanes=lanes,
         model=model_name,
         usage=None,

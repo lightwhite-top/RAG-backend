@@ -70,6 +70,11 @@ class ConversationChatService:
             viewer_user_id=current_user.id,
         )
         latency_ms = int((time.perf_counter() - started_at) * 1000)
+        applied_retrieval_size, applied_temperature = self._resolve_applied_generation_params(
+            result=result,
+            legacy_retrieval_size=retrieval_size,
+            legacy_temperature=temperature,
+        )
 
         assistant_record = self._message_repository.append_message(
             session_id=session_id,
@@ -82,8 +87,8 @@ class ConversationChatService:
             original_query=result.original_query,
             retrieval_query=result.retrieval_query,
             rewrite_applied=result.rewrite_applied,
-            retrieval_size=retrieval_size,
-            temperature=temperature,
+            retrieval_size=applied_retrieval_size,
+            temperature=applied_temperature,
             finish_reason=result.finish_reason,
             latency_ms=latency_ms,
         )
@@ -93,8 +98,8 @@ class ConversationChatService:
         )
         persisted_record = self._message_repository.update_message(
             assistant_record.id,
-            retrieval_size=retrieval_size,
-            temperature=temperature,
+            retrieval_size=applied_retrieval_size,
+            temperature=applied_temperature,
             completed=True,
         )
         resolved_record = persisted_record or assistant_record
@@ -112,6 +117,8 @@ class ConversationChatService:
             sequence_no=resolved_record.sequence_no,
             created_at=resolved_record.created_at,
             completed_at=resolved_record.completed_at,
+            applied_retrieval_size=applied_retrieval_size,
+            applied_temperature=applied_temperature,
         )
 
     def stream(
@@ -144,11 +151,11 @@ class ConversationChatService:
             plain_text="",
             request_id=request_id,
             model_name=self._model_name,
-            retrieval_size=retrieval_size,
-            temperature=temperature,
         )
 
         started_at = time.perf_counter()
+        applied_retrieval_size = retrieval_size
+        applied_temperature = temperature
         try:
             for event in self._chat_service.stream(
                 model_messages,
@@ -157,6 +164,14 @@ class ConversationChatService:
                 viewer_user_id=current_user.id,
             ):
                 if event.event == "context":
+                    (
+                        applied_retrieval_size,
+                        applied_temperature,
+                    ) = self._resolve_applied_generation_params_from_event(
+                        event=event,
+                        legacy_retrieval_size=applied_retrieval_size,
+                        legacy_temperature=applied_temperature,
+                    )
                     data = dict(event.data)
                     data.setdefault("message_id", assistant_record.id)
                     data.setdefault("session_id", session_id)
@@ -177,6 +192,14 @@ class ConversationChatService:
                     content_blocks = event.data.get("content_blocks")
                     if not isinstance(content_blocks, list):
                         content_blocks = []
+                    (
+                        applied_retrieval_size,
+                        applied_temperature,
+                    ) = self._resolve_applied_generation_params_from_event(
+                        event=event,
+                        legacy_retrieval_size=applied_retrieval_size,
+                        legacy_temperature=applied_temperature,
+                    )
                     updated_record = self._message_repository.update_message(
                         assistant_record.id,
                         status=ChatMessageStatus.COMPLETED,
@@ -185,8 +208,8 @@ class ConversationChatService:
                         original_query=original_query,
                         retrieval_query=retrieval_query,
                         rewrite_applied=rewrite_applied,
-                        retrieval_size=retrieval_size,
-                        temperature=temperature,
+                        retrieval_size=applied_retrieval_size,
+                        temperature=applied_temperature,
                         finish_reason=finish_reason,
                         latency_ms=latency_ms,
                         completed=True,
@@ -224,6 +247,45 @@ class ConversationChatService:
                 completed=True,
             )
             raise
+
+    def _resolve_applied_generation_params(
+        self,
+        *,
+        result: ChatCompletionResult,
+        legacy_retrieval_size: int,
+        legacy_temperature: float | None,
+    ) -> tuple[int, float | None]:
+        """优先使用服务层返回的生效参数，兼容旧链路时再回退到旧字段。"""
+        return (
+            result.applied_retrieval_size
+            if result.applied_retrieval_size is not None
+            else legacy_retrieval_size,
+            result.applied_temperature
+            if result.applied_temperature is not None
+            else legacy_temperature,
+        )
+
+    def _resolve_applied_generation_params_from_event(
+        self,
+        *,
+        event: ChatStreamEvent,
+        legacy_retrieval_size: int,
+        legacy_temperature: float | None,
+    ) -> tuple[int, float | None]:
+        """从 SSE 事件中读取生效参数，兼容旧事件时回退到既有值。"""
+        raw_retrieval_size = event.data.get("applied_retrieval_size")
+        raw_temperature = event.data.get("applied_temperature")
+        applied_retrieval_size = (
+            int(raw_retrieval_size)
+            if isinstance(raw_retrieval_size, int | float | str)
+            else legacy_retrieval_size
+        )
+        applied_temperature: float | None
+        if isinstance(raw_temperature, int | float | str):
+            applied_temperature = float(raw_temperature)
+        else:
+            applied_temperature = legacy_temperature
+        return applied_retrieval_size, applied_temperature
 
     def _extract_current_user_message(self, messages: list[ChatMessage]) -> ChatMessage:
         normalized_messages = [message for message in messages if message.content.strip()]

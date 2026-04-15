@@ -11,7 +11,7 @@ from typing import Protocol
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchExecutionResult, ChunkSearchHit
-from baozhi_rag.services.context_packing import ContextPackingService
+from baozhi_rag.services.context_packing import ContextPackingBudgetConfig, ContextPackingService
 from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import ChunkImageAsset
 from baozhi_rag.services.evidence_sufficiency import EvidenceAssessment
@@ -115,6 +115,8 @@ class ChatCompletionResult:
     sequence_no: int | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+    applied_retrieval_size: int | None = None
+    applied_temperature: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +125,14 @@ class ChatStreamEvent:
 
     event: str
     data: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ChatRuntimePolicy:
+    """聊天补全链路的后端生效策略。"""
+
+    retrieval_size: int
+    temperature: float | None
 
 
 class ChatChunkSearcher(Protocol):
@@ -163,6 +173,7 @@ class _PreparedChatCompletion:
     query_intent: str = "general"
     retrieval_trace: RetrievalTrace | None = None
     evidence_assessment: EvidenceAssessment | None = None
+    runtime_policy: ChatRuntimePolicy | None = None
 
 
 class ChatService:
@@ -173,6 +184,12 @@ class ChatService:
     _EXCESSIVE_BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
     _MAX_CONTEXT_CHARS = 1200
     _MAX_SNIPPET_CHARS = 180
+    _DEFAULT_RETRIEVAL_SIZE = 5
+    _FOLLOWUP_RETRIEVAL_SIZE = 7
+    _DEFAULT_TEMPERATURE = 0.0
+    _DEFAULT_MAX_PROMPT_TOKENS = 4096
+    _DEFAULT_RESERVED_ANSWER_TOKENS = 768
+    _DEFAULT_RESERVED_MARGIN_TOKENS = 256
     _FALLBACK_ANSWER = (
         "当前知识库中未检索到足以支撑结论的材料，暂时不能直接给出确定答复。"
         "建议补充问题细节、上传相关文档，或转人工进一步核实。"
@@ -230,11 +247,18 @@ class ChatService:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
         completion = self._prepare_completion(
-            messages, retrieval_size, viewer_user_id=viewer_user_id
+            messages,
+            retrieval_size,
+            requested_temperature=temperature,
+            viewer_user_id=viewer_user_id,
+        )
+        runtime_policy = completion.runtime_policy or ChatRuntimePolicy(
+            retrieval_size=self._DEFAULT_RETRIEVAL_SIZE,
+            temperature=self._DEFAULT_TEMPERATURE,
         )
         answer = self._chat_client.complete_chat(
             completion.model_messages,
-            temperature=temperature,
+            temperature=runtime_policy.temperature,
         ).strip()
         finish_reason = "stop"
         if not answer:
@@ -267,6 +291,8 @@ class ChatService:
             query_intent=completion.query_intent,
             retrieval_trace=completion.retrieval_trace,
             evidence_assessment=completion.evidence_assessment,
+            applied_retrieval_size=runtime_policy.retrieval_size,
+            applied_temperature=runtime_policy.temperature,
         )
 
     def stream(
@@ -291,7 +317,14 @@ class ChatService:
             ChatCompletionValidationError: 当消息列表或检索参数不合法时抛出。
         """
         completion = self._prepare_completion(
-            messages, retrieval_size, viewer_user_id=viewer_user_id
+            messages,
+            retrieval_size,
+            requested_temperature=temperature,
+            viewer_user_id=viewer_user_id,
+        )
+        runtime_policy = completion.runtime_policy or ChatRuntimePolicy(
+            retrieval_size=self._DEFAULT_RETRIEVAL_SIZE,
+            temperature=self._DEFAULT_TEMPERATURE,
         )
         citations_payload = [self._serialize_citation(item) for item in completion.citations]
 
@@ -308,6 +341,8 @@ class ChatService:
                     completion.evidence_assessment
                 ),
                 "citations": citations_payload,
+                "applied_retrieval_size": runtime_policy.retrieval_size,
+                "applied_temperature": runtime_policy.temperature,
             },
         )
 
@@ -320,7 +355,7 @@ class ChatService:
         current_block_emitted_text = ""
         for delta in self._chat_client.stream_chat(
             completion.model_messages,
-            temperature=temperature,
+            temperature=runtime_policy.temperature,
         ):
             if not delta:
                 continue
@@ -440,6 +475,8 @@ class ChatService:
                 "evidence_assessment": self._serialize_evidence_assessment(
                     completion.evidence_assessment
                 ),
+                "applied_retrieval_size": runtime_policy.retrieval_size,
+                "applied_temperature": runtime_policy.temperature,
             },
         )
 
@@ -448,6 +485,7 @@ class ChatService:
         messages: list[ChatMessage],
         retrieval_size: int,
         *,
+        requested_temperature: float | None = None,
         viewer_user_id: str = "",
     ) -> _PreparedChatCompletion:
         """完成消息校验、检索和模型提示构造。"""
@@ -459,6 +497,11 @@ class ChatService:
             raise ChatCompletionValidationError(msg)
 
         normalized_messages = self._normalize_messages(messages)
+        runtime_policy = self._resolve_runtime_policy(
+            normalized_messages,
+            requested_retrieval_size=retrieval_size,
+            requested_temperature=requested_temperature,
+        )
         # 当前最稳定的检索查询是最后一条用户追问，而不是整段会话拼接文本。
         original_query = self._resolve_retrieval_query(normalized_messages)
         rewrite_result = self._query_rewrite_service.rewrite(
@@ -469,7 +512,7 @@ class ChatService:
         rewrite_applied = rewrite_result.rewrite_applied
         search_result = self._chunk_search_service.search_with_trace(
             retrieval_query,
-            retrieval_size,
+            runtime_policy.retrieval_size,
             viewer_user_id=viewer_user_id,
             retrieval_mode="chat",
         )
@@ -480,9 +523,35 @@ class ChatService:
                 query_text=retrieval_query,
                 hits=hits,
             )
-        citations = [
+        preliminary_citations = [
             self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
         ]
+        context_prompt_result = self._context_packing_service.build_context_prompt_result(
+            retrieval_query=retrieval_query,
+            citations=preliminary_citations,
+            budget_config=self._build_context_budget_config(),
+            history_messages=normalized_messages,
+        )
+        included_citation_ids = set(context_prompt_result.included_citation_ids)
+        citations = [
+            citation
+            for citation in preliminary_citations
+            if citation.citation_id in included_citation_ids
+        ]
+        evidence_assessment = search_result.evidence_assessment
+        context_prompt = context_prompt_result.prompt
+        if preliminary_citations and not citations:
+            evidence_assessment = EvidenceAssessment(
+                sufficient=False,
+                reason_code="context_budget_exhausted",
+                citation_count=0,
+                top_score=search_result.evidence_assessment.top_score
+                if search_result.evidence_assessment is not None
+                else None,
+            )
+            context_prompt = self._context_packing_service.build_no_knowledge_context_prompt(
+                retrieval_query=retrieval_query
+            )
         retrieval_trace = search_result.retrieval_trace
         if retrieval_trace is not None and deep_rerank_triggered:
             retrieval_trace = replace(
@@ -497,14 +566,52 @@ class ChatService:
             citations=citations,
             model_messages=self._build_model_messages(
                 messages=normalized_messages,
-                retrieval_query=retrieval_query,
-                citations=citations,
-                evidence_assessment=search_result.evidence_assessment,
+                context_prompt=context_prompt,
+                evidence_assessment=evidence_assessment,
             ),
             rewrite_applied=rewrite_applied,
             query_intent=search_result.query_intent,
             retrieval_trace=retrieval_trace,
-            evidence_assessment=search_result.evidence_assessment,
+            evidence_assessment=evidence_assessment,
+            runtime_policy=runtime_policy,
+        )
+
+    def _resolve_runtime_policy(
+        self,
+        messages: list[ChatMessage],
+        *,
+        requested_retrieval_size: int,
+        requested_temperature: float | None,
+    ) -> ChatRuntimePolicy:
+        """根据后端策略决定本次聊天补全的实际检索与采样参数。"""
+        del requested_retrieval_size
+        del requested_temperature
+
+        user_message_count = sum(1 for message in messages if message.role == "user")
+        # 多轮追问通常更依赖跨轮上下文，因此放大召回窗口以提高证据覆盖率。
+        retrieval_size = (
+            self._FOLLOWUP_RETRIEVAL_SIZE
+            if user_message_count > 1
+            else self._DEFAULT_RETRIEVAL_SIZE
+        )
+        # RAG 问答默认走低温采样，避免前端通过温度扰动事实型回答的一致性。
+        return ChatRuntimePolicy(
+            retrieval_size=retrieval_size,
+            temperature=self._DEFAULT_TEMPERATURE,
+        )
+
+    def _build_context_budget_config(self) -> ContextPackingBudgetConfig:
+        """构造证据上下文预算配置。"""
+        occupied_prompt_tokens = self._context_packing_service.estimate_token_count(
+            self._build_system_prompt()
+        ) + self._context_packing_service.estimate_token_count(self._build_render_contract_prompt())
+        return ContextPackingBudgetConfig(
+            max_prompt_tokens=self._DEFAULT_MAX_PROMPT_TOKENS,
+            occupied_prompt_tokens=occupied_prompt_tokens,
+            reserved_answer_tokens=self._DEFAULT_RESERVED_ANSWER_TOKENS,
+            reserved_margin_tokens=self._DEFAULT_RESERVED_MARGIN_TOKENS,
+            max_evidence_tokens=720,
+            min_evidence_tokens=120,
         )
 
     def _normalize_messages(self, messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -534,8 +641,7 @@ class ChatService:
         self,
         *,
         messages: list[ChatMessage],
-        retrieval_query: str,
-        citations: list[ChatCitation],
+        context_prompt: str,
         evidence_assessment: EvidenceAssessment | None = None,
     ) -> list[ChatMessage]:
         """构造传给聊天模型的消息列表。"""
@@ -548,10 +654,7 @@ class ChatService:
             ChatMessage(
                 role="system",
                 # 把召回证据前置为 system 消息，尽量降低后续多轮对话对证据约束的稀释。
-                content=self._context_packing_service.build_context_prompt(
-                    retrieval_query=retrieval_query,
-                    citations=citations,
-                ),
+                content=context_prompt,
             ),
         ]
         evidence_prompt = self._context_packing_service.build_evidence_guidance_prompt(

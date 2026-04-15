@@ -61,12 +61,17 @@ class ChatCompletionRequest(BaseModel):
         description="会话消息列表，至少包含一条 user 消息",
     )
     stream: bool = Field(default=False, description="是否启用 SSE 流式返回")
-    retrieval_size: int = Field(default=5, ge=1, le=20, description="检索召回数量")
+    retrieval_size: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="兼容字段：客户端可继续传入，但当前由后端策略决定实际检索数量",
+    )
     temperature: float | None = Field(
         default=None,
         ge=0,
         le=2,
-        description="可选采样温度",
+        description="兼容字段：客户端可继续传入，但当前由后端策略决定实际采样温度",
     )
 
 
@@ -165,6 +170,14 @@ class ChatTraceItem(BaseModel):
     evidence_sufficient: bool | None = Field(default=None, description="证据是否充分")
     evidence_reason: str | None = Field(default=None, description="证据判断原因")
     deep_rerank_triggered: bool | None = Field(default=None, description="是否触发深度重排")
+    applied_retrieval_size: int | None = Field(
+        default=None,
+        description="本轮后端实际使用的检索结果数量",
+    )
+    applied_temperature: float | None = Field(
+        default=None,
+        description="本轮后端实际使用的采样温度",
+    )
     lanes: list[dict[str, Any]] | None = Field(default=None, description="各检索 lane 摘要")
     model: str | None = Field(default=None, description="实际使用的模型名称")
     usage: dict[str, Any] | None = Field(default=None, description="模型调用资源消耗")
