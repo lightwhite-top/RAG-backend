@@ -206,6 +206,14 @@ class DocumentChunk:
     section_title: str | None = None
     # chunk 内容类型，当前主要区分 paragraph / table
     content_type: str = "paragraph"
+    # 原始可引用正文，不混入额外的检索增强上下文。
+    raw_content: str = ""
+    # 仅用于增强检索的上下文化文本，不应直接替代原始正文引用。
+    contextual_text: str = ""
+    # 检索专用拼接文本，通常由 contextual_text + raw_content 构成。
+    searchable_text: str = ""
+    # 表格 schema 文本，用于强化表格结构化问题召回。
+    table_schema_text: str = ""
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=_empty_str_list)
     # 与当前 chunk 关联的图片引用键。
@@ -234,6 +242,10 @@ class DocumentChunk:
             "section_title": self.section_title,
             "content_type": self.content_type,
             "content": self.content,
+            "raw_content": self.raw_content,
+            "contextual_text": self.contextual_text,
+            "searchable_text": self.searchable_text,
+            "table_schema_text": self.table_schema_text,
             "merged_terms": self.merged_terms,
             "image_asset_refs": [item.to_search_document() for item in self.image_asset_refs],
             "image_assets": [asset.to_search_document() for asset in self.image_assets],
@@ -1349,6 +1361,22 @@ class DocumentChunkService:
         """
         term_match_result = self._term_matcher.extract_terms(content)
         heading_path = self._parse_heading_path(heading_context)
+        raw_content = self._extract_raw_content(
+            content=content,
+            heading_context=heading_context,
+            content_type=content_type,
+        )
+        contextual_text = self._build_contextual_text(
+            heading_context=heading_context,
+            content_type=content_type,
+        )
+        searchable_text = self._build_searchable_text(
+            raw_content=raw_content,
+            contextual_text=contextual_text,
+        )
+        table_schema_text = (
+            self._extract_table_schema_text(raw_content) if content_type == "table" else ""
+        )
         return DocumentChunk(
             file_id=file_id,
             chunk_id=f"{file_id}-chunk-{chunk_index}",
@@ -1364,6 +1392,10 @@ class DocumentChunkService:
             heading_path=heading_path,
             section_title=heading_path[-1] if heading_path else None,
             content_type=content_type,
+            raw_content=raw_content,
+            contextual_text=contextual_text,
+            searchable_text=searchable_text,
+            table_schema_text=table_schema_text,
             merged_terms=term_match_result.merged_terms,
             image_asset_refs=self._build_image_asset_refs(image_assets or []),
             image_assets=list(image_assets or []),
@@ -1387,6 +1419,99 @@ class DocumentChunkService:
             )
             for asset in image_assets
         ]
+
+    def _extract_raw_content(
+        self,
+        *,
+        content: str,
+        heading_context: str,
+        content_type: str,
+    ) -> str:
+        """从当前 chunk 内容中提取尽量贴近原文的正文部分。
+
+        参数:
+            content: 当前 chunk 的完整内容。
+            heading_context: 当前 chunk 对应的标题路径字符串。
+            content_type: 当前 chunk 内容类型。
+
+        返回:
+            尽量不混入标题增强上下文的正文；若无法安全剥离，则回退原内容。
+        """
+        normalized_content = content.strip()
+        normalized_heading = heading_context.strip()
+        if not normalized_content or not normalized_heading:
+            return normalized_content
+
+        raw_lines = normalized_content.splitlines()
+        while raw_lines:
+            if raw_lines[0].strip() != normalized_heading:
+                break
+            raw_lines.pop(0)
+            while raw_lines and not raw_lines[0].strip():
+                raw_lines.pop(0)
+        candidate_from_lines = "\n".join(raw_lines).strip()
+        if candidate_from_lines:
+            return candidate_from_lines
+
+        heading_prefix = f"{normalized_heading}\n"
+        if normalized_content.startswith(heading_prefix):
+            candidate = normalized_content[len(heading_prefix) :].strip()
+            if candidate:
+                return candidate
+
+        # 对 paragraph/table 都只做保守剥离，避免误删正文内容。
+        if content_type in {"paragraph", "table"}:
+            return normalized_content
+        return normalized_content
+
+    def _build_contextual_text(
+        self,
+        *,
+        heading_context: str,
+        content_type: str,
+    ) -> str:
+        """为当前 chunk 构造轻量上下文化文本，用于增强检索而非对外引用。"""
+        sections: list[str] = []
+        normalized_heading = heading_context.strip()
+        if normalized_heading:
+            sections.append(f"章节：{normalized_heading}")
+        if content_type == "table":
+            sections.append("内容类型：表格")
+        elif content_type == "paragraph":
+            sections.append("内容类型：段落")
+        return "\n".join(sections)
+
+    def _build_searchable_text(
+        self,
+        *,
+        raw_content: str,
+        contextual_text: str,
+    ) -> str:
+        """构造写入检索索引的拼接文本。"""
+        parts = [item.strip() for item in [contextual_text, raw_content] if item.strip()]
+        return "\n".join(parts)
+
+    def _extract_table_schema_text(self, raw_content: str) -> str:
+        """从 Markdown 表格中提取表头 schema 文本。
+
+        参数:
+            raw_content: 已剥离标题前缀的表格正文。
+
+        返回:
+            基于表头构造的轻量 schema 文本；非标准表格返回空字符串。
+        """
+        lines = [line.strip() for line in raw_content.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return ""
+        header_line = lines[0]
+        separator_line = lines[1]
+        if "|" not in header_line or "---" not in separator_line:
+            return ""
+
+        headers = [item.strip() for item in header_line.strip("|").split("|") if item.strip()]
+        if not headers:
+            return ""
+        return f"表格列头：{'、'.join(headers)}"
 
     def _build_buffer_segment_id(
         self,
@@ -1413,7 +1538,7 @@ class DocumentChunkService:
         page_number: int | None = None,
         source_anchor: str | None = None,
     ) -> list[DocumentChunk]:
-        """按固定窗口与 overlap 生成切块。
+        """按结构友好的窗口与 overlap 生成切块。
 
         参数:
             text: 已完成段落拼接和标题补全的正文文本。
@@ -1423,7 +1548,7 @@ class DocumentChunkService:
             start_index: 当前批次切块写入前的起始序号。
 
         返回:
-            基于字符窗口切分后的标准化 chunk 列表。
+            基于字符窗口与自然边界切分后的标准化 chunk 列表。
             每个 chunk 都保留 file_id，以便后续 ES/Milvus 接入。
 
         异常:
@@ -1438,7 +1563,12 @@ class DocumentChunkService:
         start = 0
 
         while start < len(normalized_text):
-            end = min(start + self._chunk_size, len(normalized_text))
+            tentative_end = min(start + self._chunk_size, len(normalized_text))
+            end = self._resolve_chunk_end(
+                normalized_text=normalized_text,
+                start=start,
+                tentative_end=tentative_end,
+            )
             chunk_content = normalized_text[start:end].strip()
             if chunk_content:
                 chunks.append(
@@ -1461,10 +1591,91 @@ class DocumentChunkService:
             if end >= len(normalized_text):
                 break
 
-            next_start = end - self._chunk_overlap
+            next_start = self._resolve_next_chunk_start(
+                normalized_text=normalized_text,
+                current_start=start,
+                current_end=end,
+            )
             start = next_start if next_start > start else end
 
         return chunks
+
+    def _resolve_chunk_end(
+        self,
+        *,
+        normalized_text: str,
+        start: int,
+        tentative_end: int,
+    ) -> int:
+        """优先把 chunk 终点贴近自然边界，降低句子和条款被硬切断的概率。
+
+        参数:
+            normalized_text: 已清洗后的完整文本。
+            start: 当前 chunk 的起始偏移。
+            tentative_end: 纯字符窗口计算出的候选结束位置。
+
+        返回:
+            调整后的 chunk 结束位置；若未找到合适边界，则回退到原始窗口。
+        """
+        if tentative_end >= len(normalized_text):
+            return len(normalized_text)
+
+        # 给每个 chunk 留出最小主体长度，避免为了追求边界把 chunk 压得过短。
+        minimum_end = start + max(1, self._chunk_size // 2)
+        if tentative_end <= minimum_end:
+            return tentative_end
+
+        boundary_index = self._find_last_chunk_boundary(
+            text=normalized_text,
+            start=minimum_end,
+            end=tentative_end,
+        )
+        if boundary_index is None:
+            return tentative_end
+        return boundary_index
+
+    def _resolve_next_chunk_start(
+        self,
+        *,
+        normalized_text: str,
+        current_start: int,
+        current_end: int,
+    ) -> int:
+        """计算下一个 chunk 的起点，并跳过明显的空白边界。"""
+        next_start = current_end - self._chunk_overlap
+        if next_start <= current_start:
+            return current_end
+
+        while next_start < len(normalized_text) and normalized_text[next_start].isspace():
+            next_start += 1
+        return next_start
+
+    def _find_last_chunk_boundary(
+        self,
+        *,
+        text: str,
+        start: int,
+        end: int,
+    ) -> int | None:
+        """在指定窗口中寻找最靠后的自然边界。
+
+        参数:
+            text: 完整文本。
+            start: 搜索起始下标（含）。
+            end: 搜索结束下标（不含）。
+
+        返回:
+            边界后一位的下标；若未找到则返回 None。
+        """
+        if end <= start:
+            return None
+
+        boundary_chars = "\n\r。！？；.!?;:"
+        search_end = min(end, len(text))
+        for index in range(search_end - 1, start - 1, -1):
+            if text[index] in boundary_chars:
+                return index + 1
+        return None
 
     def _build_table_chunks(
         self,

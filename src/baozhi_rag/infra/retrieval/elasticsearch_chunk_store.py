@@ -287,7 +287,7 @@ class ElasticsearchChunkStore:
         should_queries: list[dict[str, object]] = [
             {
                 "match": {
-                    "content": {
+                    "searchable_text": {
                         "query": request.query_text,
                         "boost": 3.0,
                     }
@@ -421,6 +421,30 @@ class ElasticsearchChunkStore:
                 "analyzer": "ik_max_word",
                 "search_analyzer": "ik_smart",
             },
+            # 原始可引用正文，用于与增强检索文本分离。
+            "raw_content": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # 轻量上下文化文本，仅用于增强检索。
+            "contextual_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # 检索专用拼接文本，通常由 contextual_text + raw_content 构成。
+            "searchable_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # 表格 schema 文本，用于表格类问题显式提权。
+            "table_schema_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
             # 领域词命中结果，服务混合召回加权。
             "merged_terms": {"type": "keyword"},
             # 文本 chunk 上挂载的图片引用键列表。
@@ -490,6 +514,10 @@ class ElasticsearchChunkStore:
             "section_title",
             "content_type",
             "content",
+            "raw_content",
+            "contextual_text",
+            "searchable_text",
+            "table_schema_text",
             "merged_terms",
             "image_asset_refs",
             "image_assets",
@@ -579,6 +607,14 @@ class ElasticsearchChunkStore:
                     }
                 }
             },
+            {
+                "match": {
+                    "contextual_text": {
+                        "query": request.query_text,
+                        "boost": 2.2 if request.query_intent != "document_location" else 3.2,
+                    }
+                }
+            },
         ]
 
         if request.query_intent == "structured":
@@ -587,6 +623,16 @@ class ElasticsearchChunkStore:
                     "constant_score": {
                         "filter": {"term": {"content_type": "table"}},
                         "boost": 2.5,
+                    }
+                }
+            )
+            structure_queries.append(
+                {
+                    "match": {
+                        "table_schema_text": {
+                            "query": request.query_text,
+                            "boost": 3.2,
+                        }
                     }
                 }
             )
