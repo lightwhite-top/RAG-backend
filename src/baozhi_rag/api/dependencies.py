@@ -276,14 +276,21 @@ def get_knowledge_file_delete_service(
         KnowledgeFileImageAssetRepository,
         Depends(get_knowledge_file_image_asset_repository),
     ],
+    task_repository: Annotated[
+        KnowledgeUploadTaskRepository,
+        Depends(get_knowledge_upload_task_repository),
+    ],
     object_store: Annotated[AliyunOssFileStore, Depends(get_aliyun_oss_file_store)],
+    temp_file_store: Annotated[LocalFileStore, Depends(get_local_temp_file_store)],
 ) -> KnowledgeFileDeleteService:
     """构造知识文件删除服务。"""
     return KnowledgeFileDeleteService(
         knowledge_file_repository=knowledge_file_repository,
         knowledge_file_image_asset_repository=knowledge_file_image_asset_repository,
+        task_repository=task_repository,
         chunk_store=HybridChunkStore.from_settings(settings),
         object_store=object_store,
+        temp_file_store=temp_file_store,
     )
 
 

@@ -95,3 +95,10 @@ class KnowledgeFileListResponseData(BaseModel):
     """知识文件列表响应数据。"""
 
     items: list[KnowledgeFileItem] = Field(description="当前页文件列表")
+
+
+class KnowledgeFilePurgeResponseData(BaseModel):
+    """清空当前用户知识库数据后的统计结果。"""
+
+    deleted_file_count: int = Field(description="本次删除的知识文件数量")
+    deleted_task_count: int = Field(description="本次删除的上传任务数量")

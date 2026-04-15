@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Protocol
 
-from baozhi_rag.domain.knowledge_file import KnowledgeFile
+from baozhi_rag.domain.knowledge_file import KnowledgeFile, KnowledgeFileListPage
 from baozhi_rag.domain.knowledge_file_errors import KnowledgeFileNotFoundError
 from baozhi_rag.domain.knowledge_file_image_asset import KnowledgeFileImageAsset
+from baozhi_rag.domain.knowledge_upload_task import KnowledgeUploadTask
 from baozhi_rag.domain.user import CurrentUser
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +39,16 @@ class KnowledgeFileDeleteRepository(Protocol):
         返回:
             删除成功返回 `True`，否则返回 `False`。
         """
+        ...
+
+    def list_user_files(
+        self,
+        *,
+        uploader_user_id: str,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """按用户分页列出文件。"""
         ...
 
 
@@ -69,6 +82,33 @@ class KnowledgeFileObjectStore(Protocol):
         ...
 
 
+class KnowledgeUploadTaskCleanupRepository(Protocol):
+    """批量清理文件数据时使用的上传任务仓储协议。"""
+
+    def delete_tasks_by_user(
+        self,
+        uploader_user_id: str,
+    ) -> list[KnowledgeUploadTask]:
+        """删除指定用户的全部上传任务。"""
+        ...
+
+
+class KnowledgeFileTempStore(Protocol):
+    """批量清理时使用的临时文件存储协议。"""
+
+    def delete(self, storage_key: str) -> None:
+        """删除暂存文件。"""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeFilePurgeResult:
+    """批量清理当前用户知识库数据后的结果摘要。"""
+
+    deleted_file_count: int
+    deleted_task_count: int
+
+
 class KnowledgeFileImageAssetDeleteRepository(Protocol):
     """知识文件删除使用的图片资产仓储协议。"""
 
@@ -89,8 +129,10 @@ class KnowledgeFileDeleteService:
         *,
         knowledge_file_repository: KnowledgeFileDeleteRepository,
         knowledge_file_image_asset_repository: KnowledgeFileImageAssetDeleteRepository,
+        task_repository: KnowledgeUploadTaskCleanupRepository,
         chunk_store: KnowledgeFileDeleteChunkStore,
         object_store: KnowledgeFileObjectStore,
+        temp_file_store: KnowledgeFileTempStore,
     ) -> None:
         """初始化知识文件删除服务。
 
@@ -104,8 +146,10 @@ class KnowledgeFileDeleteService:
         """
         self._knowledge_file_repository = knowledge_file_repository
         self._knowledge_file_image_asset_repository = knowledge_file_image_asset_repository
+        self._task_repository = task_repository
         self._chunk_store = chunk_store
         self._object_store = object_store
+        self._temp_file_store = temp_file_store
 
     def delete_file(self, *, file_id: str, current_user: CurrentUser) -> None:
         """删除当前用户自己上传的知识文件。
@@ -194,3 +238,62 @@ class KnowledgeFileDeleteService:
                         cleanup_target,
                         exc_info=True,
                     )
+
+    def delete_all_files(self, *, current_user: CurrentUser) -> KnowledgeFilePurgeResult:
+        """删除当前用户上传的全部知识文件与上传任务。
+
+        参数:
+            current_user: 当前登录用户，用于限定只清理自己的知识库数据。
+
+        返回:
+            批量删除结果摘要。
+        """
+        files = self._list_all_user_files(current_user.id)
+        tasks = self._task_repository.delete_tasks_by_user(current_user.id)
+
+        for task in tasks:
+            with suppress(Exception):
+                self._temp_file_store.delete(task.source_storage_key)
+
+        deleted_file_count = 0
+        for knowledge_file in files:
+            image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
+                knowledge_file.id
+            )
+            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
+                continue
+            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
+            self._run_cleanup(
+                file_id=knowledge_file.id,
+                uploader_user_id=knowledge_file.uploader_user_id,
+                storage_key=knowledge_file.storage_key,
+                image_assets=image_assets,
+            )
+            deleted_file_count += 1
+
+        return KnowledgeFilePurgeResult(
+            deleted_file_count=deleted_file_count,
+            deleted_task_count=len(tasks),
+        )
+
+    def _list_all_user_files(self, uploader_user_id: str) -> list[KnowledgeFile]:
+        """按分页方式收集指定用户的全部文件快照。"""
+        page = 1
+        page_size = 100
+        files: list[KnowledgeFile] = []
+
+        while True:
+            result = self._knowledge_file_repository.list_user_files(
+                uploader_user_id=uploader_user_id,
+                page=page,
+                page_size=page_size,
+            )
+            current_items = list(getattr(result, "items", []))
+            if not current_items:
+                break
+            files.extend(current_items)
+            if len(current_items) < page_size:
+                break
+            page += 1
+
+        return files

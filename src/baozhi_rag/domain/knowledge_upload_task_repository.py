@@ -49,6 +49,13 @@ class KnowledgeUploadTaskRepository(Protocol):
         """按用户倒序列出最近任务。"""
         ...
 
+    def delete_tasks_by_user(
+        self,
+        uploader_user_id: str,
+    ) -> list[KnowledgeUploadTask]:
+        """删除指定用户的全部上传任务，并返回被删除的任务快照。"""
+        ...
+
     def update_submission_context(
         self,
         task_id: str,

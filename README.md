@@ -302,6 +302,7 @@ INSERT INTO users (
 - 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件；前提是本地源文件仍在当前节点保留
 - 可通过 `GET /files/global` 分页查询管理员上传的全局文件
 - 可通过 `GET /files/mine` 分页查询当前用户自己上传的文件
+- 可通过 `DELETE /files/mine` 一次性清空当前用户自己的知识文件与上传任务，便于反复测试后重建知识库
 - 可通过 `DELETE /files/{file_id}` 删除当前用户自己上传的知识文件
 - 两个列表接口都会返回分页信息、可直接用于前端渲染的临时文件地址 `file_url`，以及标准化后的文件扩展名 `extension`
 - 去重分为两层：

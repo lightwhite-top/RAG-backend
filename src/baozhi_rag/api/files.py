@@ -28,6 +28,7 @@ from baozhi_rag.schemas.files import (
     FileUploadSubmitResponseData,
     KnowledgeFileItem,
     KnowledgeFileListResponseData,
+    KnowledgeFilePurgeResponseData,
     UploadTaskItem,
     UploadTaskListResponseData,
 )
@@ -265,6 +266,29 @@ def get_image_asset_preview(
         filename=access_result.filename,
         content_type=access_result.content_type,
         content_iter=access_result.content_iter,
+    )
+
+
+@router.delete(
+    "/mine",
+    response_model=SuccessResponse[KnowledgeFilePurgeResponseData],
+    summary="清空我的知识库数据",
+)
+def delete_my_all_files(
+    request: Request,
+    service: Annotated[KnowledgeFileDeleteService, Depends(get_knowledge_file_delete_service)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> SuccessResponse[KnowledgeFilePurgeResponseData]:
+    """清空当前用户上传的全部知识文件与上传任务。"""
+    request_id = ensure_request_id(request)
+    result = service.delete_all_files(current_user=current_user)
+    return SuccessResponse[KnowledgeFilePurgeResponseData].success(
+        message="清空我的知识库数据成功",
+        request_id=request_id,
+        data=KnowledgeFilePurgeResponseData(
+            deleted_file_count=result.deleted_file_count,
+            deleted_task_count=result.deleted_task_count,
+        ),
     )
 
 

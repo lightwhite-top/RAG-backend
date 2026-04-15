@@ -90,6 +90,22 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
             task_models = session.scalars(stmt).all()
             return [self._to_domain(task_model) for task_model in task_models]
 
+    def delete_tasks_by_user(
+        self,
+        uploader_user_id: str,
+    ) -> list[KnowledgeUploadTask]:
+        """删除指定用户的全部上传任务，并返回被删除任务快照。"""
+        with self._session_factory() as session:
+            stmt = select(KnowledgeUploadTaskModel).where(
+                KnowledgeUploadTaskModel.uploader_user_id == uploader_user_id
+            )
+            task_models = session.scalars(stmt).all()
+            tasks = [self._to_domain(task_model) for task_model in task_models]
+            for task_model in task_models:
+                session.delete(task_model)
+            session.commit()
+            return tasks
+
     def update_submission_context(
         self,
         task_id: str,
