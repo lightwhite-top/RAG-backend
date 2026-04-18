@@ -52,7 +52,7 @@ services:
       MYSQL_USERNAME: ${MYSQL_USERNAME:-rag}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
       BACKEND: ${BACKEND:-mongodb}
-      MONGODB_URI: ${MONGODB_URI:-mongodb://rag:RagMongoRoot2026Pwd@mongodb:27017/?authSource=admin}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://rag:ChangeMe_MongoRoot_2026!@mongodb:27017/?authSource=admin}
       MONGODB_DATABASE: ${MONGODB_DATABASE:-rag_memory}
       MONGODB_SESSION_COLLECTION: ${MONGODB_SESSION_COLLECTION:-chat_sessions}
       MONGODB_MESSAGE_COLLECTION: ${MONGODB_MESSAGE_COLLECTION:-chat_messages}
@@ -132,7 +132,7 @@ services:
     logging: *json-file-logging
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USERNAME:-rag}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-RagMongoRoot2026Pwd}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-ChangeMe_MongoRoot_2026!}
     volumes:
       - mongodb_data:/data/db
     healthcheck:
