@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
+from baozhi_rag.api.admin_files import router as admin_files_router
 from baozhi_rag.api.admin_users import router as admin_users_router
 from baozhi_rag.api.auth import router as auth_router
 from baozhi_rag.api.chat import router as chat_router
@@ -32,5 +33,9 @@ router.include_router(
 )
 router.include_router(
     admin_users_router,
+    dependencies=[Depends(require_admin)],
+)
+router.include_router(
+    admin_files_router,
     dependencies=[Depends(require_admin)],
 )
