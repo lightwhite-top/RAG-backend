@@ -133,6 +133,8 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USERNAME:-rag}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-ChangeMe_MongoRoot_2026!}
+    ports:
+      - "${MONGODB_PUBLISH_ADDRESS:-127.0.0.1:27017}:27017"
     volumes:
       - mongodb_data:/data/db
     healthcheck:

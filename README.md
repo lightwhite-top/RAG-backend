@@ -639,11 +639,14 @@ chmod +x deploy_server.sh
 如果你希望“本地电脑直接连服务器上的 ES 与 Milvus 做测试”，建议额外配置：
 
 - `ES_PUBLISH_ADDRESS=0.0.0.0:9200`
+- `MONGODB_PUBLISH_ADDRESS=0.0.0.0:27017`
 - `MILVUS_PUBLISH_ADDRESS=0.0.0.0:19530`
 
 随后在本地开发环境把连接地址改成服务器地址，并带上相同认证信息：
 
 ```dotenv
+MONGODB_URI=mongodb://<你的Mongo用户名>:<你的Mongo密码>@<服务器IP>:27017/?authSource=admin
+
 ES_URL=http://<服务器IP>:9200
 ES_USERNAME=elastic
 ES_PASSWORD=<你的ES密码>
