@@ -4,17 +4,15 @@ FROM python:3.13-slim-bookworm
 
 ARG APT_MIRROR=https://mirrors.aliyun.com
 ARG PYPI_MIRROR=https://mirrors.aliyun.com/pypi/simple
-ARG UV_HTTP_TIMEOUT_SECONDS=300
+ARG PIP_TIMEOUT_SECONDS=300
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=${PIP_TIMEOUT_SECONDS} \
     PIP_INDEX_URL=${PYPI_MIRROR} \
     UV_DEFAULT_INDEX=${PYPI_MIRROR} \
     UV_INDEX_URL=${PYPI_MIRROR} \
-    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT_SECONDS} \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:${PATH}"
 
 WORKDIR /app
@@ -35,16 +33,27 @@ RUN sed -i \
 
 RUN pip install --no-cache-dir uv
 
-# 依赖层只受锁文件和项目元数据影响，避免 README 改动导致依赖重装。
+# Keep dependency installation stable when only application sources change.
 COPY pyproject.toml uv.lock ./
+RUN python -m venv .venv
+
+# Export the lockfile first so pip can download from the configured mirror.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    --mount=type=cache,target=/root/.cache/pip \
+    uv export \
+        --frozen \
+        --no-dev \
+        --no-editable \
+        --no-emit-project \
+        --format requirements.txt \
+        --output-file requirements.lock.txt \
+    && .venv/bin/pip install --cache-dir /root/.cache/pip -r requirements.lock.txt
 
 COPY README.md ./
 COPY src ./src
 COPY data/domain_dictionary.txt ./data/domain_dictionary.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/pip \
+    .venv/bin/pip install --cache-dir /root/.cache/pip --no-deps .
 
 RUN mkdir -p /app/data/uploads /app/data/tmp/converted
 

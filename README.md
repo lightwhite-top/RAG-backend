@@ -657,12 +657,16 @@ MILVUS_TOKEN=root:<你的Milvus密码>
 
 - `APP_BUILD_APT_MIRROR=https://mirrors.cloud.tencent.com`
 - `APP_BUILD_PYPI_MIRROR=https://mirrors.cloud.tencent.com/pypi/simple`
+- `APP_BUILD_PIP_TIMEOUT_SECONDS=300`
 
-如果构建阶段在 `uv sync --frozen --no-dev --no-install-project` 卡住，可优先保留 `--progress=plain` 观察具体停留的包名；若怀疑镜像源同步不及时，可临时切换到官方源：
+如果构建阶段在依赖安装步骤卡住，可优先保留 `--progress=plain` 观察具体停留的包名；若怀疑镜像源同步不及时，可临时切换到官方源：
+
+当前 `Dockerfile` 会先根据 `uv.lock` 导出锁定版 `requirements.txt`，再由 `pip` 按镜像源安装依赖，减少服务器构建时直接命中官方 artifact 地址的概率。
 
 ```powershell
 APP_BUILD_APT_MIRROR=https://deb.debian.org
 APP_BUILD_PYPI_MIRROR=https://pypi.org/simple
+APP_BUILD_PIP_TIMEOUT_SECONDS=300
 docker compose -f docker-compose.server.yml build --progress=plain
 docker compose -f docker-compose.server.yml up -d
 ```
