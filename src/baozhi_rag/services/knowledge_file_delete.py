@@ -51,6 +51,15 @@ class KnowledgeFileDeleteRepository(Protocol):
         """按用户分页列出文件。"""
         ...
 
+    def list_all_files(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页列出全部文件。"""
+        ...
+
 
 class KnowledgeFileDeleteChunkStore(Protocol):
     """知识文件删除所需的最小检索存储协议。"""
@@ -90,6 +99,10 @@ class KnowledgeUploadTaskCleanupRepository(Protocol):
         uploader_user_id: str,
     ) -> list[KnowledgeUploadTask]:
         """删除指定用户的全部上传任务。"""
+        ...
+
+    def delete_all_tasks(self) -> list[KnowledgeUploadTask]:
+        """删除全部上传任务。"""
         ...
 
 
@@ -276,6 +289,48 @@ class KnowledgeFileDeleteService:
             deleted_task_count=len(tasks),
         )
 
+    def delete_all_files_globally(
+        self,
+        *,
+        current_user: CurrentUser,
+    ) -> KnowledgeFilePurgeResult:
+        """删除全站知识文件与上传任务。
+
+        参数:
+            current_user: 当前管理员用户，用于审计与日志上下文。
+
+        返回:
+            全站批量删除结果摘要。
+        """
+        del current_user
+        files = self._list_all_files()
+        tasks = self._task_repository.delete_all_tasks()
+
+        for task in tasks:
+            with suppress(Exception):
+                self._temp_file_store.delete(task.source_storage_key)
+
+        deleted_file_count = 0
+        for knowledge_file in files:
+            image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
+                knowledge_file.id
+            )
+            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
+                continue
+            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
+            self._run_cleanup(
+                file_id=knowledge_file.id,
+                uploader_user_id=knowledge_file.uploader_user_id,
+                storage_key=knowledge_file.storage_key,
+                image_assets=image_assets,
+            )
+            deleted_file_count += 1
+
+        return KnowledgeFilePurgeResult(
+            deleted_file_count=deleted_file_count,
+            deleted_task_count=len(tasks),
+        )
+
     def _list_all_user_files(self, uploader_user_id: str) -> list[KnowledgeFile]:
         """按分页方式收集指定用户的全部文件快照。"""
         page = 1
@@ -289,6 +344,27 @@ class KnowledgeFileDeleteService:
                 page_size=page_size,
             )
             current_items = list(getattr(result, "items", []))
+            if not current_items:
+                break
+            files.extend(current_items)
+            if len(current_items) < page_size:
+                break
+            page += 1
+
+        return files
+
+    def _list_all_files(self) -> list[KnowledgeFile]:
+        """按分页方式收集全站全部文件快照。"""
+        page = 1
+        page_size = 100
+        files: list[KnowledgeFile] = []
+
+        while True:
+            result = self._knowledge_file_repository.list_all_files(
+                page=page,
+                page_size=page_size,
+            )
+            current_items = list(result.items)
             if not current_items:
                 break
             files.extend(current_items)

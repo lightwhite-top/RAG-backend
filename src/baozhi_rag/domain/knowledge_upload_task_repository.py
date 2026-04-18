@@ -56,6 +56,10 @@ class KnowledgeUploadTaskRepository(Protocol):
         """删除指定用户的全部上传任务，并返回被删除的任务快照。"""
         ...
 
+    def delete_all_tasks(self) -> list[KnowledgeUploadTask]:
+        """删除全部上传任务，并返回被删除的任务快照。"""
+        ...
+
     def update_submission_context(
         self,
         task_id: str,

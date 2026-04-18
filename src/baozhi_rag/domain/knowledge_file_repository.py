@@ -68,6 +68,15 @@ class KnowledgeFileRepository(Protocol):
         """分页查询全局可见文件。"""
         ...
 
+    def list_all_files(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询全部文件。"""
+        ...
+
     def list_user_files(
         self,
         *,

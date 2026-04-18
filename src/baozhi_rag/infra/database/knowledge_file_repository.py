@@ -123,6 +123,19 @@ class SqlAlchemyKnowledgeFileRepository:
             predicates=(KnowledgeFileModel.visibility_scope == FileVisibilityScope.GLOBAL.value,),
         )
 
+    def list_all_files(
+        self,
+        *,
+        page: int,
+        page_size: int,
+    ) -> KnowledgeFileListPage:
+        """分页查询全部文件。"""
+        return self._list_files_page(
+            page=page,
+            page_size=page_size,
+            predicates=(),
+        )
+
     def list_user_files(
         self,
         *,
