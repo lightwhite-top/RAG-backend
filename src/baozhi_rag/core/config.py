@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 from urllib.parse import quote_plus
 
 from pydantic import Field, field_validator, model_validator
@@ -362,11 +362,6 @@ class Settings(BaseSettings):
         description="触发深度重排的前二结果分差阈值",
         validation_alias="SEARCH_DEEP_RERANK_MARGIN_THRESHOLD",
     )
-    chat_memory_backend: Literal["mongodb", "mysql"] = Field(
-        default="mongodb",
-        description="聊天记忆存储后端",
-        validation_alias="BACKEND",
-    )
     chat_memory_mongodb_uri: str = Field(
         default="mongodb://127.0.0.1:27017",
         description="聊天记忆 MongoDB 连接串",
@@ -584,7 +579,6 @@ class Settings(BaseSettings):
             return data
 
         legacy_field_names = {
-            "chat_memory_backend": "BACKEND",
             "chat_memory_mongodb_uri": "MONGODB_URI",
             "chat_memory_mongodb_database": "MONGODB_DATABASE",
             "chat_memory_mongodb_session_collection": "MONGODB_SESSION_COLLECTION",

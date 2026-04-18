@@ -99,11 +99,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database_manager = DatabaseManager.from_settings(current_settings)
         database_manager.ensure_ready()
         database_manager.ensure_schema()
-        chat_memory_mongo_manager: MongoChatStorageManager | None = None
-        if current_settings.chat_memory_backend == "mongodb":
-            chat_memory_mongo_manager = MongoChatStorageManager.from_settings(current_settings)
-            chat_memory_mongo_manager.ensure_ready()
-            chat_memory_mongo_manager.ensure_indexes()
+        chat_memory_mongo_manager = MongoChatStorageManager.from_settings(current_settings)
+        chat_memory_mongo_manager.ensure_ready()
+        chat_memory_mongo_manager.ensure_indexes()
         object_store = AliyunOssFileStore.from_settings(current_settings)
         object_store.ensure_ready()
         chat_llm_client = OpenAICompatibleLlmClient.from_settings(current_settings)
@@ -176,8 +174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             worker_task.cancel()
         if worker_tasks:
             await asyncio.gather(*worker_tasks, return_exceptions=True)
-        if chat_memory_mongo_manager is not None:
-            chat_memory_mongo_manager.close()
+        chat_memory_mongo_manager.close()
         LOGGER.info("service_shutdown")
 
     app = FastAPI(

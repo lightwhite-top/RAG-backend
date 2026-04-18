@@ -21,8 +21,6 @@ from baozhi_rag.domain.registration_verification_repository import (
 from baozhi_rag.domain.user import CurrentUser, UserRole
 from baozhi_rag.domain.user_errors import AuthenticationRequiredError, PermissionDeniedError
 from baozhi_rag.domain.user_repository import UserRepository
-from baozhi_rag.infra.database.chat_message_repository import SqlAlchemyChatMessageRepository
-from baozhi_rag.infra.database.chat_session_repository import SqlAlchemyChatSessionRepository
 from baozhi_rag.infra.database.knowledge_file_image_asset_repository import (
     SqlAlchemyKnowledgeFileImageAssetRepository,
 )
@@ -124,10 +122,8 @@ def get_chat_session_repository(
     database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
 ) -> ChatSessionRepository:
     """构造聊天会话仓储。"""
-    if settings.chat_memory_backend == "mongodb":
-        chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
-        return MongoChatSessionRepository.from_manager(chat_memory_mongo_manager)
-    return SqlAlchemyChatSessionRepository(database_manager.session_factory)
+    chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
+    return MongoChatSessionRepository.from_manager(chat_memory_mongo_manager)
 
 
 def get_chat_message_repository(
@@ -135,10 +131,8 @@ def get_chat_message_repository(
     database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
 ) -> ChatMessageRepository:
     """构造聊天消息仓储。"""
-    if settings.chat_memory_backend == "mongodb":
-        chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
-        return MongoChatMessageRepository.from_manager(chat_memory_mongo_manager)
-    return SqlAlchemyChatMessageRepository(database_manager.session_factory)
+    chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
+    return MongoChatMessageRepository.from_manager(chat_memory_mongo_manager)
 
 
 def get_knowledge_file_repository(

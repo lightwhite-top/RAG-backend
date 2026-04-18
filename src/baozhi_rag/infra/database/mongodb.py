@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC
 from functools import lru_cache
 from typing import Any
@@ -10,8 +11,11 @@ from bson.codec_options import CodecOptions
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.errors import OperationFailure
 
 from baozhi_rag.core.config import Settings
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MongoChatStorageManager:
@@ -68,7 +72,30 @@ class MongoChatStorageManager:
         self._client.admin.command("ping")
 
     def ensure_indexes(self) -> None:
-        """确保聊天记忆所需的关键索引存在。"""
+        """确保聊天记忆所需的关键索引存在。
+
+        线上业务账号可能只有读写权限，没有 `createIndexes` 权限。此时缺少索引
+        主要影响查询性能，不应阻断整个服务启动，因此仅对未授权的建索引错误做
+        告警降级，其余索引异常仍按原样抛出。
+        """
+        try:
+            self._ensure_session_indexes()
+            self._ensure_message_indexes()
+            self._ensure_snapshot_indexes()
+        except OperationFailure as exc:
+            # 缺少 createIndexes 权限时允许服务继续启动，避免将可用性问题放大成启动故障。
+            if not self._is_unauthorized_index_error(exc):
+                raise
+            LOGGER.warning(
+                (
+                    "chat_memory_mongodb_index_init_skipped reason=unauthorized detail=%s "
+                    "followup=verify_required_indexes_precreated"
+                ),
+                self._extract_operation_failure_message(exc),
+            )
+
+    def _ensure_session_indexes(self) -> None:
+        """创建会话集合所需索引。"""
         self._session_collection.create_index(
             [("owner_user_id", ASCENDING), ("updated_at", DESCENDING), ("_id", DESCENDING)],
             name="ix_chat_sessions_owner_updated_at",
@@ -82,6 +109,9 @@ class MongoChatStorageManager:
             ],
             name="ix_chat_sessions_owner_status_updated_at",
         )
+
+    def _ensure_message_indexes(self) -> None:
+        """创建消息集合所需索引。"""
         self._message_collection.create_index(
             [("session_id", ASCENDING), ("sequence_no", ASCENDING)],
             name="uq_chat_messages_session_sequence",
@@ -95,6 +125,9 @@ class MongoChatStorageManager:
             [("request_id", ASCENDING)],
             name="ix_chat_messages_request_id",
         )
+
+    def _ensure_snapshot_indexes(self) -> None:
+        """创建快照集合所需索引。"""
         self._snapshot_collection.create_index(
             [("session_id", ASCENDING), ("version", ASCENDING)],
             name="uq_chat_session_memory_snapshots_session_version",
@@ -104,6 +137,24 @@ class MongoChatStorageManager:
             [("session_id", ASCENDING), ("covered_until_sequence_no", ASCENDING)],
             name="ix_chat_session_memory_snapshots_session_covered",
         )
+
+    @staticmethod
+    def _is_unauthorized_index_error(exc: OperationFailure) -> bool:
+        """判断索引初始化失败是否由权限不足导致。"""
+        if exc.code == 13:
+            return True
+        if isinstance(exc.details, dict):
+            return exc.details.get("codeName") == "Unauthorized"
+        return False
+
+    @staticmethod
+    def _extract_operation_failure_message(exc: OperationFailure) -> str:
+        """提取 MongoDB 命令失败的可读错误信息。"""
+        if isinstance(exc.details, dict):
+            error_message = exc.details.get("errmsg")
+            if isinstance(error_message, str) and error_message:
+                return error_message
+        return str(exc)
 
     def close(self) -> None:
         """关闭 MongoDB 客户端。"""

@@ -51,7 +51,6 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag}
       MYSQL_USERNAME: ${MYSQL_USERNAME:-rag}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
-      BACKEND: ${BACKEND:-mongodb}
       MONGODB_URI: ${MONGODB_URI:-mongodb://rag:ChangeMe_MongoRoot_2026!@mongodb:27017/?authSource=admin}
       MONGODB_DATABASE: ${MONGODB_DATABASE:-rag_memory}
       MONGODB_SESSION_COLLECTION: ${MONGODB_SESSION_COLLECTION:-chat_sessions}
