@@ -51,12 +51,12 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-rag}
       MYSQL_USERNAME: ${MYSQL_USERNAME:-rag}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
-      CHAT_MEMORY_BACKEND: ${CHAT_MEMORY_BACKEND:-mongodb}
-      CHAT_MEMORY_MONGODB_URI: ${CHAT_MEMORY_MONGODB_URI:-mongodb://rag:change-me@mongodb:27017/?authSource=admin}
-      CHAT_MEMORY_MONGODB_DATABASE: ${CHAT_MEMORY_MONGODB_DATABASE:-rag_memory}
-      CHAT_MEMORY_MONGODB_SESSION_COLLECTION: ${CHAT_MEMORY_MONGODB_SESSION_COLLECTION:-chat_sessions}
-      CHAT_MEMORY_MONGODB_MESSAGE_COLLECTION: ${CHAT_MEMORY_MONGODB_MESSAGE_COLLECTION:-chat_messages}
-      CHAT_MEMORY_MONGODB_SNAPSHOT_COLLECTION: ${CHAT_MEMORY_MONGODB_SNAPSHOT_COLLECTION:-chat_session_memory_snapshots}
+      BACKEND: ${BACKEND:-mongodb}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://rag:RagMongoRoot2026Pwd@mongodb:27017/?authSource=admin}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-rag_memory}
+      MONGODB_SESSION_COLLECTION: ${MONGODB_SESSION_COLLECTION:-chat_sessions}
+      MONGODB_MESSAGE_COLLECTION: ${MONGODB_MESSAGE_COLLECTION:-chat_messages}
+      MONGODB_SNAPSHOT_COLLECTION: ${MONGODB_SNAPSHOT_COLLECTION:-chat_session_memory_snapshots}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-jwt-secret-before-production}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_ACCESS_TOKEN_EXPIRE_DAYS: ${JWT_ACCESS_TOKEN_EXPIRE_DAYS:-7}
@@ -131,8 +131,8 @@ services:
     container_name: rag-service-mongodb
     logging: *json-file-logging
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${CHAT_MEMORY_MONGODB_ROOT_USERNAME:-rag}
-      MONGO_INITDB_ROOT_PASSWORD: ${CHAT_MEMORY_MONGODB_ROOT_PASSWORD:-change-me}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USERNAME:-rag}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD:-RagMongoRoot2026Pwd}
     volumes:
       - mongodb_data:/data/db
     healthcheck:

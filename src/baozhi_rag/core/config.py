@@ -365,32 +365,32 @@ class Settings(BaseSettings):
     chat_memory_backend: Literal["mongodb", "mysql"] = Field(
         default="mongodb",
         description="聊天记忆存储后端",
-        validation_alias="CHAT_MEMORY_BACKEND",
+        validation_alias="BACKEND",
     )
     chat_memory_mongodb_uri: str = Field(
         default="mongodb://127.0.0.1:27017",
         description="聊天记忆 MongoDB 连接串",
-        validation_alias="CHAT_MEMORY_MONGODB_URI",
+        validation_alias="MONGODB_URI",
     )
     chat_memory_mongodb_database: str = Field(
         default="rag_memory",
         description="聊天记忆 MongoDB 数据库名",
-        validation_alias="CHAT_MEMORY_MONGODB_DATABASE",
+        validation_alias="MONGODB_DATABASE",
     )
     chat_memory_mongodb_session_collection: str = Field(
         default="chat_sessions",
         description="聊天会话集合名",
-        validation_alias="CHAT_MEMORY_MONGODB_SESSION_COLLECTION",
+        validation_alias="MONGODB_SESSION_COLLECTION",
     )
     chat_memory_mongodb_message_collection: str = Field(
         default="chat_messages",
         description="聊天消息集合名",
-        validation_alias="CHAT_MEMORY_MONGODB_MESSAGE_COLLECTION",
+        validation_alias="MONGODB_MESSAGE_COLLECTION",
     )
     chat_memory_mongodb_snapshot_collection: str = Field(
         default="chat_session_memory_snapshots",
         description="会话记忆快照集合名",
-        validation_alias="CHAT_MEMORY_MONGODB_SNAPSHOT_COLLECTION",
+        validation_alias="MONGODB_SNAPSHOT_COLLECTION",
     )
     mysql_host: str = Field(
         default="127.0.0.1",
@@ -575,6 +575,31 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_chat_memory_env_names(cls, data: object) -> object:
+        """Reject legacy CHAT_MEMORY_* Mongo env names to avoid mixed naming."""
+        if not isinstance(data, dict):
+            return data
+
+        legacy_field_names = {
+            "chat_memory_backend": "BACKEND",
+            "chat_memory_mongodb_uri": "MONGODB_URI",
+            "chat_memory_mongodb_database": "MONGODB_DATABASE",
+            "chat_memory_mongodb_session_collection": "MONGODB_SESSION_COLLECTION",
+            "chat_memory_mongodb_message_collection": "MONGODB_MESSAGE_COLLECTION",
+            "chat_memory_mongodb_snapshot_collection": "MONGODB_SNAPSHOT_COLLECTION",
+        }
+        legacy_keys = [
+            f"{legacy_key} -> use {new_key}"
+            for legacy_key, new_key in legacy_field_names.items()
+            if legacy_key in data
+        ]
+        if legacy_keys:
+            msg = "Legacy Mongo env names are no longer supported: " + ", ".join(legacy_keys)
+            raise ValueError(msg)
+        return data
 
     @model_validator(mode="after")
     def validate_email_delivery_settings(self) -> Settings:
