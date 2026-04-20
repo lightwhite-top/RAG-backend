@@ -38,6 +38,9 @@ test:
 test-api:
     if (Test-Path tests/api) { uv run pytest tests/api } else { Write-Output "No API tests directory; skipping pytest." }
 
+golden-eval +args:
+    uv run python scripts/run_golden_eval.py {{args}}
+
 check:
     uv run ruff check .
     uv run mypy

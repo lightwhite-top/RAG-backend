@@ -163,6 +163,7 @@ just format
 just typecheck
 just test
 just test-api
+just golden-eval --base-url http://127.0.0.1:8000 --user-email your-user@example.com --admin-email your-admin@example.com --password your-password
 just check
 just lock
 just build
@@ -195,8 +196,6 @@ MONGODB_DATABASE=rag_memory
 MONGODB_SESSION_COLLECTION=chat_sessions
 MONGODB_MESSAGE_COLLECTION=chat_messages
 MONGODB_SNAPSHOT_COLLECTION=chat_session_memory_snapshots
-MONGODB_ROOT_USERNAME=rag
-MONGODB_ROOT_PASSWORD=ChangeMe_MongoRoot_2026!
 JWT_SECRET_KEY=replace-with-a-long-random-secret
 JWT_ALGORITHM=HS256
 JWT_ACCESS_TOKEN_EXPIRE_DAYS=7
@@ -616,8 +615,6 @@ chmod +x deploy_server.sh
 - `MYSQL_ROOT_PASSWORD`
 - `MONGODB_URI`
 - `MONGODB_DATABASE`
-- `MONGODB_ROOT_USERNAME`
-- `MONGODB_ROOT_PASSWORD`
 - `ES_PASSWORD`
 - `MILVUS_ROOT_PASSWORD`
 - `MILVUS_TOKEN`
