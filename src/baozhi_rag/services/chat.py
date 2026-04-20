@@ -11,6 +11,7 @@ from typing import Protocol
 
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchExecutionResult, ChunkSearchHit
+from baozhi_rag.services.citation_rerank import CitationRerankService
 from baozhi_rag.services.context_packing import ContextPackingBudgetConfig, ContextPackingService
 from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import ChunkImageAsset
@@ -174,6 +175,7 @@ class _PreparedChatCompletion:
     retrieval_trace: RetrievalTrace | None = None
     evidence_assessment: EvidenceAssessment | None = None
     runtime_policy: ChatRuntimePolicy | None = None
+    citation_candidate_hits: list[ChunkSearchHit] = field(default_factory=list)
 
 
 class ChatService:
@@ -186,6 +188,7 @@ class ChatService:
     _MAX_SNIPPET_CHARS = 180
     _DEFAULT_RETRIEVAL_SIZE = 5
     _FOLLOWUP_RETRIEVAL_SIZE = 7
+    _DEFAULT_CITATION_CANDIDATE_SIZE = 15
     _DEFAULT_TEMPERATURE = 0.0
     _DEFAULT_MAX_PROMPT_TOKENS = 4096
     _DEFAULT_RESERVED_ANSWER_TOKENS = 768
@@ -202,6 +205,7 @@ class ChatService:
         system_prompt: str,
         deep_rerank_service: DeepRerankService | None = None,
         image_rerank_service: ImageRerankService | None = None,
+        citation_rerank_service: CitationRerankService | None = None,
         query_rewrite_service: QueryRewriteService | None = None,
         context_packing_service: ContextPackingService | None = None,
     ) -> None:
@@ -220,6 +224,7 @@ class ChatService:
         self._system_prompt = system_prompt
         self._deep_rerank_service = deep_rerank_service
         self._image_rerank_service = image_rerank_service
+        self._citation_rerank_service = citation_rerank_service or CitationRerankService()
         self._query_rewrite_service = query_rewrite_service or QueryRewriteService()
         self._context_packing_service = context_packing_service or ContextPackingService(
             max_context_chars=self._MAX_CONTEXT_CHARS
@@ -271,9 +276,15 @@ class ChatService:
             and not completion.evidence_assessment.sufficient
         ):
             finish_reason = "evidence_insufficient"
+        final_citations = self._build_final_citations(
+            answer=answer,
+            retrieval_query=completion.retrieval_query,
+            prompt_citations=completion.citations,
+            candidate_hits=completion.citation_candidate_hits,
+        )
         plain_text, content_blocks = self._build_render_content(
             answer,
-            completion.citations,
+            final_citations,
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
@@ -285,7 +296,7 @@ class ChatService:
             content_blocks=content_blocks,
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
-            citations=completion.citations,
+            citations=final_citations,
             finish_reason=finish_reason,
             rewrite_applied=completion.rewrite_applied,
             query_intent=completion.query_intent,
@@ -326,8 +337,6 @@ class ChatService:
             retrieval_size=self._DEFAULT_RETRIEVAL_SIZE,
             temperature=self._DEFAULT_TEMPERATURE,
         )
-        citations_payload = [self._serialize_citation(item) for item in completion.citations]
-
         # 先把检索上下文透出给调用方，便于前端同步展示证据和审计信息。
         yield ChatStreamEvent(
             event="context",
@@ -340,7 +349,7 @@ class ChatService:
                 "evidence_assessment": self._serialize_evidence_assessment(
                     completion.evidence_assessment
                 ),
-                "citations": citations_payload,
+                "citations": [],
                 "applied_retrieval_size": runtime_policy.retrieval_size,
                 "applied_temperature": runtime_policy.temperature,
             },
@@ -429,9 +438,16 @@ class ChatService:
             and not completion.evidence_assessment.sufficient
         ):
             finish_reason = "evidence_insufficient"
+        final_citations = self._build_final_citations(
+            answer=answer,
+            retrieval_query=completion.retrieval_query,
+            prompt_citations=completion.citations,
+            candidate_hits=completion.citation_candidate_hits,
+        )
+        citations_payload = [self._serialize_citation(item) for item in final_citations]
         final_pending_markdown = self._build_markdown_block_from_raw_block(
             pending_buffer,
-            completion.citations,
+            final_citations,
             block_id=f"blk-{current_markdown_index}",
             sequence=current_block_sequence,
         )[0]
@@ -446,7 +462,7 @@ class ChatService:
                 markdown_block=final_pending_markdown,
                 inserted_blocks=self._build_support_blocks_for_markdown_block(
                     markdown_block=final_pending_markdown,
-                    citations=completion.citations,
+                    citations=final_citations,
                     original_query=completion.original_query,
                     retrieval_query=completion.retrieval_query,
                 ),
@@ -454,7 +470,7 @@ class ChatService:
                 yield insert_event
         plain_text, content_blocks = self._build_render_content(
             answer,
-            completion.citations,
+            final_citations,
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
@@ -510,9 +526,13 @@ class ChatService:
         )
         retrieval_query = rewrite_result.rewritten_query
         rewrite_applied = rewrite_result.rewrite_applied
+        citation_candidate_size = max(
+            self._DEFAULT_CITATION_CANDIDATE_SIZE,
+            runtime_policy.retrieval_size,
+        )
         search_result = self._chunk_search_service.search_with_trace(
             retrieval_query,
-            runtime_policy.retrieval_size,
+            citation_candidate_size,
             viewer_user_id=viewer_user_id,
             retrieval_mode="chat",
         )
@@ -523,8 +543,10 @@ class ChatService:
                 query_text=retrieval_query,
                 hits=hits,
             )
+        answer_hits = hits[: runtime_policy.retrieval_size]
         preliminary_citations = [
-            self._build_citation(hit, index=index) for index, hit in enumerate(hits, start=1)
+            self._build_citation(hit, index=index)
+            for index, hit in enumerate(answer_hits, start=1)
         ]
         context_prompt_result = self._context_packing_service.build_context_prompt_result(
             retrieval_query=retrieval_query,
@@ -574,6 +596,7 @@ class ChatService:
             retrieval_trace=retrieval_trace,
             evidence_assessment=evidence_assessment,
             runtime_policy=runtime_policy,
+            citation_candidate_hits=hits[:citation_candidate_size],
         )
 
     def _resolve_runtime_policy(
@@ -708,6 +731,38 @@ class ChatService:
             size=hit.file_size,
             image_assets=hit.image_assets,
         )
+
+    def _build_final_citations(
+        self,
+        *,
+        answer: str,
+        retrieval_query: str,
+        prompt_citations: list[ChatCitation],
+        candidate_hits: list[ChunkSearchHit],
+    ) -> list[ChatCitation]:
+        """在保留提示词引用顺序的前提下追加答案导向的高相关证据。"""
+        if not candidate_hits:
+            return prompt_citations
+
+        reranked_hits = self._citation_rerank_service.rerank_citations(
+            answer_text=answer,
+            query_text=retrieval_query,
+            candidate_chunks=candidate_hits,
+        )
+        final_citations = list(prompt_citations)
+        seen_chunk_ids = {citation.chunk_id for citation in final_citations}
+        next_index = len(final_citations) + 1
+
+        for hit in reranked_hits:
+            if hit.chunk_id in seen_chunk_ids:
+                continue
+            final_citations.append(self._build_citation(hit, index=next_index))
+            seen_chunk_ids.add(hit.chunk_id)
+            next_index += 1
+            if len(final_citations) >= 5:
+                break
+
+        return final_citations
 
     def _serialize_citation(self, citation: ChatCitation) -> dict[str, object]:
         """把引用对象转换为可序列化结构。"""
