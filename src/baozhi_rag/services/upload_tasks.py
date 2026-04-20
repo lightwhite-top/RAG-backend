@@ -43,6 +43,7 @@ from baozhi_rag.services.document_chunking import (
     ChunkType,
     DocumentChunk,
     DocumentChunkService,
+    UnsupportedDocumentTypeError,
 )
 from baozhi_rag.services.document_image_understanding import (
     DocumentImageUnderstandingResult,
@@ -92,6 +93,8 @@ class PreparedChunkImageAsset:
 class KnowledgeUploadService:
     """面向 API 的上传任务提交、查询与重试服务。"""
 
+    _SUPPORTED_SUFFIXES = {".docx", ".doc", ".pdf"}
+
     def __init__(
         self,
         *,
@@ -114,6 +117,7 @@ class KnowledgeUploadService:
         request_id: str,
     ) -> list[KnowledgeUploadTask]:
         """接收文件并创建或复用上传任务。"""
+        self._validate_supported_files(files)
         staged_files = await self._file_upload_service.stage_async_files(files)
         results: list[KnowledgeUploadTask] = []
         retained_storage_keys: set[str] = set()
@@ -168,6 +172,14 @@ class KnowledgeUploadService:
             self._cleanup_storage_keys(superseded_storage_keys)
 
         return results
+
+    def _validate_supported_files(self, files: Sequence[AsyncFileUploadInput]) -> None:
+        """在进入异步任务链路前拦截不支持的文档格式。"""
+        for file_input in files:
+            suffix = Path(file_input.filename or "").suffix.lower()
+            if suffix not in self._SUPPORTED_SUFFIXES:
+                msg = f"暂不支持的文件格式: {suffix or 'unknown'}"
+                raise UnsupportedDocumentTypeError(msg)
 
     def _reuse_existing_task(
         self,

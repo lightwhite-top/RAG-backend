@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import mimetypes
+from contextlib import suppress
 from dataclasses import dataclass, field
 from io import BytesIO
 from statistics import median
 from typing import cast
 
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageOps
 
 from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClientProtocol
 
@@ -39,6 +40,7 @@ class PdfParsedSegment:
     content: str
     segment_type: str
     heading_context: str
+    source_type: str = "text"
     page_number: int | None = None
     source_anchor: str | None = None
     bbox: BoundingBox | None = None
@@ -124,11 +126,23 @@ class PdfDocumentParser:
                 headings=headings,
             )
         else:
-            segments, next_headings = self._parse_scanned_page(
-                page=page,
-                page_number=page_number,
-                headings=headings,
-            )
+            try:
+                segments, next_headings = self._parse_scanned_page(
+                    page=page,
+                    page_number=page_number,
+                    headings=headings,
+                )
+            except Exception:
+                # 某些 PDF 既不是完整数字版，也不是纯扫描件，而是“少量可提取文本 + OCR 兜底”。
+                # 当 OCR 服务瞬时失败或额度不可用时，如果页面上已经有可读文本，就保守回退到数字版解析，
+                # 避免像 119 这类低文本量 PDF 因阈值误判而整页失败。
+                if total_text_length <= 0:
+                    raise
+                segments, next_headings = self._parse_digital_page(
+                    text_blocks=text_blocks,
+                    page_number=page_number,
+                    headings=headings,
+                )
 
         self._attach_image_assets_to_segments(
             segments=segments,
@@ -238,6 +252,7 @@ class PdfDocumentParser:
                         content=heading_context,
                         segment_type="paragraph",
                         heading_context=heading_context,
+                        source_type="text",
                         page_number=page_number,
                         source_anchor=source_anchor,
                         bbox=block.bbox,
@@ -253,6 +268,7 @@ class PdfDocumentParser:
                     content=content,
                     segment_type="paragraph",
                     heading_context=heading_context,
+                    source_type="text",
                     page_number=page_number,
                     source_anchor=source_anchor,
                     bbox=block.bbox,
@@ -298,6 +314,7 @@ class PdfDocumentParser:
                         content=markdown,
                         segment_type="table",
                         heading_context=" / ".join(active_headings),
+                        source_type="ocr",
                         page_number=page_number,
                         source_anchor=source_anchor,
                         bbox=block.bbox,
@@ -314,6 +331,7 @@ class PdfDocumentParser:
                         content=heading_context,
                         segment_type="paragraph",
                         heading_context=heading_context,
+                        source_type="ocr",
                         page_number=page_number,
                         source_anchor=source_anchor,
                         bbox=block.bbox,
@@ -329,6 +347,7 @@ class PdfDocumentParser:
                     content=content,
                     segment_type="paragraph",
                     heading_context=heading_context,
+                    source_type="ocr",
                     page_number=page_number,
                     source_anchor=source_anchor,
                     bbox=block.bbox,
@@ -336,9 +355,39 @@ class PdfDocumentParser:
             )
 
         if segments:
+            structure_text = "\n".join(
+                item.content
+                for item in segments
+                if item.segment_type == "paragraph" and item.content.strip()
+            ).strip()
+            fallback_text = self._select_best_ocr_text(page_image_bytes)
+            if self._should_replace_structure_with_fallback(
+                structure_text=structure_text,
+                fallback_text=fallback_text,
+            ):
+                normalized_heading_context = " / ".join(active_headings)
+                content = (
+                    f"{normalized_heading_context}\n{fallback_text}"
+                    if normalized_heading_context
+                    else fallback_text
+                )
+                return (
+                    [
+                        PdfParsedSegment(
+                            segment_id=f"p:{page_number}:block:1",
+                            content=content,
+                            segment_type="paragraph",
+                            heading_context=normalized_heading_context,
+                            source_type="ocr",
+                            page_number=page_number,
+                            source_anchor=f"p:{page_number}:block:1",
+                        )
+                    ],
+                    active_headings,
+                )
             return segments, active_headings
 
-        ocr_text = self.ocr_client.recognize_text(image_bytes=page_image_bytes, advanced=True)
+        ocr_text = self._select_best_ocr_text(page_image_bytes)
         normalized_heading_context = " / ".join(active_headings)
         content = (
             f"{normalized_heading_context}\n{ocr_text}" if normalized_heading_context else ocr_text
@@ -352,11 +401,76 @@ class PdfDocumentParser:
                     content=content,
                     segment_type="paragraph",
                     heading_context=normalized_heading_context,
+                    source_type="ocr",
                     page_number=page_number,
                     source_anchor=f"p:{page_number}:block:1",
                 )
             ],
             active_headings,
+        )
+
+    def _select_best_ocr_text(self, page_image_bytes: bytes) -> str:
+        """在原图和增强图上执行多路 OCR，选择数字与量词信息更完整的结果。"""
+        if self.ocr_client is None:
+            return ""
+
+        candidates: list[str] = []
+        for advanced in (False, True):
+            with suppress(Exception):
+                candidates.append(
+                    self.ocr_client.recognize_text(
+                        image_bytes=page_image_bytes,
+                        advanced=advanced,
+                    )
+                )
+
+        enhanced_image_bytes = self._enhance_image_for_ocr(page_image_bytes)
+        for advanced in (False, True):
+            with suppress(Exception):
+                candidates.append(
+                    self.ocr_client.recognize_text(
+                        image_bytes=enhanced_image_bytes,
+                        advanced=advanced,
+                    )
+                )
+
+        normalized_candidates = [candidate.strip() for candidate in candidates if candidate.strip()]
+        if not normalized_candidates:
+            return ""
+        return max(normalized_candidates, key=self._score_ocr_text_candidate)
+
+    def _enhance_image_for_ocr(self, image_bytes: bytes) -> bytes:
+        """对低质量扫描图做放大、灰度和自动对比度增强。"""
+        with Image.open(BytesIO(image_bytes)) as image:
+            enhanced_image = ImageOps.autocontrast(
+                image.convert("L").resize((image.width * 2, image.height * 2))
+            )
+            buffer = BytesIO()
+            enhanced_image.save(buffer, format="PNG")
+            return buffer.getvalue()
+
+    def _score_ocr_text_candidate(self, text: str) -> tuple[int, int, int]:
+        """对 OCR 文本打分，优先保留数字和量词信息更完整的结果。"""
+        normalized_text = " ".join(text.split())
+        digit_count = sum(character.isdigit() for character in normalized_text)
+        unit_hits = sum(
+            normalized_text.count(token) for token in ("小时", "分钟", "秒", "天", "元", "页", "次")
+        )
+        return (digit_count, unit_hits, len(normalized_text))
+
+    def _should_replace_structure_with_fallback(
+        self,
+        *,
+        structure_text: str,
+        fallback_text: str,
+    ) -> bool:
+        """当全文 OCR 明显优于结构 OCR 时，回退到全文 OCR 结果。"""
+        if not fallback_text.strip():
+            return False
+        if not structure_text.strip():
+            return True
+        return self._score_ocr_text_candidate(fallback_text) > self._score_ocr_text_candidate(
+            structure_text
         )
 
     def _extract_page_image_assets(
@@ -421,6 +535,7 @@ class PdfDocumentParser:
                     content=f"第{page_number}页图片区域",
                     segment_type="paragraph",
                     heading_context="",
+                    source_type="text",
                     page_number=page_number,
                     source_anchor=f"p:{page_number}:block:image",
                     image_assets=list(image_assets),

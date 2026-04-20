@@ -31,6 +31,13 @@ from baozhi_rag.services.document_parsers.pdf_parser import (
     PdfParsedSegment,
     PdfParserError,
 )
+from baozhi_rag.services.document_type_classifier import (
+    classify as classify_document_type,
+)
+from baozhi_rag.services.document_type_classifier import (
+    extract_version_chain_group,
+    extract_version_rank,
+)
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +49,12 @@ _COMMENT_REFERENCE_TAG = qn("w:commentReference")
 _COMMENT_ID_ATTR = qn("w:id")
 _DRAWING_BLIP_TAG = qn("a:blip")
 _REL_EMBED_ATTR = qn("r:embed")
+_SEARCH_HINT_IDENTIFIER_PATTERN = re.compile(
+    r"(样例\s*\d+|案例\s*\d+|版本\s*[vV]?\s*\d+|第\s*\d+\s*页)"
+)
+_SEARCH_HINT_NUMERIC_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:个工作日|工作日|小时|分钟|秒|天|周|月|年|元|万元|次|位|页|条|%)"
+)
 
 
 def _empty_str_list() -> list[str]:
@@ -132,6 +145,7 @@ class DocumentSegment:
     content: str
     segment_type: SegmentType
     heading_context: str
+    source_type: str = "text"
     page_number: int | None = None
     source_anchor: str | None = None
     # 锚定到当前片段的批注文本，会在切块前拼接到可检索内容中。
@@ -194,6 +208,16 @@ class DocumentChunk:
     source_filename: str
     # 文件在对象存储中的对象键
     storage_key: str
+    # 规整后的文件名文本，不带编号前缀与扩展名。
+    source_filename_text: str = ""
+    # 版本链排序使用的整数版本号，越大越新。
+    version_rank: int = 0
+    # 文档所属类型，供候选池治理与 lane 过滤使用。
+    document_type: str = "policy"
+    # 版本链所属主题组，供组内选代表时使用。
+    version_chain_group: str | None = None
+    # 来源类型，区分普通文本与 OCR 文本。
+    source_type: str = "text"
     page_number: int | None = None
     source_anchor: str | None = None
     # 上传该文件的用户 ID
@@ -214,8 +238,14 @@ class DocumentChunk:
     searchable_text: str = ""
     # 表格 schema 文本，用于强化表格结构化问题召回。
     table_schema_text: str = ""
+    # 表格行索引，仅表格行级 chunk 使用。
+    table_row_index: int | None = None
+    # 表格表头原文，仅表格行级 chunk 使用。
+    table_header_text: str | None = None
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
     merged_terms: list[str] = field(default_factory=_empty_str_list)
+    # OCR、版本链和模板化文档中的精确检索锚点。
+    exact_search_terms: list[str] = field(default_factory=_empty_str_list)
     # 与当前 chunk 关联的图片引用键。
     image_asset_refs: list[ChunkImageAssetRef] = field(default_factory=_empty_image_asset_ref_list)
     # 与当前 chunk 绑定的图片资产元数据。
@@ -229,7 +259,12 @@ class DocumentChunk:
             "chunk_id": self.chunk_id,
             "file_id": self.file_id,
             "source_filename": self.source_filename,
+            "source_filename_text": self.source_filename_text,
             "storage_key": self.storage_key,
+            "version_rank": self.version_rank,
+            "document_type": self.document_type,
+            "version_chain_group": self.version_chain_group,
+            "source_type": self.source_type,
             "page_number": self.page_number,
             "source_anchor": self.source_anchor,
             "uploader_user_id": self.uploader_user_id,
@@ -246,7 +281,10 @@ class DocumentChunk:
             "contextual_text": self.contextual_text,
             "searchable_text": self.searchable_text,
             "table_schema_text": self.table_schema_text,
+            "table_row_index": self.table_row_index,
+            "table_header_text": self.table_header_text,
             "merged_terms": self.merged_terms,
+            "exact_search_terms": self.exact_search_terms,
             "image_asset_refs": [item.to_search_document() for item in self.image_asset_refs],
             "image_assets": [asset.to_search_document() for asset in self.image_assets],
         }
@@ -577,6 +615,7 @@ class DocumentChunkService:
             if segment.segment_type == "table"
             else SegmentType.PARAGRAPH,
             heading_context=segment.heading_context,
+            source_type=segment.source_type,
             page_number=segment.page_number,
             source_anchor=segment.source_anchor,
             image_assets=[self._convert_pdf_image_asset(item) for item in segment.image_assets],
@@ -613,12 +652,16 @@ class DocumentChunkService:
         paragraph_buffer: list[str] = []
         paragraph_buffer_segment_ids: list[str] = []
         paragraph_buffer_heading_context = ""
+        paragraph_buffer_source_type = "text"
         paragraph_buffer_page_number: int | None = None
         paragraph_buffer_source_anchor: str | None = None
 
         for segment in segments:
             if segment.segment_type is SegmentType.PARAGRAPH:
-                if paragraph_buffer and paragraph_buffer_heading_context != segment.heading_context:
+                if paragraph_buffer and (
+                    paragraph_buffer_heading_context != segment.heading_context
+                    or paragraph_buffer_source_type != segment.source_type
+                ):
                     buffered_segment_id = self._build_buffer_segment_id(
                         paragraph_buffer_segment_ids
                     )
@@ -632,6 +675,7 @@ class DocumentChunkService:
                             start_index=len(chunks),
                             heading_context=paragraph_buffer_heading_context,
                             content_type="paragraph",
+                            source_type=paragraph_buffer_source_type,
                             page_number=paragraph_buffer_page_number,
                             source_anchor=paragraph_buffer_source_anchor,
                         )
@@ -639,6 +683,7 @@ class DocumentChunkService:
                     paragraph_buffer.clear()
                     paragraph_buffer_segment_ids.clear()
                     paragraph_buffer_heading_context = ""
+                    paragraph_buffer_source_type = "text"
                     paragraph_buffer_page_number = None
                     paragraph_buffer_source_anchor = None
 
@@ -646,6 +691,7 @@ class DocumentChunkService:
                     paragraph_buffer.append(segment.content)
                     paragraph_buffer_segment_ids.append(segment.segment_id)
                     paragraph_buffer_heading_context = segment.heading_context
+                    paragraph_buffer_source_type = segment.source_type
                     paragraph_buffer_page_number = (
                         paragraph_buffer_page_number
                         if paragraph_buffer_page_number is not None
@@ -670,6 +716,7 @@ class DocumentChunkService:
                             start_index=len(chunks),
                             heading_context=paragraph_buffer_heading_context,
                             content_type="paragraph",
+                            source_type=paragraph_buffer_source_type,
                             page_number=paragraph_buffer_page_number,
                             source_anchor=paragraph_buffer_source_anchor,
                         )
@@ -677,6 +724,7 @@ class DocumentChunkService:
                     paragraph_buffer.clear()
                     paragraph_buffer_segment_ids.clear()
                     paragraph_buffer_heading_context = ""
+                    paragraph_buffer_source_type = "text"
                     paragraph_buffer_page_number = None
                     paragraph_buffer_source_anchor = None
 
@@ -690,6 +738,7 @@ class DocumentChunkService:
                         start_index=len(chunks),
                         heading_context=segment.heading_context,
                         content_type="paragraph",
+                        source_type=segment.source_type,
                         image_assets=segment.image_assets,
                         page_number=segment.page_number,
                         source_anchor=segment.source_anchor,
@@ -709,6 +758,7 @@ class DocumentChunkService:
                         start_index=len(chunks),
                         heading_context=paragraph_buffer_heading_context,
                         content_type="paragraph",
+                        source_type=paragraph_buffer_source_type,
                         page_number=paragraph_buffer_page_number,
                         source_anchor=paragraph_buffer_source_anchor,
                     )
@@ -716,6 +766,7 @@ class DocumentChunkService:
                 paragraph_buffer.clear()
                 paragraph_buffer_segment_ids.clear()
                 paragraph_buffer_heading_context = ""
+                paragraph_buffer_source_type = "text"
                 paragraph_buffer_page_number = None
                 paragraph_buffer_source_anchor = None
 
@@ -729,6 +780,7 @@ class DocumentChunkService:
                     start_index=len(chunks),
                     heading_context=segment.heading_context,
                     comment_texts=segment.comment_texts,
+                    source_type=segment.source_type,
                     image_assets=segment.image_assets,
                     page_number=segment.page_number,
                     source_anchor=segment.source_anchor,
@@ -747,6 +799,7 @@ class DocumentChunkService:
                     start_index=len(chunks),
                     heading_context=paragraph_buffer_heading_context,
                     content_type="paragraph",
+                    source_type=paragraph_buffer_source_type,
                     page_number=paragraph_buffer_page_number,
                     source_anchor=paragraph_buffer_source_anchor,
                 )
@@ -1343,9 +1396,13 @@ class DocumentChunkService:
         segment_id: str,
         heading_context: str = "",
         content_type: str = "paragraph",
+        source_type: str = "text",
         image_assets: list[ChunkImageAsset] | None = None,
         page_number: int | None = None,
         source_anchor: str | None = None,
+        section_title_override: str | None = None,
+        table_row_index: int | None = None,
+        table_header_text: str | None = None,
     ) -> DocumentChunk:
         """基于统一元数据创建单个 chunk。
 
@@ -1361,22 +1418,42 @@ class DocumentChunkService:
         """
         term_match_result = self._term_matcher.extract_terms(content)
         heading_path = self._parse_heading_path(heading_context)
+        normalized_title = self._normalize_filename_title(source_filename)
         raw_content = self._extract_raw_content(
             content=content,
             heading_context=heading_context,
             content_type=content_type,
         )
         contextual_text = self._build_contextual_text(
+            source_filename=source_filename,
             heading_context=heading_context,
             content_type=content_type,
+            page_number=page_number,
+        )
+        exact_hint_text = self._build_exact_hint_text(
+            source_filename=source_filename,
+            heading_context=heading_context,
+            raw_content=raw_content,
+            page_number=page_number,
         )
         searchable_text = self._build_searchable_text(
             raw_content=raw_content,
             contextual_text=contextual_text,
+            exact_hint_text=exact_hint_text,
         )
+        exact_search_terms = self._extract_precise_search_terms(
+            normalized_title,
+            heading_context,
+            raw_content,
+            exact_hint_text,
+        )
+        if source_type == "ocr":
+            exact_search_terms = self._expand_ocr_exact_search_terms(exact_search_terms)
         table_schema_text = (
             self._extract_table_schema_text(raw_content) if content_type == "table" else ""
         )
+        document_type = classify_document_type(source_filename)
+        version_chain_group = extract_version_chain_group(source_filename)
         return DocumentChunk(
             file_id=file_id,
             chunk_id=f"{file_id}-chunk-{chunk_index}",
@@ -1386,17 +1463,25 @@ class DocumentChunkService:
             content=content,
             char_count=len(content),
             source_filename=source_filename,
+            source_filename_text=normalized_title,
             storage_key=storage_key,
+            version_rank=extract_version_rank(source_filename),
+            document_type=document_type,
+            version_chain_group=version_chain_group,
+            source_type=source_type,
             page_number=page_number,
             source_anchor=source_anchor,
             heading_path=heading_path,
-            section_title=heading_path[-1] if heading_path else None,
+            section_title=section_title_override or (heading_path[-1] if heading_path else None),
             content_type=content_type,
             raw_content=raw_content,
             contextual_text=contextual_text,
             searchable_text=searchable_text,
             table_schema_text=table_schema_text,
+            table_row_index=table_row_index,
+            table_header_text=table_header_text,
             merged_terms=term_match_result.merged_terms,
+            exact_search_terms=exact_search_terms,
             image_asset_refs=self._build_image_asset_refs(image_assets or []),
             image_assets=list(image_assets or []),
         )
@@ -1467,29 +1552,138 @@ class DocumentChunkService:
     def _build_contextual_text(
         self,
         *,
+        source_filename: str,
         heading_context: str,
         content_type: str,
+        page_number: int | None = None,
     ) -> str:
         """为当前 chunk 构造轻量上下文化文本，用于增强检索而非对外引用。"""
         sections: list[str] = []
+        normalized_title = self._normalize_filename_title(source_filename)
+        if normalized_title:
+            sections.append(f"文档标题：{normalized_title}")
+            compact_title = self._compact_search_text(normalized_title)
+            if compact_title and compact_title != normalized_title:
+                sections.append(f"文档标题紧凑：{compact_title}")
         normalized_heading = heading_context.strip()
         if normalized_heading:
             sections.append(f"章节：{normalized_heading}")
+        if page_number is not None:
+            sections.append(f"页码：第{page_number}页")
         if content_type == "table":
             sections.append("内容类型：表格")
         elif content_type == "paragraph":
             sections.append("内容类型：段落")
         return "\n".join(sections)
 
+    def _build_exact_hint_text(
+        self,
+        *,
+        source_filename: str,
+        heading_context: str,
+        raw_content: str,
+        page_number: int | None,
+    ) -> str:
+        """构造数字、编号与标题锚点组成的精确检索提示。
+
+        这部分文本只参与检索，不用于对外引用，目的是帮助扫描件和模板相似文档
+        在弱锚点查询下保留“样例1”“5小时”“1500元”这类高区分度信号。
+        """
+        search_terms = self._extract_precise_search_terms(
+            self._normalize_filename_title(source_filename),
+            heading_context,
+            raw_content,
+            f"第{page_number}页" if page_number is not None else "",
+        )
+        if not search_terms:
+            return ""
+        return "精确锚点：" + " ".join(search_terms)
+
     def _build_searchable_text(
         self,
         *,
         raw_content: str,
         contextual_text: str,
+        exact_hint_text: str = "",
     ) -> str:
         """构造写入检索索引的拼接文本。"""
-        parts = [item.strip() for item in [contextual_text, raw_content] if item.strip()]
+        parts = [
+            item.strip() for item in [contextual_text, raw_content, exact_hint_text] if item.strip()
+        ]
         return "\n".join(parts)
+
+    def _normalize_filename_title(self, source_filename: str) -> str:
+        """把文件名规整为更适合检索的文档标题。"""
+        normalized_title = Path(source_filename).stem.replace("_", " ").strip()
+        normalized_title = re.sub(r"^\d+\s*", "", normalized_title).strip()
+        return normalized_title
+
+    def _expand_ocr_exact_search_terms(self, terms: list[str]) -> list[str]:
+        """为 OCR 来源的数字锚点补充 +/-1 的容错变体。"""
+        expanded_terms = list(terms)
+        seen_terms = set(expanded_terms)
+        for term in terms:
+            matched = re.fullmatch(
+                r"(\d+)(?:\s*(个工作日|工作日|小时|分钟|秒|天|周|月|年|元|万元|次|位|页|条|%))?",
+                term,
+            )
+            if matched is None:
+                continue
+            value = int(matched.group(1))
+            suffix = matched.group(2) or ""
+            for offset in (-1, 1):
+                candidate_value = value + offset
+                if candidate_value < 0:
+                    continue
+                variants = [f"{candidate_value}{suffix}"]
+                if suffix:
+                    variants.append(f"{candidate_value} {suffix}")
+                for variant in variants:
+                    if variant not in seen_terms:
+                        seen_terms.add(variant)
+                        expanded_terms.append(variant)
+        return expanded_terms
+
+    def _compact_search_text(self, text: str) -> str:
+        """移除空白，构造 OCR 友好的紧凑匹配文本。"""
+        return re.sub(r"\s+", "", text).strip()
+
+    def _extract_precise_search_terms(self, *texts: str) -> list[str]:
+        """提取 OCR/模板化文档里最有区分度的编号与数字词。
+
+        返回去重后的顺序列表，便于后续直接拼接进 searchable_text。
+        """
+        terms: list[str] = []
+        for text in texts:
+            normalized_text = text.strip()
+            if not normalized_text:
+                continue
+            for pattern in (_SEARCH_HINT_IDENTIFIER_PATTERN, _SEARCH_HINT_NUMERIC_PATTERN):
+                for matched_text in pattern.findall(normalized_text):
+                    cleaned_text = matched_text.strip()
+                    if cleaned_text:
+                        terms.append(cleaned_text)
+                        compact_text = self._compact_search_text(cleaned_text)
+                        if compact_text and compact_text != cleaned_text:
+                            terms.append(compact_text)
+
+            for raw_line in normalized_text.splitlines():
+                line = raw_line.strip()
+                if not line or not any(character.isdigit() for character in line):
+                    continue
+                compact_line = self._compact_search_text(line)
+                if compact_line and compact_line != line and len(compact_line) <= 80:
+                    terms.append(compact_line)
+
+        deduplicated_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            normalized_term = term.strip()
+            if not normalized_term or normalized_term in seen_terms:
+                continue
+            seen_terms.add(normalized_term)
+            deduplicated_terms.append(normalized_term)
+        return deduplicated_terms
 
     def _extract_table_schema_text(self, raw_content: str) -> str:
         """从 Markdown 表格中提取表头 schema 文本。
@@ -1534,6 +1728,7 @@ class DocumentChunkService:
         start_index: int = 0,
         heading_context: str = "",
         content_type: str = "paragraph",
+        source_type: str = "text",
         image_assets: list[ChunkImageAsset] | None = None,
         page_number: int | None = None,
         source_anchor: str | None = None,
@@ -1582,6 +1777,7 @@ class DocumentChunkService:
                         segment_id=segment_id,
                         heading_context=heading_context,
                         content_type=content_type,
+                        source_type=source_type,
                         image_assets=image_assets,
                         page_number=page_number,
                         source_anchor=source_anchor,
@@ -1687,59 +1883,21 @@ class DocumentChunkService:
         start_index: int = 0,
         heading_context: str = "",
         comment_texts: list[str] | None = None,
+        source_type: str = "text",
         image_assets: list[ChunkImageAsset] | None = None,
         page_number: int | None = None,
         source_anchor: str | None = None,
     ) -> list[DocumentChunk]:
-        """为表格生成独立的 chunks。
-
-        小表格整体作为一个 chunk；
-        大表格按行分组切分，每组补充表头。
-
-        参数:
-            table_markdown: 表格的 Markdown 字符串。
-            source_filename: 上传时的原始文件名。
-            storage_key: 文件在本地存储中的相对路径。
-            file_id: 文件唯一标识。
-            start_index: 当前批次切块写入前的起始序号。
-            heading_context: 表格所在标题上下文，会附加到每个表格 chunk 前部。
-
-        返回:
-            表格切块列表。
-        """
+        """为表格生成行级 chunks。"""
         normalized_heading = heading_context.strip()
-        heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
-        # 表格批注作为补充上下文追加到每个表格 chunk 尾部，避免破坏表格主体结构。
         comment_suffix = self._build_comment_suffix(comment_texts or [])
-        content_with_context = (
-            f"{heading_prefix}{table_markdown}{comment_suffix}"
-            if heading_prefix
-            else f"{table_markdown}{comment_suffix}"
-        )
-
-        if len(content_with_context) <= self._chunk_size:
-            # 小表格，整体作为一个 chunk
-            return [
-                self._create_chunk(
-                    content=content_with_context,
-                    chunk_index=start_index,
-                    source_filename=source_filename,
-                    storage_key=storage_key,
-                    file_id=file_id,
-                    chunk_type=ChunkType.TEXT,
-                    segment_id=segment_id,
-                    heading_context=heading_context,
-                    content_type="table",
-                    image_assets=image_assets,
-                    page_number=page_number,
-                    source_anchor=source_anchor,
-                )
-            ]
-
-        # 大表格，需要切分
-        lines = table_markdown.split("\n")
+        lines = [line.strip() for line in table_markdown.splitlines() if line.strip()]
         if len(lines) < 3:
-            # 格式异常，当作小表格
+            content_with_context = (
+                f"{normalized_heading}\n{table_markdown}{comment_suffix}"
+                if normalized_heading
+                else f"{table_markdown}{comment_suffix}"
+            )
             return [
                 self._create_chunk(
                     content=content_with_context,
@@ -1751,28 +1909,28 @@ class DocumentChunkService:
                     segment_id=segment_id,
                     heading_context=heading_context,
                     content_type="table",
+                    source_type=source_type,
                     image_assets=image_assets,
                     page_number=page_number,
                     source_anchor=source_anchor,
                 )
             ]
-
         header_line = lines[0]
         separator_line = lines[1]
-        split_tables = self._split_large_table(
-            table_markdown,
-            header_line,
-            separator_line,
-            heading_context=heading_context,
-            comment_suffix=comment_suffix,
-        )
-
+        header_text = self._truncate_table_header(header_line)
+        row_title_prefix = normalized_heading or "表格"
+        heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
         chunks: list[DocumentChunk] = []
-        for offset, table_part in enumerate(split_tables):
+        for row_index, row_line in enumerate(lines[2:], start=0):
+            row_content = (
+                f"{heading_prefix}{header_line}\n{separator_line}\n{row_line}{comment_suffix}"
+                if heading_prefix
+                else f"{header_line}\n{separator_line}\n{row_line}{comment_suffix}"
+            )
             chunks.append(
                 self._create_chunk(
-                    content=table_part,
-                    chunk_index=start_index + offset,
+                    content=row_content,
+                    chunk_index=start_index + row_index,
                     source_filename=source_filename,
                     storage_key=storage_key,
                     file_id=file_id,
@@ -1780,72 +1938,23 @@ class DocumentChunkService:
                     segment_id=segment_id,
                     heading_context=heading_context,
                     content_type="table",
+                    source_type=source_type,
                     image_assets=image_assets,
                     page_number=page_number,
                     source_anchor=source_anchor,
+                    section_title_override=f"{row_title_prefix} - 第{row_index + 1}行",
+                    table_row_index=row_index,
+                    table_header_text=header_text,
                 )
             )
-
         return chunks
 
-    def _split_large_table(
-        self,
-        markdown: str,
-        header_line: str,
-        separator_line: str,
-        heading_context: str = "",
-        comment_suffix: str = "",
-    ) -> list[str]:
-        """将超大表格按行分组切分，每组补充表头。
-
-        参数:
-            markdown: 完整的表格 Markdown 字符串。
-            header_line: 表头行（如 "| 列1 | 列2 |"）。
-            separator_line: 分隔行（如 "|---|---|"）。
-            heading_context: 表格所在标题上下文，会附加到每个切分结果前部。
-
-        返回:
-            切分后的表格 Markdown 列表，每个都包含表头。
-        """
-        lines = markdown.split("\n")
-        if len(lines) <= 2:
-            normalized_heading = heading_context.strip()
-            if not normalized_heading:
-                return [f"{markdown}{comment_suffix}"]
-            return [f"{normalized_heading}\n{markdown}{comment_suffix}"]
-
-        normalized_heading = heading_context.strip()
-        heading_prefix = f"{normalized_heading}\n" if normalized_heading else ""
-        header = f"{header_line}\n{separator_line}"
-        chunk_prefix = f"{heading_prefix}{header}" if heading_prefix else header
-        # 预留批注补充块的长度，避免拆分后 chunk 明显超过目标大小。
-        header_size = len(chunk_prefix) + len(comment_suffix)
-        data_rows = lines[2:]
-
-        chunks: list[str] = []
-        current_rows: list[str] = []
-        current_size = header_size
-
-        for row in data_rows:
-            row_size = len(row) + 1  # +1 for newline
-
-            if current_size + row_size > self._chunk_size and current_rows:
-                chunk_content = chunk_prefix + "\n" + "\n".join(current_rows) + comment_suffix
-                chunks.append(chunk_content)
-                current_rows = []
-                current_size = header_size
-
-            current_rows.append(row)
-            current_size += row_size
-
-        if current_rows:
-            chunk_content = chunk_prefix + "\n" + "\n".join(current_rows) + comment_suffix
-            chunks.append(chunk_content)
-
-        if chunks:
-            return chunks
-
-        return [f"{chunk_prefix}{comment_suffix}"]
+    def _truncate_table_header(self, header_line: str, max_chars: int = 200) -> str:
+        """把表头压缩到稳定长度，避免行级 chunk 元数据过长。"""
+        normalized_header = " ".join(header_line.split()).strip()
+        if len(normalized_header) <= max_chars:
+            return normalized_header
+        return normalized_header[:max_chars].rstrip() + "..."
 
     def _log_chunk_preview(
         self,

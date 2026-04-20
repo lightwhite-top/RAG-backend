@@ -32,6 +32,7 @@ from baozhi_rag.schemas.files import (
     UploadTaskItem,
     UploadTaskListResponseData,
 )
+from baozhi_rag.services.document_chunking import UnsupportedDocumentTypeError
 from baozhi_rag.services.file_upload import AsyncFileUploadInput
 from baozhi_rag.services.knowledge_file_access import KnowledgeFileAccessService
 from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
@@ -43,6 +44,7 @@ from baozhi_rag.services.knowledge_file_query import (
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 
 router = APIRouter(prefix="/files", tags=["files"])
+_SUPPORTED_UPLOAD_SUFFIXES = {".docx", ".doc", ".pdf"}
 
 
 @router.get(
@@ -106,6 +108,11 @@ async def upload_files(
 ) -> SuccessResponse[FileUploadSubmitResponseData]:
     """接收多个文件并创建或复用后台上传任务。"""
     request_id = ensure_request_id(request)
+    for file in files:
+        suffix = PurePath(file.filename or "").suffix.lower()
+        if suffix not in _SUPPORTED_UPLOAD_SUFFIXES:
+            msg = f"暂不支持的文件格式: {suffix or 'unknown'}"
+            raise UnsupportedDocumentTypeError(msg)
 
     try:
         tasks = await service.submit_files(
