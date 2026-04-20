@@ -81,6 +81,9 @@ class RetrievalPipelineService:
                 vector_candidate_size=lane.vector_candidate_size,
                 lexical_rrf_weight=lane.lexical_rrf_weight,
                 vector_rrf_weight=lane.vector_rrf_weight,
+                lane_type=lane.lane_type,
+                target_document_types=list(lane.target_document_types),
+                version_preference=lane.version_preference,
                 viewer_user_id=viewer_user_id,
             )
             lane_executions.append(
@@ -113,7 +116,7 @@ class RetrievalPipelineService:
         for lane_execution in lane_executions:
             for rank, hit in enumerate(lane_execution.hits, start=1):
                 fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + (
-                    lane_execution.lane.lane_weight / (60 + rank)
+                    lane_execution.lane.lane_weight / (30 + rank)
                 )
                 if hit.chunk_id not in hit_map:
                     hit_map[hit.chunk_id] = hit

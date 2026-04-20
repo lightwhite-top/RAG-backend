@@ -114,7 +114,7 @@ class HybridChunkStoreSearchError(HybridChunkStoreError):
 class HybridChunkStore(ChunkSearchStore):
     """负责 ES 文档检索与 Milvus 向量检索的统一编排。"""
 
-    _RRF_K = 60
+    _RRF_K = 30
 
     def __init__(
         self,
@@ -311,6 +311,7 @@ class HybridChunkStore(ChunkSearchStore):
                 lexical_hits=lexical_hits,
                 semantic_hits=semantic_hits,
                 size=request.size,
+                query_text=request.query_text,
                 query_intent=request.query_intent,
                 lexical_weight=lexical_weight,
                 vector_weight=vector_weight,
@@ -344,6 +345,7 @@ class HybridChunkStore(ChunkSearchStore):
         lexical_hits: list[ChunkSearchHit],
         semantic_hits: list[MilvusVectorSearchHit],
         size: int,
+        query_text: str,
         query_intent: str,
         lexical_weight: float,
         vector_weight: float,
@@ -381,24 +383,91 @@ class HybridChunkStore(ChunkSearchStore):
             for hit in self._document_store.get_chunks_by_ids(semantic_only_ids):
                 hit_map[hit.chunk_id] = hit
 
-        ordered_chunk_ids = [
-            chunk_id
+        ordered_hits = [
+            replace(hit_map[chunk_id], score=round(fused_scores[chunk_id], 6))
             for chunk_id, _ in sorted(
                 fused_scores.items(),
                 key=lambda item: (-item[1], item[0]),
             )
             if chunk_id in hit_map
         ]
+        collapsed_hits = self._collapse_hits(
+            hits=ordered_hits,
+            query_text=query_text,
+        )
+        return collapsed_hits[:size]
 
-        fused_hits: list[ChunkSearchHit] = []
-        for chunk_id in ordered_chunk_ids[:size]:
-            fused_hits.append(
-                replace(
-                    hit_map[chunk_id],
-                    score=round(fused_scores[chunk_id], 6),
-                )
+    def _collapse_hits(
+        self,
+        *,
+        hits: list[ChunkSearchHit],
+        query_text: str,
+    ) -> list[ChunkSearchHit]:
+        """对融合候选做文件级去重，并折叠版本链文档。"""
+        deduplicated_by_file: list[ChunkSearchHit] = []
+        seen_file_ids: set[str] = set()
+        for hit in hits:
+            if hit.file_id in seen_file_ids:
+                continue
+            seen_file_ids.add(hit.file_id)
+            deduplicated_by_file.append(hit)
+
+        prefer_old_version = self._query_prefers_old_version(query_text)
+        grouped_hits: dict[str, list[ChunkSearchHit]] = {}
+        passthrough_hits: list[ChunkSearchHit] = []
+
+        for hit in deduplicated_by_file:
+            version_group_key = hit.version_chain_group
+            if version_group_key is None:
+                passthrough_hits.append(hit)
+                continue
+            grouped_hits.setdefault(version_group_key, []).append(hit)
+
+        collapsed_version_hits = passthrough_hits + [
+            self._select_version_group_representative(
+                candidates=candidates,
+                prefer_old_version=prefer_old_version,
             )
-        return fused_hits
+            for candidates in grouped_hits.values()
+        ]
+        return sorted(
+            collapsed_version_hits,
+            key=lambda item: (item.score or 0.0, -item.chunk_index),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _query_prefers_old_version(query_text: str) -> bool:
+        """判断当前查询是否明确指向旧版。"""
+        normalized_query = query_text.lower()
+        return any(token in normalized_query for token in ("旧版", "历史", "v1", "v2"))
+
+    def _select_version_group_representative(
+        self,
+        *,
+        candidates: list[ChunkSearchHit],
+        prefer_old_version: bool,
+    ) -> ChunkSearchHit:
+        """在同一版本链组中选择代表文档。"""
+        return max(
+            candidates,
+            key=lambda item: self._version_selection_key(
+                hit=item,
+                prefer_old_version=prefer_old_version,
+            ),
+        )
+
+    def _version_selection_key(
+        self,
+        *,
+        hit: ChunkSearchHit,
+        prefer_old_version: bool,
+    ) -> tuple[float, float]:
+        """构造版本链折叠时的优先级。"""
+        version_rank = hit.version_rank
+        if prefer_old_version:
+            return (-float(version_rank), hit.score or 0.0)
+        return (float(version_rank), hit.score or 0.0)
 
     def _rrf_score(self, rank: int, weight: float) -> float:
         """计算 Reciprocal Rank Fusion 分值。

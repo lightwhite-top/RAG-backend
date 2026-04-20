@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,6 +60,12 @@ class ElasticsearchSearchError(ElasticsearchStoreError):
 
 class ElasticsearchChunkStore:
     """负责 chunk 文档索引创建、写入、读取与检索。"""
+
+    _PRECISE_SEARCH_TERM_PATTERN = re.compile(
+        r"(样例\s*\d+|案例\s*\d+|版本\s*[vV]?\s*\d+|第\s*\d+\s*页|"
+        r"\d+(?:\.\d+)?\s*(?:个工作日|工作日|小时|分钟|秒|天|周|月|年|元|万元|次|位|页|条|%))",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -128,11 +135,20 @@ class ElasticsearchChunkStore:
             return
 
         client = self._get_client()
+        mappings = self._build_mappings()
         try:
             if not client.indices.exists(index=self._index_name):
                 client.indices.create(
                     index=self._index_name,
-                    mappings=self._build_mappings(),
+                    mappings=mappings,
+                )
+            else:
+                # 历史索引可能启用了 strict mapping，但缺少后来新增的字段。
+                # 这里统一补齐当前版本需要的属性，避免因为旧 mapping 缺字段导致批量写入失败。
+                client.indices.put_mapping(
+                    index=self._index_name,
+                    dynamic=mappings["dynamic"],
+                    properties=mappings["properties"],
                 )
         except Exception as exc:  # pragma: no cover - 第三方异常类型不稳定
             msg = f"创建或检查 ES 索引失败: {self._index_name}"
@@ -284,16 +300,7 @@ class ElasticsearchChunkStore:
     @classmethod
     def build_search_query(cls, request: ChunkSearchRequest) -> dict[str, object]:
         """构造结合全文、领域词与用户可见性的 ES 词法查询。"""
-        should_queries: list[dict[str, object]] = [
-            {
-                "match": {
-                    "searchable_text": {
-                        "query": request.query_text,
-                        "boost": 3.0,
-                    }
-                }
-            }
-        ]
+        should_queries = cls._build_lane_queries(request)
         filter_queries: list[dict[str, object]] = []
 
         if request.merged_terms:
@@ -306,7 +313,20 @@ class ElasticsearchChunkStore:
                 }
             )
 
-        should_queries.extend(cls._build_structure_queries(request))
+        if request.target_document_types:
+            filter_queries.append({"terms": {"document_type": request.target_document_types}})
+
+        precise_terms = cls._extract_precise_search_terms(request.query_text)
+        if precise_terms:
+            should_queries.append(
+                {
+                    "constant_score": {
+                        "filter": {"terms": {"exact_search_terms": precise_terms}},
+                        "boost": 12.0 if request.query_intent == "document_location" else 8.0,
+                    }
+                }
+            )
+            should_queries.extend(cls._build_ocr_precise_queries(precise_terms))
 
         if request.viewer_user_id:
             filter_queries.append(
@@ -321,13 +341,40 @@ class ElasticsearchChunkStore:
                 }
             )
 
-        return {
+        if request.lane_type == "table":
+            filter_queries.append({"term": {"content_type": "table"}})
+        if request.lane_type == "ocr":
+            filter_queries.append({"term": {"source_type": "ocr"}})
+
+        base_query: dict[str, object] = {
             "bool": {
                 "should": should_queries,
                 "minimum_should_match": 1,
                 "filter": filter_queries,
             }
         }
+        version_functions = cls._build_version_functions(request.version_preference)
+        if not version_functions:
+            return base_query
+        return {
+            "function_score": {
+                "query": base_query,
+                "score_mode": "sum",
+                "boost_mode": "sum",
+                "functions": version_functions,
+            }
+        }
+
+    @classmethod
+    def _build_lane_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """按 lane 类型构造查询子句。"""
+        if request.lane_type == "title":
+            return cls._build_title_lane_queries(request)
+        if request.lane_type == "table":
+            return cls._build_table_lane_queries(request)
+        if request.lane_type == "ocr":
+            return cls._build_ocr_lane_queries(request)
+        return cls._build_body_lane_queries(request)
 
     def _get_client(self) -> Any:
         """延迟初始化 ES 客户端。"""
@@ -385,8 +432,22 @@ class ElasticsearchChunkStore:
             "file_id": {"type": "keyword"},
             # 原始文件名，供搜索结果展示与引用回填使用。
             "source_filename": {"type": "keyword"},
+            # 去掉编号前缀后的文件名文本，供标题级精确匹配使用。
+            "source_filename_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
             # 文件在对象存储中的稳定对象键。
             "storage_key": {"type": "keyword"},
+            # 版本链排序辅助字段，数字越大代表越新。
+            "version_rank": {"type": "integer"},
+            # 文档类型，供候选池治理和 lane 过滤使用。
+            "document_type": {"type": "keyword"},
+            # 版本链所属主题组，供组内选代表使用。
+            "version_chain_group": {"type": "keyword"},
+            # 来源类型，当前区分普通文本与 OCR 文本。
+            "source_type": {"type": "keyword"},
             "page_number": {"type": "integer"},
             "source_anchor": {"type": "keyword"},
             # 上传者用户 ID，用于权限过滤与审计追踪。
@@ -445,8 +506,18 @@ class ElasticsearchChunkStore:
                 "analyzer": "ik_max_word",
                 "search_analyzer": "ik_smart",
             },
+            # 行级表格 chunk 的行序号。
+            "table_row_index": {"type": "integer"},
+            # 行级表格 chunk 的表头摘要。
+            "table_header_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
             # 领域词命中结果，服务混合召回加权。
             "merged_terms": {"type": "keyword"},
+            # OCR、版本链和模板化文档的精确锚点数组。
+            "exact_search_terms": {"type": "keyword"},
             # 文本 chunk 上挂载的图片引用键列表。
             "image_asset_refs": {
                 "type": "nested",
@@ -501,7 +572,12 @@ class ElasticsearchChunkStore:
             "chunk_id",
             "file_id",
             "source_filename",
+            "source_filename_text",
             "storage_key",
+            "version_rank",
+            "document_type",
+            "version_chain_group",
+            "source_type",
             "page_number",
             "source_anchor",
             "uploader_user_id",
@@ -518,7 +594,10 @@ class ElasticsearchChunkStore:
             "contextual_text",
             "searchable_text",
             "table_schema_text",
+            "table_row_index",
+            "table_header_text",
             "merged_terms",
+            "exact_search_terms",
             "image_asset_refs",
             "image_assets",
         ]
@@ -558,6 +637,7 @@ class ElasticsearchChunkStore:
             chunk_type=str(source.get("chunk_type", "text")),
             segment_id=str(source.get("segment_id", "")),
             source_filename=str(source.get("source_filename", "")),
+            source_filename_text=str(source.get("source_filename_text", "")),
             storage_key=str(source.get("storage_key", "")),
             page_number=int(source.get("page_number", 0))
             if source.get("page_number") is not None
@@ -572,6 +652,19 @@ class ElasticsearchChunkStore:
             if source.get("section_title") is not None
             else None,
             content_type=str(source.get("content_type", "paragraph")),
+            document_type=str(source.get("document_type", "policy")),
+            source_type=str(source.get("source_type", "text")),
+            version_rank=int(source.get("version_rank", 0)),
+            version_chain_group=str(source["version_chain_group"]).strip()
+            if source.get("version_chain_group") is not None
+            else None,
+            table_row_index=int(source.get("table_row_index", 0))
+            if source.get("table_row_index") is not None
+            else None,
+            table_header_text=str(source["table_header_text"]).strip()
+            if source.get("table_header_text") is not None
+            else None,
+            searchable_text=str(source.get("searchable_text", "")),
             content=str(source.get("content", "")),
             merged_terms=_as_string_list(source.get("merged_terms")),
             image_assets=_as_image_assets(source.get("image_assets")),
@@ -638,6 +731,302 @@ class ElasticsearchChunkStore:
             )
 
         return structure_queries
+
+    @classmethod
+    def _build_title_lane_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """构造标题 lane 查询。"""
+        return cls._build_filename_queries(request) + [
+            {
+                "match": {
+                    "section_title": {
+                        "query": request.query_text,
+                        "boost": 5.0,
+                    }
+                }
+            },
+            {
+                "match_phrase": {
+                    "section_title": {
+                        "query": request.query_text,
+                        "boost": 6.5,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "heading_path": {
+                        "query": request.query_text,
+                        "boost": 3.8,
+                    }
+                }
+            },
+        ]
+
+    @classmethod
+    def _build_body_lane_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """构造正文 lane 查询。"""
+        body_queries: list[dict[str, object]] = [
+            {
+                "match": {
+                    "searchable_text": {
+                        "query": request.query_text,
+                        "boost": 3.0,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "contextual_text": {
+                        "query": request.query_text,
+                        "boost": 2.2 if request.query_intent != "document_location" else 3.2,
+                    }
+                }
+            },
+        ]
+        body_queries.extend(
+            cls._build_precise_phrase_queries(
+                query_text=request.query_text,
+                query_intent=request.query_intent,
+            )
+        )
+        if request.query_intent in {"structured", "procedure"}:
+            body_queries.extend(cls._build_structure_queries(request))
+        return body_queries
+
+    @classmethod
+    def _build_table_lane_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """构造表格 lane 查询。"""
+        return [
+            {
+                "match": {
+                    "table_schema_text": {
+                        "query": request.query_text,
+                        "boost": 4.8,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "table_header_text": {
+                        "query": request.query_text,
+                        "boost": 4.6,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "content": {
+                        "query": request.query_text,
+                        "boost": 3.5,
+                    }
+                }
+            },
+            {
+                "match": {
+                    "searchable_text": {
+                        "query": request.query_text,
+                        "boost": 3.8,
+                    }
+                }
+            },
+        ]
+
+    @classmethod
+    def _build_ocr_lane_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """构造 OCR lane 查询。"""
+        queries = cls._build_body_lane_queries(request)
+        queries.extend(cls._build_title_lane_queries(request))
+        return queries
+
+    @classmethod
+    def _build_filename_queries(cls, request: ChunkSearchRequest) -> list[dict[str, object]]:
+        """为文件名标题追加单独的精确匹配子句。"""
+        match_boost = 6.0 if request.query_intent == "document_location" else 4.2
+        phrase_boost = 8.0 if request.query_intent == "document_location" else 5.4
+        return [
+            {
+                "match": {
+                    "source_filename_text": {
+                        "query": request.query_text,
+                        "boost": match_boost,
+                    }
+                }
+            },
+            {
+                "match_phrase": {
+                    "source_filename_text": {
+                        "query": request.query_text,
+                        "boost": phrase_boost,
+                    }
+                }
+            },
+        ]
+
+    @classmethod
+    def _build_precise_phrase_queries(
+        cls,
+        *,
+        query_text: str,
+        query_intent: str,
+    ) -> list[dict[str, object]]:
+        """为 OCR、版本链和数字型事实问题追加精确短语查询。"""
+        normalized_query = query_text.strip()
+        if not normalized_query:
+            return []
+
+        phrase_boost = 2.4 if query_intent != "document_location" else 3.2
+        precise_queries: list[dict[str, object]] = [
+            {
+                "match_phrase": {
+                    "searchable_text": {
+                        "query": normalized_query,
+                        "boost": phrase_boost,
+                    }
+                }
+            }
+        ]
+
+        compact_query = re.sub(r"\s+", "", normalized_query)
+        if compact_query and compact_query != normalized_query and len(compact_query) >= 4:
+            precise_queries.append(
+                {
+                    "match_phrase": {
+                        "searchable_text": {
+                            "query": compact_query,
+                            "boost": phrase_boost + 0.5,
+                        }
+                    }
+                }
+            )
+
+        for precise_term in cls._extract_precise_search_terms(normalized_query)[:6]:
+            precise_queries.append(
+                {
+                    "match_phrase": {
+                        "searchable_text": {
+                            "query": precise_term,
+                            "boost": phrase_boost + 0.8,
+                        }
+                    }
+                }
+            )
+            precise_queries.append(
+                {
+                    "match_phrase": {
+                        "contextual_text": {
+                            "query": precise_term,
+                            "boost": phrase_boost + 0.4,
+                        }
+                    }
+                }
+            )
+
+        return precise_queries
+
+    @classmethod
+    def _build_ocr_precise_queries(cls, precise_terms: list[str]) -> list[dict[str, object]]:
+        """为 OCR 来源文档追加更强的精确锚点查询。"""
+        ocr_queries: list[dict[str, object]] = [
+            {
+                "constant_score": {
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"term": {"source_type": "ocr"}},
+                                {"terms": {"exact_search_terms": precise_terms}},
+                            ]
+                        }
+                    },
+                    "boost": 4.5,
+                }
+            }
+        ]
+
+        fuzzy_terms = cls._build_numeric_fuzzy_terms(precise_terms)
+        if fuzzy_terms:
+            ocr_queries.append(
+                {
+                    "constant_score": {
+                        "filter": {
+                            "bool": {
+                                "must": [
+                                    {"term": {"source_type": "ocr"}},
+                                    {"terms": {"exact_search_terms": fuzzy_terms}},
+                                ]
+                            }
+                        },
+                        "boost": 2.5,
+                    }
+                }
+            )
+        return ocr_queries
+
+    @classmethod
+    def _build_numeric_fuzzy_terms(cls, precise_terms: list[str]) -> list[str]:
+        """为数字量词构造 +/-1 容错查询词。"""
+        fuzzy_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in precise_terms:
+            matched = re.fullmatch(
+                r"(\d+)(?:\s*(个工作日|工作日|小时|分钟|秒|天|周|月|年|元|万元|次|位|页|条|%))?",
+                term,
+            )
+            if matched is None:
+                continue
+            value = int(matched.group(1))
+            suffix = matched.group(2) or ""
+            for offset in (-1, 1):
+                candidate_value = value + offset
+                if candidate_value < 0:
+                    continue
+                candidates = [f"{candidate_value}{suffix}"]
+                if suffix:
+                    candidates.append(f"{candidate_value} {suffix}")
+                for candidate in candidates:
+                    if candidate in seen_terms:
+                        continue
+                    seen_terms.add(candidate)
+                    fuzzy_terms.append(candidate)
+        return fuzzy_terms
+
+    @classmethod
+    def _build_version_functions(cls, version_preference: str) -> list[dict[str, object]]:
+        """根据版本偏好决定是否对版本号做检索阶段提权。"""
+        if version_preference == "oldest":
+            return []
+        factor = 0.12 if version_preference == "latest" else 0.08
+        return [
+            {
+                "field_value_factor": {
+                    "field": "version_rank",
+                    "factor": factor,
+                    "modifier": "none",
+                    "missing": 0.0,
+                }
+            }
+        ]
+
+    @classmethod
+    def _extract_precise_search_terms(cls, query_text: str) -> list[str]:
+        """提取查询中的编号与数字量词，供短语匹配提权。"""
+        terms: list[str] = []
+        for matched_text in cls._PRECISE_SEARCH_TERM_PATTERN.findall(query_text):
+            cleaned_text = matched_text.strip()
+            if cleaned_text:
+                terms.append(cleaned_text)
+                compact_text = re.sub(r"\s+", "", cleaned_text)
+                if compact_text and compact_text != cleaned_text:
+                    terms.append(compact_text)
+
+        deduplicated_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            normalized_term = term.strip()
+            if not normalized_term or normalized_term in seen_terms:
+                continue
+            seen_terms.add(normalized_term)
+            deduplicated_terms.append(normalized_term)
+        return deduplicated_terms
 
 
 def _as_string_list(value: object) -> list[str]:

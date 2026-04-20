@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from fastapi import status
@@ -56,6 +58,9 @@ class ChunkSearchRequest:
     vector_candidate_size: int | None = None
     lexical_rrf_weight: float | None = None
     vector_rrf_weight: float | None = None
+    lane_type: str = "body"
+    target_document_types: list[str] = field(default_factory=_empty_str_list)
+    version_preference: str = "latest"
     viewer_user_id: str = ""
 
 
@@ -68,6 +73,7 @@ class ChunkSearchHit:
     chunk_type: str
     segment_id: str
     source_filename: str
+    source_filename_text: str
     storage_key: str
     page_number: int | None
     source_anchor: str | None
@@ -79,6 +85,13 @@ class ChunkSearchHit:
     heading_path: list[str] = field(default_factory=_empty_str_list)
     section_title: str | None = None
     content_type: str = "paragraph"
+    document_type: str = "policy"
+    source_type: str = "text"
+    version_rank: int = 0
+    version_chain_group: str | None = None
+    table_row_index: int | None = None
+    table_header_text: str | None = None
+    searchable_text: str = ""
     file_content_type: str | None = None
     file_extension: str | None = None
     file_size: int | None = None
@@ -191,10 +204,14 @@ class ChunkSearchService:
             raise ChunkSearchValidationError("size 必须大于 0")
 
         query_intent = self._query_intent_service.detect(normalized_query)
+        target_document_types = self._query_intent_service.detect_document_types(normalized_query)
+        version_preference = self._query_intent_service.detect_version_preference(normalized_query)
         retrieval_plan = self._build_retrieval_plan(
             query_text=normalized_query,
             query_intent=query_intent,
-            size=size,
+            size=max(size * 2, size + 5),
+            target_document_types=target_document_types,
+            version_preference=version_preference,
             retrieval_mode=retrieval_mode,
         )
         pipeline_result = self._execute_retrieval_plan(
@@ -207,14 +224,19 @@ class ChunkSearchService:
             query_intent=query_intent,
             hits=hydrated_hits,
         )
-        evidence_assessment = self._evidence_sufficiency_service.assess(reranked_hits)
+        final_hits = self._finalize_hits(
+            hits=reranked_hits,
+            size=size,
+            target_document_types=target_document_types,
+        )
+        evidence_assessment = self._evidence_sufficiency_service.assess(final_hits)
         retrieval_trace = self._retrieval_trace_service.build(
             execution_result=pipeline_result,
-            final_hits=reranked_hits,
+            final_hits=final_hits,
             evidence_assessment=evidence_assessment,
         )
         return ChunkSearchExecutionResult(
-            hits=reranked_hits,
+            hits=final_hits,
             query_intent=query_intent,
             retrieval_trace=retrieval_trace,
             evidence_assessment=evidence_assessment,
@@ -226,6 +248,8 @@ class ChunkSearchService:
         query_text: str,
         query_intent: str,
         size: int,
+        target_document_types: list[str],
+        version_preference: str,
         retrieval_mode: str,
     ) -> RetrievalPlan:
         """构造当前查询的检索计划。"""
@@ -238,12 +262,15 @@ class ChunkSearchService:
                 lanes=[
                     RetrievalLanePlan(
                         lane_id="hybrid-default",
+                        lane_type="body",
                         query_text=query_text,
                         lane_weight=1.0,
                         result_size=size,
                         lexical_candidate_size=size,
                         vector_candidate_size=size,
                         query_intent=query_intent,
+                        target_document_types=list(target_document_types),
+                        version_preference=version_preference,
                     )
                 ],
             )
@@ -251,6 +278,8 @@ class ChunkSearchService:
         return self._retrieval_planner.build(
             query_text=query_text,
             query_intent=query_intent,
+            target_document_types=target_document_types,
+            version_preference=version_preference,
             result_size=size,
             mode=retrieval_mode,
         )
@@ -285,6 +314,9 @@ class ChunkSearchService:
                 replace(
                     hit,
                     source_filename=knowledge_file.original_filename,
+                    source_filename_text=self._normalize_filename_title(
+                        knowledge_file.original_filename
+                    ),
                     storage_key=knowledge_file.storage_key,
                     file_content_type=knowledge_file.content_type,
                     file_extension=self._infer_file_extension(knowledge_file.original_filename),
@@ -295,6 +327,73 @@ class ChunkSearchService:
             )
         return hydrated_hits
 
+    def _finalize_hits(
+        self,
+        *,
+        hits: list[ChunkSearchHit],
+        size: int,
+        target_document_types: list[str],
+    ) -> list[ChunkSearchHit]:
+        """在最终返回前施加文档类型配额与 OCR 保底席位。"""
+        if not hits:
+            return []
+
+        document_type_cap = max(1, min(6, int(size * 0.6) or 1))
+        selected_hits: list[ChunkSearchHit] = []
+        document_type_counts: dict[str, int] = {}
+        selected_chunk_ids: set[str] = set()
+
+        for hit in hits:
+            document_type = hit.document_type or "policy"
+            if document_type_counts.get(document_type, 0) >= document_type_cap:
+                continue
+            selected_hits.append(hit)
+            selected_chunk_ids.add(hit.chunk_id)
+            document_type_counts[document_type] = document_type_counts.get(document_type, 0) + 1
+            if len(selected_hits) >= size:
+                break
+
+        if "ocr_scan" in target_document_types:
+            selected_hits = self._ensure_min_ocr_hits(
+                selected_hits=selected_hits,
+                fallback_hits=hits,
+                size=size,
+                selected_chunk_ids=selected_chunk_ids,
+            )
+
+        return selected_hits[:size]
+
+    def _ensure_min_ocr_hits(
+        self,
+        *,
+        selected_hits: list[ChunkSearchHit],
+        fallback_hits: list[ChunkSearchHit],
+        size: int,
+        selected_chunk_ids: set[str],
+    ) -> list[ChunkSearchHit]:
+        """保证 OCR 查询至少保留两个 OCR 候选。"""
+        minimum_ocr_hits = min(2, size)
+        current_ocr_hits = [hit for hit in selected_hits if hit.document_type == "ocr_scan"]
+        if len(current_ocr_hits) >= minimum_ocr_hits:
+            return selected_hits
+
+        missing_hits = minimum_ocr_hits - len(current_ocr_hits)
+        supplemental_hits = [
+            hit
+            for hit in fallback_hits
+            if hit.document_type == "ocr_scan" and hit.chunk_id not in selected_chunk_ids
+        ][:missing_hits]
+        if not supplemental_hits:
+            return selected_hits
+
+        retained_hits = [hit for hit in selected_hits if hit.document_type == "ocr_scan"]
+        for hit in selected_hits:
+            if hit.document_type == "ocr_scan":
+                continue
+            retained_hits.append(hit)
+        merged_hits = retained_hits[: size - len(supplemental_hits)] + supplemental_hits
+        return merged_hits[:size]
+
     def _infer_file_extension(self, filename: str) -> str | None:
         """从原始文件名中提取扩展名，供聊天链路展示使用。"""
         normalized_name = filename.rsplit("/", maxsplit=1)[-1].strip()
@@ -302,3 +401,8 @@ class ChunkSearchService:
             return None
         extension = normalized_name.rsplit(".", maxsplit=1)[-1].strip().lower()
         return extension or None
+
+    def _normalize_filename_title(self, filename: str) -> str:
+        """把原始文件名规整为标题文本。"""
+        normalized_title = Path(filename).stem.replace("_", " ").strip()
+        return re.sub(r"^\d+\s*", "", normalized_title).strip()
