@@ -289,7 +289,7 @@ INSERT INTO users (
 - 字段名：`files`
 - 当前支持：`.docx`、`.doc`、`.pdf`
 - Word 解析会保留标题上下文、表格 Markdown 与批注文本，一并进入切块和检索
-- PDF 解析默认采用 `PyMuPDF` 提取数字版正文与原图；扫描版 PDF 会在页图渲染后按需调用阿里云 OCR
+- PDF 解析默认采用 `PyMuPDF` 提取数字版正文与原图；扫描版 PDF 会在页图渲染后按需调用本地 HTTP OCR 服务
 - 成功时返回 `202 Accepted`
 - 业务输入错误返回 `4xx`
 - 下游依赖或系统故障返回 `5xx`
@@ -299,6 +299,8 @@ INSERT INTO users (
 - 最终知识文件对象会落到 `knowledge-files/<用户id>/<file_id>/<文件名>`，OSS 不再承担原始文件中转下载职责
 - `POST /files/upload` 只负责接收文件、计算原始哈希、登记任务和复用重复任务；不会再把原始文件先传 OSS 再回下载
 - 解析、去重、向量化、ES/Milvus 写入全部由后台 worker 异步完成
+- 后台文件队列已改为“线程池并行消费 + OCR 专项限流”模型：普通文件任务走线程池并行推进，只有真正进入扫描版 PDF OCR 时才申请 OCR 槽位
+- 当 OCR 容量暂时不可用时，任务会短暂等待；若超时仍拿不到 OCR 槽位，会回退到 `waiting_ocr_capacity` 阶段并释放工作线程，后续再继续调度
 - 可通过 `GET /files/upload-tasks` 和 `GET /files/upload-tasks/{task_id}` 轮询任务状态，响应会返回 `extension`（如 `pdf`、`docx`）
 - 失败任务可通过 `POST /files/upload-tasks/{task_id}/retry` 直接重试，无需重新上传大文件；前提是本地源文件仍在当前节点保留
 - 可通过 `GET /files/global` 分页查询管理员上传的全局文件
@@ -327,10 +329,11 @@ curl -X POST "http://127.0.0.1:8000/files/upload" `
 `UPLOAD_ROOT_DIR` 通过 `UPLOAD_ROOT_DIR` 配置，默认值为 `data/uploads`，当前同时承担上传源文件保留目录与 worker 本地处理目录。当前实现默认面向单机或固定节点处理模型，不适合无共享存储的跨节点抢占式消费。
 阿里云 OSS 配置通过 `OSS_REGION`、`OSS_ENDPOINT`、`OSS_BUCKET_NAME`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_OBJECT_PREFIX` 提供。
 切块窗口和旧版 Word 转换临时目录分别通过 `DOC_CHUNK_SIZE`、`DOC_CHUNK_OVERLAP`、`DOC_CONVERT_TEMP_DIR`、`DOC_CONVERT_TIMEOUT_SECONDS` 配置。
-PDF 解析和 OCR 相关配置通过 `PDF_RENDER_DPI`、`PDF_OCR_ENABLED`、`PDF_LOW_TEXT_PAGE_THRESHOLD`、`PDF_MAX_PAGE_COUNT` 提供。
-阿里云 OCR 配置通过 `ALIYUN_OCR_ENDPOINT`、`ALIYUN_OCR_PAGE_STRUCTURE_API`、`ALIYUN_OCR_TEXT_API`、`ALIYUN_OCR_TEXT_API_FALLBACK`、`ALIYUN_OCR_TABLE_API`、`ALIYUN_OCR_HANDWRITING_API` 提供。
-异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
-当前实现中，阿里云 OCR 默认直接复用 `OSS_REGION`、`OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`；只有 OCR 的 `endpoint` 与接口名保持独立配置。
+PDF 解析和 OCR 相关配置通过 `PDF_RENDER_DPI`、`PDF_OCR_ENABLED`、`PDF_LOW_TEXT_PAGE_THRESHOLD`、`PDF_MAX_PAGE_COUNT`、`OCR_SERVICE_BASE_URL`、`OCR_SERVICE_TIMEOUT_SECONDS` 提供。
+扫描版 PDF 主链默认调用本地 HTTP OCR 服务，服务启动前请先确认 `OCR_SERVICE_BASE_URL` 指向的 OCR 服务可用，并且 `/healthz` 能正常返回成功状态。
+异步上传任务相关配置通过 `UPLOAD_INGEST_VERSION`、`UPLOAD_WORKER_CONCURRENCY`、`UPLOAD_WORKER_POLL_INTERVAL_SECONDS`、`FILE_TASK_THREAD_POOL_CORE_SIZE`、`FILE_TASK_THREAD_POOL_MAX_SIZE`、`OCR_TASK_MAX_CONCURRENT`、`OCR_TASK_MAX_WAITERS`、`OCR_TASK_WAIT_TIMEOUT_SECONDS`、`UPLOAD_TASK_LEASE_SECONDS`、`UPLOAD_TASK_HEARTBEAT_INTERVAL_SECONDS` 提供。
+当前推荐保持 `UPLOAD_WORKER_CONCURRENCY=1`，并把并行度主要交给文件任务线程池；默认核心线程数为 2、最大线程数为 4，OCR 最大并发槽位为 1。
+当前扫描版 PDF 主链不再依赖手写 OCR 接口，也不再以阿里云 OCR 作为默认实现。
 默认领域词典文件位于 `data/domain_dictionary.txt`，可通过 `DOMAIN_DICTIONARY_PATH` 配置为其他词典文件。
 `APP_NAME` 是对外服务名的统一来源；`SMTP_FROM_NAME` 留空时会自动继承 `APP_NAME`，`CHAT_SYSTEM_PROMPT` 支持使用 `{app_name}` 占位符。
 当前配置加载会先读取项目根目录下的 `.env` 公共配置，再根据 `APP_ENV` 自动叠加 `.env.development` 或 `.env.production`。

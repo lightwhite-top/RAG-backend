@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
+from threading import local
 from typing import Any, cast
 
 from baozhi_rag.core.config import Settings
@@ -42,7 +43,8 @@ class AliyunOssFileStore:
         self._bucket_name = bucket_name
         self._access_key_id = access_key_id
         self._access_key_secret = access_key_secret
-        self._client: Any | None = None
+        # 批量删除会在多个线程里复用同一个 store；客户端放在线程本地，避免线程间共享 SDK 实例。
+        self._thread_local = local()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> AliyunOssFileStore:
@@ -218,9 +220,11 @@ class AliyunOssFileStore:
 
     def _get_client(self) -> Any:
         """延迟初始化 OSS 客户端。"""
-        if self._client is None:
-            self._client = self._create_client()
-        return self._client
+        client = getattr(self._thread_local, "client", None)
+        if client is None:
+            client = self._create_client()
+            self._thread_local.client = client
+        return client
 
     def _create_client(self) -> Any:
         """创建 OSS 客户端实例。"""

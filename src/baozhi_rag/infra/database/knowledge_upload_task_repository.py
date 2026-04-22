@@ -150,7 +150,14 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
                 select(KnowledgeUploadTaskModel)
                 .where(
                     or_(
-                        KnowledgeUploadTaskModel.status == KnowledgeUploadTaskStatus.QUEUED.value,
+                        and_(
+                            KnowledgeUploadTaskModel.status
+                            == KnowledgeUploadTaskStatus.QUEUED.value,
+                            or_(
+                                KnowledgeUploadTaskModel.lease_expires_at.is_(None),
+                                KnowledgeUploadTaskModel.lease_expires_at <= now,
+                            ),
+                        ),
                         and_(
                             KnowledgeUploadTaskModel.status
                             == KnowledgeUploadTaskStatus.PROCESSING.value,
@@ -341,6 +348,32 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
             task_model.last_heartbeat_at = None
             task_model.completed_at = None
             task_model.updated_at = queued_at
+            session.commit()
+            session.refresh(task_model)
+            return self._to_domain(task_model)
+
+    def requeue_waiting_for_ocr_capacity(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        retry_at: datetime,
+    ) -> KnowledgeUploadTask | None:
+        """把任务回退为等待 OCR 容量的可恢复状态。"""
+        with self._session_factory() as session:
+            task_model = session.get(KnowledgeUploadTaskModel, task_id)
+            if task_model is None or task_model.worker_id != worker_id:
+                return None
+
+            task_model.status = KnowledgeUploadTaskStatus.QUEUED.value
+            task_model.stage = KnowledgeUploadTaskStage.WAITING_OCR_CAPACITY.value
+            task_model.worker_id = None
+            task_model.lease_expires_at = retry_at
+            task_model.last_heartbeat_at = retry_at
+            task_model.error_code = None
+            task_model.error_message = None
+            task_model.completed_at = None
+            task_model.updated_at = retry_at
             session.commit()
             session.refresh(task_model)
             return self._to_domain(task_model)

@@ -129,35 +129,46 @@ class Settings(BaseSettings):
         validation_alias="PDF_MAX_PAGE_COUNT",
         ge=1,
     )
-    aliyun_ocr_endpoint: str = Field(
-        default="ocr-api.cn-hangzhou.aliyuncs.com",
-        description="阿里云 OCR OpenAPI Endpoint",
-        validation_alias="ALIYUN_OCR_ENDPOINT",
+    ocr_service_base_url: str = Field(
+        default="http://36.139.143.207:18080",
+        description="本地 HTTP OCR 服务基础地址",
+        validation_alias="OCR_SERVICE_BASE_URL",
     )
-    aliyun_ocr_page_structure_api: str = Field(
-        default="RecognizeDocumentStructure",
-        description="阿里云 OCR 页级结构接口名",
-        validation_alias="ALIYUN_OCR_PAGE_STRUCTURE_API",
+    ocr_service_timeout_seconds: float = Field(
+        default=30.0,
+        description="本地 HTTP OCR 调用超时时间（秒）",
+        validation_alias="OCR_SERVICE_TIMEOUT_SECONDS",
+        gt=0,
     )
-    aliyun_ocr_text_api: str = Field(
-        default="RecognizeGeneral",
-        description="阿里云 OCR 普通文本接口名",
-        validation_alias="ALIYUN_OCR_TEXT_API",
+    file_task_thread_pool_core_size: int = Field(
+        default=2,
+        description="文件任务线程池核心线程数",
+        validation_alias="FILE_TASK_THREAD_POOL_CORE_SIZE",
+        ge=1,
     )
-    aliyun_ocr_text_api_fallback: str = Field(
-        default="RecognizeAdvanced",
-        description="阿里云 OCR 复杂文本回退接口名",
-        validation_alias="ALIYUN_OCR_TEXT_API_FALLBACK",
+    file_task_thread_pool_max_size: int = Field(
+        default=4,
+        description="文件任务线程池最大线程数",
+        validation_alias="FILE_TASK_THREAD_POOL_MAX_SIZE",
+        ge=1,
     )
-    aliyun_ocr_table_api: str = Field(
-        default="RecognizeTableOcr",
-        description="阿里云 OCR 表格接口名",
-        validation_alias="ALIYUN_OCR_TABLE_API",
+    ocr_task_max_concurrent: int = Field(
+        default=1,
+        description="OCR 任务最大并发槽位数",
+        validation_alias="OCR_TASK_MAX_CONCURRENT",
+        ge=1,
     )
-    aliyun_ocr_handwriting_api: str = Field(
-        default="RecognizeHandwriting",
-        description="阿里云 OCR 手写接口名",
-        validation_alias="ALIYUN_OCR_HANDWRITING_API",
+    ocr_task_max_waiters: int = Field(
+        default=2,
+        description="OCR 任务允许等待槽位的最大线程数",
+        validation_alias="OCR_TASK_MAX_WAITERS",
+        ge=0,
+    )
+    ocr_task_wait_timeout_seconds: float = Field(
+        default=1.0,
+        description="OCR 任务等待槽位超时时间（秒）",
+        validation_alias="OCR_TASK_WAIT_TIMEOUT_SECONDS",
+        gt=0,
     )
     upload_ingest_version: str = Field(
         default="v1",
@@ -362,6 +373,77 @@ class Settings(BaseSettings):
         description="触发深度重排的前二结果分差阈值",
         validation_alias="SEARCH_DEEP_RERANK_MARGIN_THRESHOLD",
     )
+    search_expansion_enabled: bool = Field(
+        default=False,
+        description="是否启用统一扩展检索框架",
+        validation_alias="SEARCH_EXPANSION_ENABLED",
+    )
+    search_expansion_candidate_pool_multiplier: float = Field(
+        default=1.5,
+        description="扩展 lane 的候选池倍率",
+        validation_alias="SEARCH_EXPANSION_CANDIDATE_POOL_MULTIPLIER",
+        ge=0.1,
+    )
+    search_expansion_mqe_enabled: bool = Field(
+        default=False,
+        description="是否启用 MQE 扩展策略",
+        validation_alias="SEARCH_EXPANSION_MQE_ENABLED",
+    )
+    search_expansion_mqe_generate_count: int = Field(
+        default=3,
+        description="MQE 生成扩展查询数量上限",
+        validation_alias="SEARCH_EXPANSION_MQE_GENERATE_COUNT",
+        ge=1,
+    )
+    search_expansion_mqe_model: str | None = Field(
+        default=None,
+        description="MQE 使用的模型名；留空时回退到 LLM_CHAT_MODEL",
+        validation_alias="SEARCH_EXPANSION_MQE_MODEL",
+    )
+    search_expansion_mqe_lane_weight: float = Field(
+        default=0.85,
+        description="MQE lane 融合权重",
+        validation_alias="SEARCH_EXPANSION_MQE_LANE_WEIGHT",
+        ge=0.0,
+    )
+    search_expansion_mqe_allowed_modes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["search", "chat"],
+        description="MQE 允许生效的模式列表，多个模式用逗号分隔",
+        validation_alias="SEARCH_EXPANSION_MQE_ALLOWED_MODES",
+    )
+    search_expansion_mqe_max_query_length: int = Field(
+        default=120,
+        description="MQE 单条扩展查询最大长度",
+        validation_alias="SEARCH_EXPANSION_MQE_MAX_QUERY_LENGTH",
+        ge=8,
+    )
+    search_expansion_hyde_enabled: bool = Field(
+        default=False,
+        description="是否启用 HyDE 扩展策略",
+        validation_alias="SEARCH_EXPANSION_HYDE_ENABLED",
+    )
+    search_expansion_hyde_model: str | None = Field(
+        default=None,
+        description="HyDE 使用的模型名；留空时回退到 LLM_CHAT_MODEL",
+        validation_alias="SEARCH_EXPANSION_HYDE_MODEL",
+    )
+    search_expansion_hyde_lane_weight: float = Field(
+        default=0.8,
+        description="HyDE lane 融合权重",
+        validation_alias="SEARCH_EXPANSION_HYDE_LANE_WEIGHT",
+        ge=0.0,
+    )
+    search_expansion_hyde_allowed_modes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["search", "chat"],
+        description="HyDE 允许生效的模式列表，多个模式用逗号分隔",
+        validation_alias="SEARCH_EXPANSION_HYDE_ALLOWED_MODES",
+    )
+    search_expansion_hyde_max_document_length: int = Field(
+        default=900,
+        description="HyDE 假设文档最大长度",
+        validation_alias="SEARCH_EXPANSION_HYDE_MAX_DOCUMENT_LENGTH",
+        ge=64,
+    )
     chat_memory_mongodb_uri: str = Field(
         default="mongodb://127.0.0.1:27017",
         description="聊天记忆 MongoDB 连接串",
@@ -548,6 +630,8 @@ class Settings(BaseSettings):
         "cors_allow_methods",
         "cors_allow_headers",
         "cors_expose_headers",
+        "search_expansion_mqe_allowed_modes",
+        "search_expansion_hyde_allowed_modes",
         mode="before",
     )
     @classmethod
@@ -570,6 +654,19 @@ class Settings(BaseSettings):
 
         normalized_value = value.strip()
         return normalized_value or None
+
+    @field_validator(
+        "search_expansion_mqe_allowed_modes",
+        "search_expansion_hyde_allowed_modes",
+        mode="after",
+    )
+    @classmethod
+    def normalize_search_expansion_modes(cls, value: list[str]) -> list[str]:
+        """归一化扩展策略允许模式，确保输出稳定小写值。"""
+        normalized_modes = [item.strip().lower() for item in value if item.strip()]
+        if normalized_modes:
+            return list(dict.fromkeys(normalized_modes))
+        return ["search", "chat"]
 
     @model_validator(mode="before")
     @classmethod
@@ -600,6 +697,10 @@ class Settings(BaseSettings):
         """校验邮件发送配置中互斥的连接模式。"""
         if self.smtp_use_tls and self.smtp_use_ssl:
             raise ValueError("SMTP_USE_TLS 与 SMTP_USE_SSL 不能同时为 true")
+        if self.file_task_thread_pool_max_size < self.file_task_thread_pool_core_size:
+            raise ValueError(
+                "FILE_TASK_THREAD_POOL_MAX_SIZE 不能小于 FILE_TASK_THREAD_POOL_CORE_SIZE"
+            )
         return self
 
     @property
@@ -657,6 +758,34 @@ class Settings(BaseSettings):
     def resolved_chat_system_prompt(self) -> str:
         """返回注入了应用名称的聊天系统提示词。"""
         return self.chat_system_prompt.replace("{app_name}", self.app_name)
+
+    @property
+    def resolved_search_expansion_mqe_model(self) -> str:
+        """返回 MQE 最终使用的模型名。"""
+        return (self.search_expansion_mqe_model or self.llm_chat_model or "").strip()
+
+    @property
+    def resolved_search_expansion_hyde_model(self) -> str:
+        """返回 HyDE 最终使用的模型名。"""
+        return (self.search_expansion_hyde_model or self.llm_chat_model or "").strip()
+
+    @property
+    def normalized_search_expansion_mqe_allowed_modes(self) -> tuple[str, ...]:
+        """返回 MQE 允许模式的去重小写元组。"""
+        modes = tuple(
+            mode.strip().lower() for mode in self.search_expansion_mqe_allowed_modes if mode.strip()
+        )
+        return tuple(dict.fromkeys(modes)) or ("search", "chat")
+
+    @property
+    def normalized_search_expansion_hyde_allowed_modes(self) -> tuple[str, ...]:
+        """返回 HyDE 允许模式的去重小写元组。"""
+        modes = tuple(
+            mode.strip().lower()
+            for mode in self.search_expansion_hyde_allowed_modes
+            if mode.strip()
+        )
+        return tuple(dict.fromkeys(modes)) or ("search", "chat")
 
 
 def _normalize_app_env_for_env_file(app_env: str | None) -> str | None:

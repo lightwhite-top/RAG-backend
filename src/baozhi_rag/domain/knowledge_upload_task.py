@@ -20,6 +20,7 @@ class KnowledgeUploadTaskStage(StrEnum):
     """上传任务阶段。"""
 
     UPLOADED = "uploaded"
+    WAITING_OCR_CAPACITY = "waiting_ocr_capacity"
     PARSING = "parsing"
     INDEXING = "indexing"
     FINALIZING = "finalizing"

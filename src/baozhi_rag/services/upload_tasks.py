@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
 import tempfile
 import threading
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -48,6 +50,7 @@ from baozhi_rag.services.document_image_understanding import (
     DocumentImageUnderstandingResult,
     DocumentImageUnderstandingService,
 )
+from baozhi_rag.services.document_ocr.ocr_capacity_limiter import OcrCapacityPendingError
 from baozhi_rag.services.file_upload import (
     AsyncFileUploadInput,
     FileUploadService,
@@ -310,6 +313,7 @@ class KnowledgeUploadProcessor:
         image_understanding_service: DocumentImageUnderstandingService,
         lease_seconds: int,
         heartbeat_interval_seconds: float,
+        ocr_capacity_retry_delay_seconds: float,
     ) -> None:
         """初始化后台处理器。"""
         self._temp_file_store = temp_file_store
@@ -324,6 +328,7 @@ class KnowledgeUploadProcessor:
         self._image_understanding_service = image_understanding_service
         self._lease_seconds = lease_seconds
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._ocr_capacity_retry_delay_seconds = ocr_capacity_retry_delay_seconds
 
     def process_next_task(self, worker_id: str) -> bool:
         """抢占并处理下一条可执行任务。"""
@@ -413,6 +418,26 @@ class KnowledgeUploadProcessor:
             for cleanup_storage_key in process_result.cleanup_storage_keys:
                 with suppress(Exception):
                     self._object_store.delete(cleanup_storage_key)
+        except OcrCapacityPendingError as exc:
+            retry_delay_seconds = max(
+                float(exc.retry_after_seconds),
+                self._ocr_capacity_retry_delay_seconds,
+            )
+            retry_at = datetime.now(UTC) + timedelta(seconds=retry_delay_seconds)
+            self._task_repository.requeue_waiting_for_ocr_capacity(
+                task.id,
+                worker_id=worker_id,
+                retry_at=retry_at,
+            )
+            LOGGER.info(
+                (
+                    "knowledge_upload_task_waiting_for_ocr_capacity "
+                    "task_id=%s worker_id=%s retry_delay_seconds=%.2f"
+                ),
+                task.id,
+                worker_id,
+                retry_delay_seconds,
+            )
         except Exception as exc:
             error_code = getattr(exc, "error_code", "knowledge_upload_task_failed")
             error_message = getattr(exc, "message", str(exc)).strip() or "上传任务处理失败"
@@ -1148,7 +1173,7 @@ class KnowledgeUploadProcessor:
 
 
 class KnowledgeUploadWorker:
-    """异步轮询 MySQL 任务表的后台 worker。"""
+    """基于线程池并行消费 MySQL 上传任务的后台 worker。"""
 
     def __init__(
         self,
@@ -1156,30 +1181,119 @@ class KnowledgeUploadWorker:
         processor: KnowledgeUploadProcessor,
         worker_id: str,
         poll_interval_seconds: float,
+        thread_pool_core_size: int,
+        thread_pool_max_size: int,
     ) -> None:
         """初始化后台 worker。"""
+        if thread_pool_core_size <= 0:
+            msg = "thread_pool_core_size 必须大于 0"
+            raise ValueError(msg)
+        if thread_pool_max_size < thread_pool_core_size:
+            msg = "thread_pool_max_size 不能小于 thread_pool_core_size"
+            raise ValueError(msg)
         self._processor = processor
         self._worker_id = worker_id
         self._poll_interval_seconds = poll_interval_seconds
+        self._thread_pool_core_size = thread_pool_core_size
+        self._thread_pool_max_size = thread_pool_max_size
+        self._burst_mode_until = 0.0
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
-        """持续轮询并处理上传任务。"""
-        while not self._stop_event.is_set():
-            processed = await asyncio.to_thread(
-                self._processor.process_next_task,
-                self._worker_id,
-            )
-            if processed:
-                continue
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=max(self._poll_interval_seconds, 0.1),
+        """持续轮询并在线程池中并行处理上传任务。"""
+        loop = asyncio.get_running_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self._thread_pool_max_size,
+            thread_name_prefix=f"knowledge-upload-{self._worker_id}",
+        )
+        active_futures: dict[asyncio.Future[bool], tuple[str, float]] = {}
+        available_slot_ids = [
+            f"{self._worker_id}-slot-{index}" for index in range(1, self._thread_pool_max_size + 1)
+        ]
+        try:
+            while not self._stop_event.is_set():
+                self._fill_worker_slots(
+                    loop=loop,
+                    executor=executor,
+                    active_futures=active_futures,
+                    available_slot_ids=available_slot_ids,
                 )
-            except TimeoutError:
-                continue
+                if not active_futures:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(),
+                            timeout=max(self._poll_interval_seconds, 0.1),
+                        )
+                    except TimeoutError:
+                        continue
+                    continue
+
+                done, _ = await asyncio.wait(
+                    list(active_futures.keys()),
+                    timeout=max(self._poll_interval_seconds, 0.1),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+
+                for finished_future in done:
+                    slot_id, _ = active_futures.pop(finished_future)
+                    available_slot_ids.append(slot_id)
+                    available_slot_ids.sort()
+                    try:
+                        processed = finished_future.result()
+                    except Exception:
+                        LOGGER.exception(
+                            "knowledge_upload_worker_slot_failed worker_id=%s slot_id=%s",
+                            self._worker_id,
+                            slot_id,
+                        )
+                        processed = False
+                    if processed:
+                        self._burst_mode_until = time.monotonic() + max(
+                            self._poll_interval_seconds,
+                            0.5,
+                        )
+        finally:
+            if active_futures:
+                await asyncio.gather(*active_futures.keys(), return_exceptions=True)
+            executor.shutdown(wait=True, cancel_futures=False)
 
     def stop(self) -> None:
         """请求后台 worker 停止。"""
         self._stop_event.set()
+
+    def _fill_worker_slots(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        active_futures: dict[asyncio.Future[bool], tuple[str, float]],
+        available_slot_ids: list[str],
+    ) -> None:
+        """按核心/最大并行度补齐线程池工作槽位。"""
+        desired_parallelism = self._resolve_desired_parallelism(active_futures)
+        while len(active_futures) < desired_parallelism and available_slot_ids:
+            slot_id = available_slot_ids.pop(0)
+            future = loop.run_in_executor(
+                executor,
+                self._processor.process_next_task,
+                slot_id,
+            )
+            active_futures[future] = (slot_id, time.monotonic())
+
+    def _resolve_desired_parallelism(
+        self,
+        active_futures: dict[asyncio.Future[bool], tuple[str, float]],
+    ) -> int:
+        """根据当前负载在核心/最大并行度之间切换。"""
+        now = time.monotonic()
+        if now < self._burst_mode_until:
+            return self._thread_pool_max_size
+
+        busy_slot_count = sum(
+            1 for _, submitted_at in active_futures.values() if now - submitted_at >= 0.1
+        )
+        if busy_slot_count >= self._thread_pool_core_size:
+            return self._thread_pool_max_size
+        return self._thread_pool_core_size

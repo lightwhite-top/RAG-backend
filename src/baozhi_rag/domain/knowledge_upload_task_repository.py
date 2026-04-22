@@ -146,3 +146,13 @@ class KnowledgeUploadTaskRepository(Protocol):
     ) -> KnowledgeUploadTask | None:
         """将失败任务重新入队。"""
         ...
+
+    def requeue_waiting_for_ocr_capacity(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        retry_at: datetime,
+    ) -> KnowledgeUploadTask | None:
+        """把任务回退为等待 OCR 容量的可恢复状态。"""
+        ...

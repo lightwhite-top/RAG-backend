@@ -29,6 +29,9 @@ from baozhi_rag.infra.database.knowledge_upload_task_repository import (
     SqlAlchemyKnowledgeUploadTaskRepository,
 )
 from baozhi_rag.infra.database.mongodb import MongoChatStorageManager
+from baozhi_rag.infra.database.mongodb_chat_memory_cleanup_repository import (
+    MongoChatMemoryCleanupRepository,
+)
 from baozhi_rag.infra.database.mongodb_chat_message_repository import (
     MongoChatMessageRepository,
 )
@@ -57,18 +60,26 @@ from baozhi_rag.services.conversation_chat import ConversationChatService
 from baozhi_rag.services.deep_rerank import DeepRerankService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
-from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClient
+from baozhi_rag.services.document_ocr.remote_http_ocr_client import RemoteHttpOcrClient
 from baozhi_rag.services.document_parsers.pdf_parser import PdfDocumentParser
 from baozhi_rag.services.document_preview import DocumentPreviewService
 from baozhi_rag.services.fast_rerank import FastRerankService
 from baozhi_rag.services.file_upload import FileUploadService
 from baozhi_rag.services.knowledge_file_access import KnowledgeFileAccessService
-from baozhi_rag.services.knowledge_file_delete import KnowledgeFileDeleteService
+from baozhi_rag.services.knowledge_file_delete import (
+    ChatRecordCleanupRepository,
+    KnowledgeFileDeleteService,
+)
 from baozhi_rag.services.knowledge_file_query import KnowledgeFileQueryService
 from baozhi_rag.services.query_intent import QueryIntentService
 from baozhi_rag.services.query_rewrite import QueryRewriteService
 from baozhi_rag.services.rerank import ChunkRerankService, ImageRerankService
-from baozhi_rag.services.retrieval_plan import RetrievalPlanner
+from baozhi_rag.services.retrieval_expansion import (
+    ExpansionAwareRetrievalPlanner,
+    HydeExpansionStrategy,
+    MultiQueryExpansionStrategy,
+    RetrievalExpansionOrchestrator,
+)
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadService
 from baozhi_rag.services.user_admin import UserAdminService
@@ -93,7 +104,7 @@ def _build_document_image_understanding_service(
 
 def _build_pdf_document_parser(settings: Settings) -> PdfDocumentParser:
     """构造 PDF 解析器。"""
-    ocr_client = AliyunOcrClient.from_settings(settings)
+    ocr_client = RemoteHttpOcrClient.from_settings(settings)
     return PdfDocumentParser(
         render_dpi=settings.pdf_render_dpi,
         low_text_page_threshold=settings.pdf_low_text_page_threshold,
@@ -133,6 +144,15 @@ def get_chat_message_repository(
     """构造聊天消息仓储。"""
     chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
     return MongoChatMessageRepository.from_manager(chat_memory_mongo_manager)
+
+
+def get_chat_record_cleanup_repository(
+    settings: Annotated[Settings, Depends(get_settings)],
+    database_manager: Annotated[DatabaseManager, Depends(get_database_manager)],
+) -> ChatRecordCleanupRepository:
+    """构造聊天记录批量清理仓储。"""
+    chat_memory_mongo_manager = MongoChatStorageManager.from_settings(settings)
+    return MongoChatMemoryCleanupRepository.from_manager(chat_memory_mongo_manager)
 
 
 def get_knowledge_file_repository(
@@ -270,6 +290,10 @@ def get_knowledge_file_delete_service(
         KnowledgeFileImageAssetRepository,
         Depends(get_knowledge_file_image_asset_repository),
     ],
+    chat_cleanup_repository: Annotated[
+        ChatRecordCleanupRepository,
+        Depends(get_chat_record_cleanup_repository),
+    ],
     task_repository: Annotated[
         KnowledgeUploadTaskRepository,
         Depends(get_knowledge_upload_task_repository),
@@ -281,10 +305,43 @@ def get_knowledge_file_delete_service(
     return KnowledgeFileDeleteService(
         knowledge_file_repository=knowledge_file_repository,
         knowledge_file_image_asset_repository=knowledge_file_image_asset_repository,
+        chat_cleanup_repository=chat_cleanup_repository,
         task_repository=task_repository,
         chunk_store=HybridChunkStore.from_settings(settings),
         object_store=object_store,
         temp_file_store=temp_file_store,
+    )
+
+
+def get_retrieval_expansion_orchestrator(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> RetrievalExpansionOrchestrator:
+    """构造统一扩展检索编排器。"""
+    llm_client = OpenAICompatibleLlmClient.from_settings(settings)
+    return RetrievalExpansionOrchestrator(
+        enabled=settings.search_expansion_enabled,
+        lexical_candidate_size=settings.search_lexical_candidate_size,
+        vector_candidate_size=settings.search_vector_candidate_size,
+        candidate_pool_multiplier=settings.search_expansion_candidate_pool_multiplier,
+        strategies=[
+            MultiQueryExpansionStrategy(
+                client=llm_client,
+                enabled=settings.search_expansion_mqe_enabled,
+                model_name=settings.resolved_search_expansion_mqe_model,
+                generate_count=settings.search_expansion_mqe_generate_count,
+                lane_weight=settings.search_expansion_mqe_lane_weight,
+                allowed_modes=settings.normalized_search_expansion_mqe_allowed_modes,
+                max_query_length=settings.search_expansion_mqe_max_query_length,
+            ),
+            HydeExpansionStrategy(
+                client=llm_client,
+                enabled=settings.search_expansion_hyde_enabled,
+                model_name=settings.resolved_search_expansion_hyde_model,
+                lane_weight=settings.search_expansion_hyde_lane_weight,
+                allowed_modes=settings.normalized_search_expansion_hyde_allowed_modes,
+                max_document_length=settings.search_expansion_hyde_max_document_length,
+            ),
+        ],
     )
 
 
@@ -294,6 +351,10 @@ def get_chunk_search_service(
         KnowledgeFileRepository,
         Depends(get_knowledge_file_repository),
     ],
+    retrieval_expansion_orchestrator: Annotated[
+        RetrievalExpansionOrchestrator,
+        Depends(get_retrieval_expansion_orchestrator),
+    ],
 ) -> ChunkSearchService:
     """构造 chunk 检索服务。"""
     return ChunkSearchService(
@@ -302,11 +363,12 @@ def get_chunk_search_service(
         chunk_embedding_service=_build_chunk_embedding_service(settings),
         knowledge_file_repository=knowledge_file_repository,
         query_intent_service=QueryIntentService(),
-        retrieval_planner=RetrievalPlanner(
+        retrieval_planner=ExpansionAwareRetrievalPlanner(
             lexical_candidate_size=settings.search_lexical_candidate_size,
             vector_candidate_size=settings.search_vector_candidate_size,
             lexical_rrf_weight=settings.search_rrf_lexical_weight,
             vector_rrf_weight=settings.search_rrf_vector_weight,
+            expansion_orchestrator=retrieval_expansion_orchestrator,
         ),
         fast_rerank_service=FastRerankService(),
     )

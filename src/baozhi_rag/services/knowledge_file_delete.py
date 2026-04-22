@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
@@ -122,6 +123,15 @@ class KnowledgeFilePurgeResult:
     deleted_task_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ChatRecordPurgeResult:
+    """聊天记录批量清理结果摘要。"""
+
+    deleted_session_count: int
+    deleted_message_count: int
+    deleted_snapshot_count: int
+
+
 class KnowledgeFileImageAssetDeleteRepository(Protocol):
     """知识文件删除使用的图片资产仓储协议。"""
 
@@ -134,14 +144,49 @@ class KnowledgeFileImageAssetDeleteRepository(Protocol):
         ...
 
 
+class ChatRecordCleanupRepository(Protocol):
+    """批量清理聊天记录所需的最小仓储协议。"""
+
+    def delete_chat_records_by_user(self, owner_user_id: str) -> ChatRecordPurgeResult:
+        """删除指定用户的全部聊天记录。"""
+        ...
+
+    def delete_all_chat_records(self) -> ChatRecordPurgeResult:
+        """删除全站全部聊天记录。"""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _KnowledgeFileCleanupPlan:
+    """描述单个知识文件删除后的后续清理计划。"""
+
+    file_id: str
+    uploader_user_id: str
+    storage_key: str
+    image_assets: list[KnowledgeFileImageAsset]
+
+
+@dataclass(frozen=True, slots=True)
+class _ObjectStorageCleanupTask:
+    """描述单个对象存储删除任务。"""
+
+    file_id: str
+    uploader_user_id: str
+    cleanup_target: str
+    storage_key: str
+
+
 class KnowledgeFileDeleteService:
     """编排知识文件删除与关联资源清理。"""
+
+    _BULK_OBJECT_STORAGE_DELETE_MAX_WORKERS = 8
 
     def __init__(
         self,
         *,
         knowledge_file_repository: KnowledgeFileDeleteRepository,
         knowledge_file_image_asset_repository: KnowledgeFileImageAssetDeleteRepository,
+        chat_cleanup_repository: ChatRecordCleanupRepository,
         task_repository: KnowledgeUploadTaskCleanupRepository,
         chunk_store: KnowledgeFileDeleteChunkStore,
         object_store: KnowledgeFileObjectStore,
@@ -159,6 +204,7 @@ class KnowledgeFileDeleteService:
         """
         self._knowledge_file_repository = knowledge_file_repository
         self._knowledge_file_image_asset_repository = knowledge_file_image_asset_repository
+        self._chat_cleanup_repository = chat_cleanup_repository
         self._task_repository = task_repository
         self._chunk_store = chunk_store
         self._object_store = object_store
@@ -252,6 +298,134 @@ class KnowledgeFileDeleteService:
                         exc_info=True,
                     )
 
+    def _run_bulk_cleanup(
+        self,
+        cleanup_plans: list[_KnowledgeFileCleanupPlan],
+    ) -> None:
+        """批量执行索引与对象存储清理。
+
+        参数:
+            cleanup_plans: 已完成元数据删除的文件清理计划列表。
+
+        返回:
+            None。
+        """
+        if not cleanup_plans:
+            return
+
+        # 检索存储属于内部系统元数据，仍保持串行清理，避免一次性放大 ES/Milvus 压力。
+        for cleanup_plan in cleanup_plans:
+            try:
+                self._chunk_store.delete_chunks_by_file_id(cleanup_plan.file_id)
+            except Exception:
+                LOGGER.warning(
+                    (
+                        "knowledge_file_delete_cleanup_failed "
+                        "file_id=%s uploader_user_id=%s cleanup_target=%s"
+                    ),
+                    cleanup_plan.file_id,
+                    cleanup_plan.uploader_user_id,
+                    "chunk_index",
+                    exc_info=True,
+                )
+
+        object_cleanup_tasks = self._build_object_storage_cleanup_tasks(cleanup_plans)
+        if not object_cleanup_tasks:
+            return
+
+        max_workers = min(
+            self._BULK_OBJECT_STORAGE_DELETE_MAX_WORKERS,
+            len(object_cleanup_tasks),
+        )
+        # OSS 删除属于高延迟 I/O；仅在批量清理场景下并发删除对象，缩短管理员全量清理耗时。
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="knowledge-file-delete",
+        ) as executor:
+            futures = [
+                executor.submit(self._delete_object_storage_task, cleanup_task)
+                for cleanup_task in object_cleanup_tasks
+            ]
+            for future in futures:
+                future.result()
+
+    def _build_object_storage_cleanup_tasks(
+        self,
+        cleanup_plans: list[_KnowledgeFileCleanupPlan],
+    ) -> list[_ObjectStorageCleanupTask]:
+        """把文件清理计划转换为对象存储删除任务。"""
+        cleanup_tasks: list[_ObjectStorageCleanupTask] = []
+        seen_storage_keys: set[str] = set()
+
+        for cleanup_plan in cleanup_plans:
+            self._append_cleanup_task_if_needed(
+                cleanup_tasks=cleanup_tasks,
+                seen_storage_keys=seen_storage_keys,
+                cleanup_target="object_storage",
+                storage_key=cleanup_plan.storage_key,
+                file_id=cleanup_plan.file_id,
+                uploader_user_id=cleanup_plan.uploader_user_id,
+            )
+            for image_asset in cleanup_plan.image_assets:
+                self._append_cleanup_task_if_needed(
+                    cleanup_tasks=cleanup_tasks,
+                    seen_storage_keys=seen_storage_keys,
+                    cleanup_target="image_object_storage",
+                    storage_key=image_asset.storage_key,
+                    file_id=cleanup_plan.file_id,
+                    uploader_user_id=cleanup_plan.uploader_user_id,
+                )
+                self._append_cleanup_task_if_needed(
+                    cleanup_tasks=cleanup_tasks,
+                    seen_storage_keys=seen_storage_keys,
+                    cleanup_target="image_thumbnail_storage",
+                    storage_key=image_asset.thumbnail_storage_key,
+                    file_id=cleanup_plan.file_id,
+                    uploader_user_id=cleanup_plan.uploader_user_id,
+                )
+        return cleanup_tasks
+
+    def _append_cleanup_task_if_needed(
+        self,
+        *,
+        cleanup_tasks: list[_ObjectStorageCleanupTask],
+        seen_storage_keys: set[str],
+        cleanup_target: str,
+        storage_key: str | None,
+        file_id: str,
+        uploader_user_id: str,
+    ) -> None:
+        """按需追加对象存储删除任务，避免重复删除同一对象键。"""
+        normalized_storage_key = (storage_key or "").strip()
+        if not normalized_storage_key or normalized_storage_key in seen_storage_keys:
+            return
+
+        seen_storage_keys.add(normalized_storage_key)
+        cleanup_tasks.append(
+            _ObjectStorageCleanupTask(
+                file_id=file_id,
+                uploader_user_id=uploader_user_id,
+                cleanup_target=cleanup_target,
+                storage_key=normalized_storage_key,
+            )
+        )
+
+    def _delete_object_storage_task(self, cleanup_task: _ObjectStorageCleanupTask) -> None:
+        """执行单个对象存储删除任务。"""
+        try:
+            self._object_store.delete(cleanup_task.storage_key)
+        except Exception:
+            LOGGER.warning(
+                (
+                    "knowledge_file_delete_cleanup_failed "
+                    "file_id=%s uploader_user_id=%s cleanup_target=%s"
+                ),
+                cleanup_task.file_id,
+                cleanup_task.uploader_user_id,
+                cleanup_task.cleanup_target,
+                exc_info=True,
+            )
+
     def delete_all_files(self, *, current_user: CurrentUser) -> KnowledgeFilePurgeResult:
         """删除当前用户上传的全部知识文件与上传任务。
 
@@ -262,6 +436,19 @@ class KnowledgeFileDeleteService:
             批量删除结果摘要。
         """
         files = self._list_all_user_files(current_user.id)
+        chat_purge_result = self._chat_cleanup_repository.delete_chat_records_by_user(
+            current_user.id
+        )
+        LOGGER.info(
+            (
+                "knowledge_file_user_chat_records_deleted user_id=%s "
+                "deleted_session_count=%s deleted_message_count=%s deleted_snapshot_count=%s"
+            ),
+            current_user.id,
+            chat_purge_result.deleted_session_count,
+            chat_purge_result.deleted_message_count,
+            chat_purge_result.deleted_snapshot_count,
+        )
         tasks = self._task_repository.delete_tasks_by_user(current_user.id)
 
         for task in tasks:
@@ -269,6 +456,7 @@ class KnowledgeFileDeleteService:
                 self._temp_file_store.delete(task.source_storage_key)
 
         deleted_file_count = 0
+        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
         for knowledge_file in files:
             image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
                 knowledge_file.id
@@ -276,13 +464,16 @@ class KnowledgeFileDeleteService:
             if not self._knowledge_file_repository.delete_file(knowledge_file.id):
                 continue
             self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
-            self._run_cleanup(
-                file_id=knowledge_file.id,
-                uploader_user_id=knowledge_file.uploader_user_id,
-                storage_key=knowledge_file.storage_key,
-                image_assets=image_assets,
+            cleanup_plans.append(
+                _KnowledgeFileCleanupPlan(
+                    file_id=knowledge_file.id,
+                    uploader_user_id=knowledge_file.uploader_user_id,
+                    storage_key=knowledge_file.storage_key,
+                    image_assets=image_assets,
+                )
             )
             deleted_file_count += 1
+        self._run_bulk_cleanup(cleanup_plans)
 
         return KnowledgeFilePurgeResult(
             deleted_file_count=deleted_file_count,
@@ -302,8 +493,18 @@ class KnowledgeFileDeleteService:
         返回:
             全站批量删除结果摘要。
         """
-        del current_user
         files = self._list_all_files()
+        chat_purge_result = self._chat_cleanup_repository.delete_all_chat_records()
+        LOGGER.info(
+            (
+                "knowledge_file_global_chat_records_deleted admin_user_id=%s "
+                "deleted_session_count=%s deleted_message_count=%s deleted_snapshot_count=%s"
+            ),
+            current_user.id,
+            chat_purge_result.deleted_session_count,
+            chat_purge_result.deleted_message_count,
+            chat_purge_result.deleted_snapshot_count,
+        )
         tasks = self._task_repository.delete_all_tasks()
 
         for task in tasks:
@@ -311,6 +512,7 @@ class KnowledgeFileDeleteService:
                 self._temp_file_store.delete(task.source_storage_key)
 
         deleted_file_count = 0
+        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
         for knowledge_file in files:
             image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
                 knowledge_file.id
@@ -318,13 +520,16 @@ class KnowledgeFileDeleteService:
             if not self._knowledge_file_repository.delete_file(knowledge_file.id):
                 continue
             self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
-            self._run_cleanup(
-                file_id=knowledge_file.id,
-                uploader_user_id=knowledge_file.uploader_user_id,
-                storage_key=knowledge_file.storage_key,
-                image_assets=image_assets,
+            cleanup_plans.append(
+                _KnowledgeFileCleanupPlan(
+                    file_id=knowledge_file.id,
+                    uploader_user_id=knowledge_file.uploader_user_id,
+                    storage_key=knowledge_file.storage_key,
+                    image_assets=image_assets,
+                )
             )
             deleted_file_count += 1
+        self._run_bulk_cleanup(cleanup_plans)
 
         return KnowledgeFilePurgeResult(
             deleted_file_count=deleted_file_count,

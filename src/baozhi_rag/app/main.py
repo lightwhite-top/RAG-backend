@@ -37,7 +37,8 @@ from baozhi_rag.schemas.system import ServiceInfoResponse
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.document_chunking import DocumentChunkService
 from baozhi_rag.services.document_image_understanding import DocumentImageUnderstandingService
-from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClient
+from baozhi_rag.services.document_ocr.ocr_capacity_limiter import LocalOcrTaskLimiter
+from baozhi_rag.services.document_ocr.remote_http_ocr_client import RemoteHttpOcrClient
 from baozhi_rag.services.document_parsers.pdf_parser import PdfDocumentParser
 from baozhi_rag.services.term_matching import build_default_term_matcher
 from baozhi_rag.services.upload_tasks import KnowledgeUploadProcessor, KnowledgeUploadWorker
@@ -115,12 +116,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         image_understanding_service.ensure_ready()
         chunk_store = HybridChunkStore.from_settings(current_settings)
         chunk_store.ensure_ready()
+        ocr_task_limiter = LocalOcrTaskLimiter(
+            max_concurrent=current_settings.ocr_task_max_concurrent,
+            max_waiters=current_settings.ocr_task_max_waiters,
+            wait_timeout_seconds=current_settings.ocr_task_wait_timeout_seconds,
+        )
+        ocr_client = RemoteHttpOcrClient.from_settings(current_settings)
+        if current_settings.pdf_ocr_enabled:
+            # 扫描版 PDF 主链依赖本地 HTTP OCR，启动时先做一次健康检查，尽早暴露配置问题。
+            ocr_client.ensure_ready()
+
         pdf_parser = PdfDocumentParser(
             render_dpi=current_settings.pdf_render_dpi,
             low_text_page_threshold=current_settings.pdf_low_text_page_threshold,
             max_page_count=current_settings.pdf_max_page_count,
             ocr_enabled=current_settings.pdf_ocr_enabled,
-            ocr_client=AliyunOcrClient.from_settings(current_settings),
+            ocr_client=ocr_client,
+            ocr_task_limiter=ocr_task_limiter,
         )
 
         worker_tasks: list[asyncio.Task[None]] = []
@@ -154,11 +166,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 image_understanding_service=image_understanding_service,
                 lease_seconds=current_settings.upload_task_lease_seconds,
                 heartbeat_interval_seconds=current_settings.upload_task_heartbeat_interval_seconds,
+                ocr_capacity_retry_delay_seconds=current_settings.ocr_task_wait_timeout_seconds,
             )
             worker = KnowledgeUploadWorker(
                 processor=processor,
                 worker_id=f"{worker_instance_id}-{worker_index}",
                 poll_interval_seconds=current_settings.upload_worker_poll_interval_seconds,
+                thread_pool_core_size=current_settings.file_task_thread_pool_core_size,
+                thread_pool_max_size=current_settings.file_task_thread_pool_max_size,
             )
             worker_task = asyncio.create_task(worker.run())
             worker_task.set_name(f"knowledge-upload-worker-{worker_index}")

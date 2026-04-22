@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import mimetypes
-from dataclasses import dataclass, field
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from statistics import median
 from typing import cast
@@ -11,7 +12,8 @@ from typing import cast
 import pymupdf
 from PIL import Image
 
-from baozhi_rag.services.document_ocr.aliyun_ocr_client import AliyunOcrClientProtocol
+from baozhi_rag.services.document_ocr.ocr_capacity_limiter import OcrTaskLimiterProtocol
+from baozhi_rag.services.document_ocr.ocr_client_protocol import OcrClientProtocol
 
 BoundingBox = tuple[float, float, float, float]
 
@@ -66,7 +68,8 @@ class PdfDocumentParser:
     low_text_page_threshold: int = 80
     max_page_count: int = 300
     ocr_enabled: bool = True
-    ocr_client: AliyunOcrClientProtocol | None = None
+    ocr_client: OcrClientProtocol | None = None
+    ocr_task_limiter: OcrTaskLimiterProtocol | None = None
 
     def parse(self, *, file_path: str, source_filename: str) -> list[PdfParsedSegment]:
         """解析 PDF，返回标准化片段。"""
@@ -275,43 +278,61 @@ class PdfDocumentParser:
             )
 
         page_image_bytes = self._render_page_image(page)
-        structure_result = self.ocr_client.recognize_page_structure(image_bytes=page_image_bytes)
-        segments: list[PdfParsedSegment] = []
-        active_headings = list(headings)
+        with self._reserve_ocr_capacity(page_number=page_number):
+            structure_result = self.ocr_client.recognize_page_structure(
+                image_bytes=page_image_bytes
+            )
+            segments: list[PdfParsedSegment] = []
+            active_headings = list(headings)
 
-        for block_index, block in enumerate(structure_result.blocks, start=1):
-            source_anchor = f"p:{page_number}:block:{block_index}"
-            if block.block_type == "figure":
-                continue
-            if block.block_type == "table":
-                table_text = ""
-                if block.bbox is not None:
-                    cropped_bytes = self._crop_region(
-                        image_bytes=page_image_bytes,
-                        bbox=block.bbox,
+            for block_index, block in enumerate(structure_result.blocks, start=1):
+                source_anchor = f"p:{page_number}:block:{block_index}"
+                if block.block_type == "figure":
+                    continue
+                if block.block_type == "table":
+                    table_text = ""
+                    if block.bbox is not None:
+                        cropped_bytes = self._crop_region(
+                            image_bytes=page_image_bytes,
+                            bbox=block.bbox,
+                        )
+                        table_text = self.ocr_client.recognize_table_text(image_bytes=cropped_bytes)
+                    markdown = self._build_fallback_table_markdown(table_text)
+                    segments.append(
+                        PdfParsedSegment(
+                            segment_id=source_anchor,
+                            content=markdown,
+                            segment_type="table",
+                            heading_context=" / ".join(active_headings),
+                            page_number=page_number,
+                            source_anchor=source_anchor,
+                            bbox=block.bbox,
+                        )
                     )
-                    table_text = self.ocr_client.recognize_table_text(image_bytes=cropped_bytes)
-                markdown = self._build_fallback_table_markdown(table_text)
-                segments.append(
-                    PdfParsedSegment(
-                        segment_id=source_anchor,
-                        content=markdown,
-                        segment_type="table",
-                        heading_context=" / ".join(active_headings),
-                        page_number=page_number,
-                        source_anchor=source_anchor,
-                        bbox=block.bbox,
-                    )
-                )
-                continue
+                    continue
 
-            if block.block_type == "title":
-                active_headings = active_headings[:0] + [block.text]
+                if block.block_type == "title":
+                    active_headings = active_headings[:0] + [block.text]
+                    heading_context = " / ".join(active_headings)
+                    segments.append(
+                        PdfParsedSegment(
+                            segment_id=source_anchor,
+                            content=heading_context,
+                            segment_type="paragraph",
+                            heading_context=heading_context,
+                            page_number=page_number,
+                            source_anchor=source_anchor,
+                            bbox=block.bbox,
+                        )
+                    )
+                    continue
+
                 heading_context = " / ".join(active_headings)
+                content = f"{heading_context}\n{block.text}" if heading_context else block.text
                 segments.append(
                     PdfParsedSegment(
                         segment_id=source_anchor,
-                        content=heading_context,
+                        content=content,
                         segment_type="paragraph",
                         heading_context=heading_context,
                         page_number=page_number,
@@ -319,26 +340,39 @@ class PdfDocumentParser:
                         bbox=block.bbox,
                     )
                 )
-                continue
 
-            heading_context = " / ".join(active_headings)
-            content = f"{heading_context}\n{block.text}" if heading_context else block.text
-            segments.append(
-                PdfParsedSegment(
-                    segment_id=source_anchor,
-                    content=content,
-                    segment_type="paragraph",
-                    heading_context=heading_context,
-                    page_number=page_number,
-                    source_anchor=source_anchor,
-                    bbox=block.bbox,
-                )
+            enhanced_text = self.ocr_client.recognize_text(
+                image_bytes=page_image_bytes,
+                advanced=True,
+            )
+        if segments and self._should_prefer_enhanced_ocr_text(
+            segments=segments,
+            enhanced_text=enhanced_text,
+        ):
+            normalized_heading_context = " / ".join(active_headings)
+            content = (
+                f"{normalized_heading_context}\n{enhanced_text}"
+                if normalized_heading_context
+                else enhanced_text
+            )
+            return (
+                [
+                    PdfParsedSegment(
+                        segment_id=f"p:{page_number}:block:1",
+                        content=content,
+                        segment_type="paragraph",
+                        heading_context=normalized_heading_context,
+                        page_number=page_number,
+                        source_anchor=f"p:{page_number}:block:1",
+                    )
+                ],
+                active_headings,
             )
 
         if segments:
             return segments, active_headings
 
-        ocr_text = self.ocr_client.recognize_text(image_bytes=page_image_bytes, advanced=True)
+        ocr_text = enhanced_text
         normalized_heading_context = " / ".join(active_headings)
         content = (
             f"{normalized_heading_context}\n{ocr_text}" if normalized_heading_context else ocr_text
@@ -415,15 +449,18 @@ class PdfDocumentParser:
             return
 
         if not segments:
+            synthetic_segment_id = f"p:{page_number}:block:image"
             segments.append(
                 PdfParsedSegment(
-                    segment_id=f"p:{page_number}:block:image",
+                    segment_id=synthetic_segment_id,
                     content=f"第{page_number}页图片区域",
                     segment_type="paragraph",
                     heading_context="",
                     page_number=page_number,
-                    source_anchor=f"p:{page_number}:block:image",
-                    image_assets=list(image_assets),
+                    source_anchor=synthetic_segment_id,
+                    image_assets=[
+                        replace(asset, segment_id=synthetic_segment_id) for asset in image_assets
+                    ],
                 )
             )
             return
@@ -433,7 +470,7 @@ class PdfDocumentParser:
                 segments,
                 key=lambda segment: self._segment_distance(segment_bbox=segment.bbox),
             )
-            target_segment.image_assets.append(asset)
+            target_segment.image_assets.append(replace(asset, segment_id=target_segment.segment_id))
 
     def _segment_distance(self, *, segment_bbox: BoundingBox | None) -> float:
         """为图片资产选最近片段时的保守距离。"""
@@ -485,6 +522,47 @@ class PdfDocumentParser:
             normalized_lines = ["未识别到可用表格文本"]
         rows = "\n".join(f"| {line} |" for line in normalized_lines)
         return "| OCR表格文本 |\n|---|\n" + rows
+
+    def _should_prefer_enhanced_ocr_text(
+        self,
+        *,
+        segments: list[PdfParsedSegment],
+        enhanced_text: str,
+    ) -> bool:
+        """在扫描页结构化结果明显劣化时，回退到全文增强 OCR。
+
+        参数:
+            segments: 当前基于页结构识别得到的片段列表。
+            enhanced_text: 全页增强 OCR 结果。
+
+        返回:
+            当增强 OCR 更可能保留完整正文时返回 `True`，否则返回 `False`。
+        """
+        normalized_enhanced_text = enhanced_text.strip()
+        if not normalized_enhanced_text:
+            return False
+        if any(segment.segment_type != "paragraph" for segment in segments):
+            return False
+        if any(segment.heading_context.strip() for segment in segments):
+            return False
+
+        structured_text = "\n".join(
+            segment.content.strip() for segment in segments if segment.content
+        ).strip()
+        if not structured_text:
+            return True
+
+        structured_digit_count = sum(char.isdigit() for char in structured_text)
+        enhanced_digit_count = sum(char.isdigit() for char in normalized_enhanced_text)
+        if enhanced_digit_count > structured_digit_count:
+            return True
+        return len(normalized_enhanced_text) >= len(structured_text) + 12
+
+    def _reserve_ocr_capacity(self, *, page_number: int) -> AbstractContextManager[None]:
+        """在真正进入扫描页 OCR 前申请本地 OCR 容量。"""
+        if self.ocr_task_limiter is None:
+            return nullcontext()
+        return self.ocr_task_limiter.reserve_slot(page_number=page_number)
 
     @staticmethod
     def _read_bbox(raw_bbox: object) -> BoundingBox | None:
