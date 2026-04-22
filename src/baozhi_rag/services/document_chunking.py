@@ -31,6 +31,11 @@ from baozhi_rag.services.document_parsers.pdf_parser import (
     PdfParsedSegment,
     PdfParserError,
 )
+from baozhi_rag.services.retrieval_signals import (
+    extract_exact_search_terms,
+    extract_version_rank,
+    normalize_filename_title,
+)
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher, build_default_term_matcher
 
 LOGGER = logging.getLogger(__name__)
@@ -196,6 +201,10 @@ class DocumentChunk:
     storage_key: str
     page_number: int | None = None
     source_anchor: str | None = None
+    # 归一化后的文件标题文本，用于检索和重排时捕获文件名语义。
+    source_filename_text: str = ""
+    # 从文件名中解析出的版本号，未命中时为 0。
+    version_rank: int = 0
     # 上传该文件的用户 ID
     uploader_user_id: str = ""
     # 文件可见性范围
@@ -212,6 +221,10 @@ class DocumentChunk:
     contextual_text: str = ""
     # 检索专用拼接文本，通常由 contextual_text + raw_content 构成。
     searchable_text: str = ""
+    # 文本来源类型，当前主要区分普通文本与 OCR 文本。
+    source_type: str = "text"
+    # 供 ES 精确匹配的数字/编号锚点集合。
+    exact_search_terms: list[str] = field(default_factory=_empty_str_list)
     # 表格 schema 文本，用于强化表格结构化问题召回。
     table_schema_text: str = ""
     # 基于领域词词典抽取出的去重词项，用于检索时显式提权。
@@ -229,6 +242,8 @@ class DocumentChunk:
             "chunk_id": self.chunk_id,
             "file_id": self.file_id,
             "source_filename": self.source_filename,
+            "source_filename_text": self.source_filename_text,
+            "version_rank": self.version_rank,
             "storage_key": self.storage_key,
             "page_number": self.page_number,
             "source_anchor": self.source_anchor,
@@ -245,6 +260,8 @@ class DocumentChunk:
             "raw_content": self.raw_content,
             "contextual_text": self.contextual_text,
             "searchable_text": self.searchable_text,
+            "source_type": self.source_type,
+            "exact_search_terms": self.exact_search_terms,
             "table_schema_text": self.table_schema_text,
             "merged_terms": self.merged_terms,
             "image_asset_refs": [item.to_search_document() for item in self.image_asset_refs],
@@ -1361,18 +1378,22 @@ class DocumentChunkService:
         """
         term_match_result = self._term_matcher.extract_terms(content)
         heading_path = self._parse_heading_path(heading_context)
+        source_filename_text = self._build_source_filename_text(source_filename)
         raw_content = self._extract_raw_content(
             content=content,
             heading_context=heading_context,
             content_type=content_type,
         )
         contextual_text = self._build_contextual_text(
+            source_filename_text=source_filename_text,
             heading_context=heading_context,
             content_type=content_type,
         )
+        exact_search_terms = self._extract_exact_search_terms(raw_content)
         searchable_text = self._build_searchable_text(
             raw_content=raw_content,
             contextual_text=contextual_text,
+            exact_search_terms=exact_search_terms,
         )
         table_schema_text = (
             self._extract_table_schema_text(raw_content) if content_type == "table" else ""
@@ -1386,6 +1407,8 @@ class DocumentChunkService:
             content=content,
             char_count=len(content),
             source_filename=source_filename,
+            source_filename_text=source_filename_text,
+            version_rank=self._extract_version_rank(source_filename_text),
             storage_key=storage_key,
             page_number=page_number,
             source_anchor=source_anchor,
@@ -1395,6 +1418,8 @@ class DocumentChunkService:
             raw_content=raw_content,
             contextual_text=contextual_text,
             searchable_text=searchable_text,
+            source_type="text",
+            exact_search_terms=exact_search_terms,
             table_schema_text=table_schema_text,
             merged_terms=term_match_result.merged_terms,
             image_asset_refs=self._build_image_asset_refs(image_assets or []),
@@ -1467,11 +1492,15 @@ class DocumentChunkService:
     def _build_contextual_text(
         self,
         *,
+        source_filename_text: str,
         heading_context: str,
         content_type: str,
     ) -> str:
         """为当前 chunk 构造轻量上下文化文本，用于增强检索而非对外引用。"""
         sections: list[str] = []
+        normalized_filename_text = source_filename_text.strip()
+        if normalized_filename_text:
+            sections.append(f"文档标题：{normalized_filename_text}")
         normalized_heading = heading_context.strip()
         if normalized_heading:
             sections.append(f"章节：{normalized_heading}")
@@ -1486,10 +1515,25 @@ class DocumentChunkService:
         *,
         raw_content: str,
         contextual_text: str,
+        exact_search_terms: list[str],
     ) -> str:
         """构造写入检索索引的拼接文本。"""
         parts = [item.strip() for item in [contextual_text, raw_content] if item.strip()]
+        if exact_search_terms:
+            parts.append(f"精确锚点：{'；'.join(exact_search_terms)}")
         return "\n".join(parts)
+
+    def _build_source_filename_text(self, source_filename: str) -> str:
+        """把原始文件名转换为可检索的规范化标题文本。"""
+        return normalize_filename_title(source_filename)
+
+    def _extract_version_rank(self, source_filename_text: str) -> int:
+        """从规范化文件标题中提取版本号。"""
+        return extract_version_rank(source_filename_text)
+
+    def _extract_exact_search_terms(self, raw_content: str) -> list[str]:
+        """从正文中提取精确检索锚点。"""
+        return extract_exact_search_terms(raw_content)
 
     def _extract_table_schema_text(self, raw_content: str) -> str:
         """从 Markdown 表格中提取表头 schema 文本。

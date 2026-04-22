@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime
 from http import HTTPStatus
 from typing import Protocol
@@ -190,6 +190,7 @@ class ChatService:
     _DEFAULT_MAX_PROMPT_TOKENS = 4096
     _DEFAULT_RESERVED_ANSWER_TOKENS = 768
     _DEFAULT_RESERVED_MARGIN_TOKENS = 256
+    _DIRECT_FALLBACK_REASON_CODES = frozenset({"no_evidence", "low_score"})
     _FALLBACK_ANSWER = (
         "当前知识库中未检索到足以支撑结论的材料，暂时不能直接给出确定答复。"
         "建议补充问题细节、上传相关文档，或转人工进一步核实。"
@@ -256,21 +257,23 @@ class ChatService:
             retrieval_size=self._DEFAULT_RETRIEVAL_SIZE,
             temperature=self._DEFAULT_TEMPERATURE,
         )
-        answer = self._chat_client.complete_chat(
-            completion.model_messages,
-            temperature=runtime_policy.temperature,
-        ).strip()
         finish_reason = "stop"
-        if not answer:
+        if self._should_force_conservative_answer(completion):
+            # 证据不足时直接走确定性兜底，避免模型在无证据场景下继续补充想象性内容。
             answer = self._FALLBACK_ANSWER
-            if not completion.citations:
-                # 即使已经放开“无命中仍调用模型”，也要为模型空输出保留明确兜底。
-                finish_reason = "context_exhausted"
-        elif (
-            completion.evidence_assessment is not None
-            and not completion.evidence_assessment.sufficient
-        ):
             finish_reason = "evidence_insufficient"
+        else:
+            answer = self._chat_client.complete_chat(
+                completion.model_messages,
+                temperature=runtime_policy.temperature,
+            ).strip()
+            if not answer:
+                answer = self._FALLBACK_ANSWER
+                if not completion.citations:
+                    # 即使已经放开“无命中仍调用模型”，也要为模型空输出保留明确兜底。
+                    finish_reason = "context_exhausted"
+            elif self._has_insufficient_evidence(completion):
+                finish_reason = "evidence_insufficient"
         plain_text, content_blocks = self._build_render_content(
             answer,
             completion.citations,
@@ -345,6 +348,42 @@ class ChatService:
                 "applied_temperature": runtime_policy.temperature,
             },
         )
+
+        if self._should_force_conservative_answer(completion):
+            plain_text, content_blocks = self._build_render_content(
+                self._FALLBACK_ANSWER,
+                completion.citations,
+                original_query=completion.original_query,
+                retrieval_query=completion.retrieval_query,
+                finish_reason="evidence_insufficient",
+            )
+            yield ChatStreamEvent(
+                event="delta",
+                data={"content": self._FALLBACK_ANSWER},
+            )
+            yield ChatStreamEvent(
+                event="done",
+                data={
+                    "answer": self._FALLBACK_ANSWER,
+                    "plain_text": plain_text,
+                    "content_blocks": [
+                        self._serialize_content_block(item) for item in content_blocks
+                    ],
+                    "original_query": completion.original_query,
+                    "retrieval_query": completion.retrieval_query,
+                    "citations": citations_payload,
+                    "finish_reason": "evidence_insufficient",
+                    "rewrite_applied": completion.rewrite_applied,
+                    "query_intent": completion.query_intent,
+                    "retrieval_trace": self._serialize_retrieval_trace(completion.retrieval_trace),
+                    "evidence_assessment": self._serialize_evidence_assessment(
+                        completion.evidence_assessment
+                    ),
+                    "applied_retrieval_size": runtime_policy.retrieval_size,
+                    "applied_temperature": runtime_policy.temperature,
+                },
+            )
+            return
 
         answer_parts: list[str] = []
         pending_buffer = ""
@@ -576,6 +615,34 @@ class ChatService:
             runtime_policy=runtime_policy,
         )
 
+    def _should_force_conservative_answer(
+        self,
+        completion: _PreparedChatCompletion,
+    ) -> bool:
+        """判断当前是否必须跳过模型直答，直接返回保守兜底。
+
+        只有在“完全无证据”或“命中分过低”这类明确无法支撑回答的场景下，
+        才直接走固定兜底，避免把证据冲突、上下文预算不足等可解释场景也
+        误判成“完全没有材料”。
+        """
+        if not self._has_insufficient_evidence(completion):
+            return False
+
+        assessment = completion.evidence_assessment
+        if assessment is None:
+            return False
+        return assessment.reason_code in self._DIRECT_FALLBACK_REASON_CODES
+
+    def _has_insufficient_evidence(
+        self,
+        completion: _PreparedChatCompletion,
+    ) -> bool:
+        """判断当前检索结果是否处于证据不足状态。"""
+        return bool(
+            completion.evidence_assessment is not None
+            and not completion.evidence_assessment.sufficient
+        )
+
     def _resolve_runtime_policy(
         self,
         messages: list[ChatMessage],
@@ -796,25 +863,54 @@ class ChatService:
         """把检索 trace 转换为可序列化结构。"""
         if retrieval_trace is None:
             return None
-        return {
-            "mode": retrieval_trace.mode,
-            "query_intent": retrieval_trace.query_intent,
-            "lane_count": retrieval_trace.lane_count,
-            "final_hit_count": retrieval_trace.final_hit_count,
-            "evidence_sufficient": retrieval_trace.evidence_sufficient,
-            "evidence_reason": retrieval_trace.evidence_reason,
-            "deep_rerank_triggered": retrieval_trace.deep_rerank_triggered,
-            "lanes": [
-                {
-                    "lane_id": lane.lane_id,
-                    "query_text": lane.query_text,
-                    "lane_weight": lane.lane_weight,
-                    "result_count": lane.result_count,
-                    "top_chunk_ids": list(lane.top_chunk_ids),
-                }
-                for lane in retrieval_trace.lanes
-            ],
-        }
+        # retrieval_trace 可能随检索框架演进新增字段，这里统一按 dataclass 展开后透传。
+        if is_dataclass(retrieval_trace):
+            serialized_trace = asdict(retrieval_trace)
+        else:
+            serialized_trace = {
+                "mode": retrieval_trace.mode,
+                "query_intent": retrieval_trace.query_intent,
+                "lane_count": retrieval_trace.lane_count,
+                "final_hit_count": retrieval_trace.final_hit_count,
+                "evidence_sufficient": retrieval_trace.evidence_sufficient,
+                "evidence_reason": retrieval_trace.evidence_reason,
+                "deep_rerank_triggered": retrieval_trace.deep_rerank_triggered,
+                "lanes": [
+                    {
+                        "lane_id": lane.lane_id,
+                        "query_text": lane.query_text,
+                        "lane_weight": lane.lane_weight,
+                        "result_count": lane.result_count,
+                        "top_chunk_ids": list(lane.top_chunk_ids),
+                    }
+                    for lane in retrieval_trace.lanes
+                ],
+            }
+        return self._sanitize_serialized_retrieval_trace(serialized_trace)
+
+    def _sanitize_serialized_retrieval_trace(
+        self,
+        serialized_trace: dict[str, object],
+    ) -> dict[str, object]:
+        """清理公开 trace 中不应直接暴露的内部检索细节。"""
+        raw_lanes = serialized_trace.get("lanes")
+        if not isinstance(raw_lanes, list):
+            serialized_trace["lanes"] = []
+            return serialized_trace
+
+        sanitized_lanes: list[object] = []
+        for raw_lane in raw_lanes:
+            if not isinstance(raw_lane, dict):
+                sanitized_lanes.append(raw_lane)
+                continue
+
+            sanitized_lane = dict(raw_lane)
+            raw_embedding_summary = sanitized_lane.pop("embedding_source_summary", None)
+            sanitized_lane["embedding_source_changed"] = bool(raw_embedding_summary)
+            sanitized_lanes.append(sanitized_lane)
+
+        serialized_trace["lanes"] = sanitized_lanes
+        return serialized_trace
 
     def _build_snippet(self, content: str) -> str:
         """为引用卡片构造简短摘要。"""

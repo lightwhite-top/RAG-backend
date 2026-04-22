@@ -337,12 +337,16 @@ def _build_citation_item(
     file_map: dict[str, KnowledgeFile],
 ) -> ChatCitationItem:
     file_meta = file_map.get(message_citation.file_id)
-    file_access = _build_file_access_payload(
-        request=request,
-        file_id=message_citation.file_id,
-        storage_key=message_citation.storage_key,
-        file_url_builder=file_url_builder,
-        url_generated_at=url_generated_at,
+    file_access = (
+        _build_file_access_payload(
+            request=request,
+            file_id=message_citation.file_id,
+            storage_key=message_citation.storage_key,
+            file_url_builder=file_url_builder,
+            url_generated_at=url_generated_at,
+        )
+        if file_meta is not None
+        else {"url": None, "expires_at": None}
     )
     return ChatCitationItem(
         id=message_citation.id,
@@ -372,11 +376,15 @@ def _build_citation_item(
         ),
         size=file_meta.size if file_meta is not None else None,
         expires_at=file_access["expires_at"],
-        image_assets=_build_chat_image_asset_items(
-            message_citation.image_assets,
-            request=request,
-            file_url_builder=file_url_builder,
-            url_generated_at=url_generated_at,
+        image_assets=(
+            _build_chat_image_asset_items(
+                message_citation.image_assets,
+                request=request,
+                file_url_builder=file_url_builder,
+                url_generated_at=url_generated_at,
+            )
+            if file_meta is not None
+            else []
         ),
     )
 

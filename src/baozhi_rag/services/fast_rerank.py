@@ -2,27 +2,26 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
+
+from baozhi_rag.services.retrieval_signals import (
+    extract_query_terms as extract_signal_query_terms,
+)
+from baozhi_rag.services.retrieval_signals import (
+    extract_version_rank,
+    normalize_filename_title,
+    normalize_text,
+    query_prefers_old_version,
+)
 
 if TYPE_CHECKING:
     from baozhi_rag.services.chunk_search import ChunkSearchHit
 
 
-def _normalize_text(text: str) -> str:
-    """把文本规整为便于关键词匹配的单行形式。"""
-    return " ".join(text.split()).lower()
-
-
 def _extract_query_terms(text: str) -> list[str]:
-    """从查询文本中提取简单关键词。"""
-    normalized_text = _normalize_text(text)
-    return [
-        term
-        for term in re.split(r"[\s,.;:!?/\\|()\[\]{}<>，。；：！？、]+", normalized_text)
-        if len(term) >= 2
-    ]
+    """从查询文本中提取更稳定的排序信号。"""
+    return extract_signal_query_terms(text)
 
 
 class FastRerankService:
@@ -40,12 +39,23 @@ class FastRerankService:
             return hits
 
         query_terms = _extract_query_terms(query_text)
+        normalized_query_text = normalize_text(query_text)
+        prefers_old_version = query_prefers_old_version(query_text)
         rescored_hits: list[ChunkSearchHit] = []
         for hit in hits:
             rescored_hits.append(
                 replace(
                     hit,
-                    score=round(self._score_hit(hit, query_terms, query_intent), 6),
+                    score=round(
+                        self._score_hit(
+                            hit,
+                            query_terms=query_terms,
+                            query_intent=query_intent,
+                            normalized_query_text=normalized_query_text,
+                            prefers_old_version=prefers_old_version,
+                        ),
+                        6,
+                    ),
                 )
             )
 
@@ -58,20 +68,41 @@ class FastRerankService:
     def _score_hit(
         self,
         hit: ChunkSearchHit,
+        *,
         query_terms: list[str],
         query_intent: str,
+        normalized_query_text: str,
+        prefers_old_version: bool,
     ) -> float:
         """计算启发式快速重排分数。"""
         base_score = hit.score or 0.0
-        content_text = _normalize_text(hit.content)
-        heading_text = _normalize_text(" ".join(hit.heading_path))
-        section_title_text = _normalize_text(hit.section_title or "")
+        content_text = normalize_text(hit.content)
+        heading_text = normalize_text(" ".join(hit.heading_path))
+        section_title_text = normalize_text(hit.section_title or "")
+        source_filename_text = normalize_text(normalize_filename_title(hit.source_filename))
 
-        keyword_hits = sum(1 for term in query_terms if term in content_text)
+        keyword_hits = sum(1 for term in query_terms if normalize_text(term) in content_text)
         heading_hits = sum(
-            1 for term in query_terms if term in heading_text or term in section_title_text
+            1
+            for term in query_terms
+            if normalize_text(term) in heading_text or normalize_text(term) in section_title_text
         )
-        score = base_score + keyword_hits * 0.03 + heading_hits * 0.05
+        filename_hits = sum(
+            1 for term in query_terms if normalize_text(term) in source_filename_text
+        )
+        score = base_score + keyword_hits * 0.03 + heading_hits * 0.05 + filename_hits * 0.09
+
+        if normalized_query_text and normalized_query_text in content_text:
+            score += 0.18
+        if normalized_query_text and normalized_query_text in source_filename_text:
+            score += 0.12
+
+        version_rank = extract_version_rank(hit.source_filename)
+        if version_rank > 0:
+            if prefers_old_version:
+                score += max(0.0, 100 - version_rank) * 0.001
+            else:
+                score += version_rank * 0.012
 
         if query_intent == "structured" and hit.content_type == "table":
             score += 0.08

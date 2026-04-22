@@ -24,6 +24,11 @@ from baozhi_rag.infra.retrieval.milvus_chunk_vector_store import (
 )
 from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest, ChunkSearchStore
 from baozhi_rag.services.document_chunking import DocumentChunk
+from baozhi_rag.services.retrieval_signals import (
+    build_version_chain_key,
+    extract_version_rank,
+    query_prefers_old_version,
+)
 
 if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
@@ -311,6 +316,7 @@ class HybridChunkStore(ChunkSearchStore):
                 lexical_hits=lexical_hits,
                 semantic_hits=semantic_hits,
                 size=request.size,
+                query_text=request.query_text,
                 query_intent=request.query_intent,
                 lexical_weight=lexical_weight,
                 vector_weight=vector_weight,
@@ -344,6 +350,7 @@ class HybridChunkStore(ChunkSearchStore):
         lexical_hits: list[ChunkSearchHit],
         semantic_hits: list[MilvusVectorSearchHit],
         size: int,
+        query_text: str,
         query_intent: str,
         lexical_weight: float,
         vector_weight: float,
@@ -398,7 +405,77 @@ class HybridChunkStore(ChunkSearchStore):
                     score=round(fused_scores[chunk_id], 6),
                 )
             )
-        return fused_hits
+        return self._collapse_hits(hits=fused_hits, query_text=query_text)[:size]
+
+    def _collapse_hits(
+        self,
+        *,
+        hits: list[ChunkSearchHit],
+        query_text: str,
+    ) -> list[ChunkSearchHit]:
+        """合并同文件重复命中，并在版本链内保留更合适的版本。"""
+        collapsed_by_file: list[ChunkSearchHit] = []
+        seen_file_ids: set[str] = set()
+        for hit in hits:
+            if hit.file_id in seen_file_ids:
+                continue
+            seen_file_ids.add(hit.file_id)
+            collapsed_by_file.append(hit)
+
+        grouped_hits: dict[str, list[ChunkSearchHit]] = {}
+        standalone_hits: list[ChunkSearchHit] = []
+        for hit in collapsed_by_file:
+            chain_key = build_version_chain_key(hit.source_filename)
+            if chain_key is None:
+                standalone_hits.append(hit)
+                continue
+            grouped_hits.setdefault(chain_key, []).append(hit)
+
+        collapsed_hits = list(standalone_hits)
+        for chain_hits in grouped_hits.values():
+            collapsed_hits.append(
+                self._select_preferred_version_hit(chain_hits=chain_hits, query_text=query_text)
+            )
+
+        return sorted(
+            collapsed_hits,
+            key=lambda item: (item.score or 0.0, item.file_id),
+            reverse=True,
+        )
+
+    def _select_preferred_version_hit(
+        self,
+        *,
+        chain_hits: list[ChunkSearchHit],
+        query_text: str,
+    ) -> ChunkSearchHit:
+        """在同一版本链中选出更符合查询意图的文件版本。"""
+        prefers_old_version = query_prefers_old_version(query_text)
+        ordered_hits = sorted(
+            chain_hits,
+            key=lambda item: (item.score or 0.0, item.file_id),
+            reverse=True,
+        )
+        preferred_hit = ordered_hits[0]
+        preferred_rank = extract_version_rank(preferred_hit.source_filename)
+
+        for hit in ordered_hits[1:]:
+            current_rank = extract_version_rank(hit.source_filename)
+            if current_rank <= 0:
+                continue
+            if preferred_rank <= 0:
+                preferred_hit = hit
+                preferred_rank = current_rank
+                continue
+            if prefers_old_version and current_rank < preferred_rank:
+                preferred_hit = hit
+                preferred_rank = current_rank
+                continue
+            if not prefers_old_version and current_rank > preferred_rank:
+                preferred_hit = hit
+                preferred_rank = current_rank
+
+        return preferred_hit
 
     def _rrf_score(self, rank: int, weight: float) -> float:
         """计算 Reciprocal Rank Fusion 分值。

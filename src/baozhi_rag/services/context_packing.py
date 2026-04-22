@@ -422,7 +422,13 @@ class ContextPackingService:
     def _build_prompt_suffix(self) -> str:
         """构造上下文提示词结尾约束。"""
 
-        return "请只基于上述证据回答，不要引用未提供的外部知识。"
+        return "\n".join(
+            [
+                "请只基于上述证据回答，不要引用未提供的外部知识。",
+                "如果证据已经包含足以回答当前问题的事实，请先直接给出结论，再补充必要条件。",
+                "不要在已有证据时误报“未检索到”或“未提及”。",
+            ]
+        )
 
     def _build_citation_prefix(self, *, index: int, citation: ChatCitation) -> str:
         """构造单条证据在正文之前的元信息区域。"""

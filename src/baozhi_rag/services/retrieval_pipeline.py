@@ -60,19 +60,23 @@ class RetrievalPipelineService:
         for lane in retrieval_plan.lanes:
             from baozhi_rag.services.chunk_search import ChunkSearchRequest
 
-            terms = self._term_matcher.extract_terms(lane.query_text)
+            lexical_query_text = lane.lexical_query_text or lane.query_text
+            embedding_source_text = lane.embedding_source_text or lexical_query_text
+            terms = self._term_matcher.extract_terms(lexical_query_text)
             query_embedding: list[float] = []
             if lane.vector_candidate_size > 0 and (
                 lane.vector_rrf_weight is None or lane.vector_rrf_weight > 0.0
             ):
-                cached_embedding = query_embedding_cache.get(lane.query_text)
+                cached_embedding = query_embedding_cache.get(embedding_source_text)
                 if cached_embedding is None:
-                    cached_embedding = self._chunk_embedding_service.embed_query(lane.query_text)
-                    query_embedding_cache[lane.query_text] = cached_embedding
+                    cached_embedding = self._chunk_embedding_service.embed_query(
+                        embedding_source_text
+                    )
+                    query_embedding_cache[embedding_source_text] = cached_embedding
                 query_embedding = cached_embedding
 
             request = ChunkSearchRequest(
-                query_text=lane.query_text,
+                query_text=lexical_query_text,
                 size=lane.result_size,
                 merged_terms=terms.merged_terms,
                 query_embedding=query_embedding,

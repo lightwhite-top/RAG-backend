@@ -96,19 +96,16 @@ def create_chat_completion(
                     viewer_user_id=current_user.id,
                 )
             )
-        first_event = next(stream_iterator)
-        message_id = _read_optional_str(first_event.data.get("message_id")) or uuid4().hex
         return StreamingResponse(
             _stream_events(
                 request=request,
                 request_id=request_id,
-                message_id=message_id,
+                initial_message_id=uuid4().hex,
                 original_query=original_query,
                 model_name=settings.llm_chat_model,
                 file_url_builder=object_store,
                 started_at=started_at,
-                first_event=first_event,
-                remaining_events=stream_iterator,
+                events=stream_iterator,
             ),
             media_type="text/event-stream",
             headers={
@@ -225,16 +222,16 @@ def _stream_events(
     *,
     request: Request,
     request_id: str,
-    message_id: str,
+    initial_message_id: str,
     original_query: str,
     model_name: str | None,
     file_url_builder: AliyunOssFileStore,
     started_at: float,
-    first_event: ChatStreamEvent,
-    remaining_events: Iterator[ChatStreamEvent],
+    events: Iterator[ChatStreamEvent],
 ) -> Iterator[str]:
     """把聊天服务事件编码为 SSE 文本流。"""
     url_generated_at = datetime.now(UTC)
+    message_id = initial_message_id
     citations: list[ChatCitationItem] = []
     retrieval_query = original_query
     rewrite_applied = False
@@ -256,8 +253,9 @@ def _stream_events(
     sequence_no: int | None = None
 
     try:
-        for event in _iterate_stream_events(first_event, remaining_events):
+        for event in events:
             if event.event == "context":
+                message_id = _read_optional_str(event.data.get("message_id")) or message_id
                 retrieval_query = str(event.data.get("retrieval_query", original_query))
                 rewrite_applied = bool(event.data.get("rewrite_applied", False))
                 query_intent = _read_optional_str(event.data.get("query_intent"))
@@ -316,6 +314,7 @@ def _stream_events(
                 continue
 
             if event.event == "delta":
+                message_id = _read_optional_str(event.data.get("message_id")) or message_id
                 if not message_started:
                     yield _encode_sse_event(
                         "message.start",
@@ -389,6 +388,7 @@ def _stream_events(
                 continue
 
             if event.event == "done":
+                message_id = _read_optional_str(event.data.get("message_id")) or message_id
                 if not citations:
                     citations = _build_citation_items(
                         event.data.get("citations", []),
@@ -470,6 +470,21 @@ def _stream_events(
             exc.error_code,
             exc.message,
         )
+        if not message_started:
+            yield _encode_sse_event(
+                "message.start",
+                {
+                    "message_id": message_id,
+                    "request_id": request_id,
+                    "original_query": original_query,
+                    "retrieval_query": retrieval_query,
+                    "rewrite_applied": rewrite_applied,
+                    "query_intent": query_intent,
+                    "model": model_name,
+                    "session_id": session_id,
+                    "sequence_no": sequence_no,
+                },
+            )
         yield _encode_sse_event(
             "message.error",
             {
@@ -481,6 +496,21 @@ def _stream_events(
         )
     except Exception:
         LOGGER.exception("chat_stream_failed request_id=%s", request_id)
+        if not message_started:
+            yield _encode_sse_event(
+                "message.start",
+                {
+                    "message_id": message_id,
+                    "request_id": request_id,
+                    "original_query": original_query,
+                    "retrieval_query": retrieval_query,
+                    "rewrite_applied": rewrite_applied,
+                    "query_intent": query_intent,
+                    "model": model_name,
+                    "session_id": session_id,
+                    "sequence_no": sequence_no,
+                },
+            )
         yield _encode_sse_event(
             "message.error",
             {
@@ -490,15 +520,6 @@ def _stream_events(
                 "request_id": request_id,
             },
         )
-
-
-def _iterate_stream_events(
-    first_event: ChatStreamEvent,
-    remaining_events: Iterator[ChatStreamEvent],
-) -> Iterator[ChatStreamEvent]:
-    """按顺序遍历首个事件和剩余事件。"""
-    yield first_event
-    yield from remaining_events
 
 
 def _encode_citation_add_events(

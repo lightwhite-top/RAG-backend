@@ -10,6 +10,11 @@ from fastapi import status
 from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest
 from baozhi_rag.services.document_chunking import ChunkImageAsset
+from baozhi_rag.services.retrieval_signals import (
+    extract_exact_search_terms,
+    query_prefers_old_version,
+    query_requests_latest_version,
+)
 
 if TYPE_CHECKING:
     from baozhi_rag.core.config import Settings
@@ -292,9 +297,18 @@ class ElasticsearchChunkStore:
                         "boost": 3.0,
                     }
                 }
-            }
+            },
+            {
+                "match": {
+                    "source_filename_text": {
+                        "query": request.query_text,
+                        "boost": 1.6,
+                    }
+                }
+            },
         ]
         filter_queries: list[dict[str, object]] = []
+        exact_search_terms = cls._extract_exact_search_terms(request.query_text)
 
         if request.merged_terms:
             should_queries.append(
@@ -306,7 +320,9 @@ class ElasticsearchChunkStore:
                 }
             )
 
+        should_queries.extend(cls._build_phrase_queries(request, exact_search_terms))
         should_queries.extend(cls._build_structure_queries(request))
+        should_queries.extend(cls._build_exact_term_queries(exact_search_terms))
 
         if request.viewer_user_id:
             filter_queries.append(
@@ -321,13 +337,32 @@ class ElasticsearchChunkStore:
                 }
             )
 
-        return {
+        bool_query: dict[str, object] = {
             "bool": {
                 "should": should_queries,
                 "minimum_should_match": 1,
                 "filter": filter_queries,
             }
         }
+        if cls._should_wrap_with_version_boost(request.query_text):
+            return {
+                "function_score": {
+                    "query": bool_query,
+                    "functions": [
+                        {
+                            "field_value_factor": {
+                                "field": "version_rank",
+                                "factor": 0.12,
+                                "modifier": "none",
+                                "missing": 0.0,
+                            }
+                        }
+                    ],
+                    "boost_mode": "sum",
+                    "score_mode": "sum",
+                }
+            }
+        return bool_query
 
     def _get_client(self) -> Any:
         """延迟初始化 ES 客户端。"""
@@ -385,6 +420,14 @@ class ElasticsearchChunkStore:
             "file_id": {"type": "keyword"},
             # 原始文件名，供搜索结果展示与引用回填使用。
             "source_filename": {"type": "keyword"},
+            # 从文件名规整得到的标题文本，用于文件名语义召回。
+            "source_filename_text": {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            },
+            # 从文件名解析出的版本号，供版本链排序提权。
+            "version_rank": {"type": "integer"},
             # 文件在对象存储中的稳定对象键。
             "storage_key": {"type": "keyword"},
             "page_number": {"type": "integer"},
@@ -439,6 +482,10 @@ class ElasticsearchChunkStore:
                 "analyzer": "ik_max_word",
                 "search_analyzer": "ik_smart",
             },
+            # 文本来源类型，便于对 OCR 文本进行额外精确提权。
+            "source_type": {"type": "keyword"},
+            # 数字量词、样例编号等精确锚点，用于 constant_score 精确匹配。
+            "exact_search_terms": {"type": "keyword"},
             # 表格 schema 文本，用于表格类问题显式提权。
             "table_schema_text": {
                 "type": "text",
@@ -501,6 +548,8 @@ class ElasticsearchChunkStore:
             "chunk_id",
             "file_id",
             "source_filename",
+            "source_filename_text",
+            "version_rank",
             "storage_key",
             "page_number",
             "source_anchor",
@@ -517,6 +566,8 @@ class ElasticsearchChunkStore:
             "raw_content",
             "contextual_text",
             "searchable_text",
+            "source_type",
+            "exact_search_terms",
             "table_schema_text",
             "merged_terms",
             "image_asset_refs",
@@ -638,6 +689,83 @@ class ElasticsearchChunkStore:
             )
 
         return structure_queries
+
+    @staticmethod
+    def _build_phrase_queries(
+        request: ChunkSearchRequest,
+        exact_search_terms: list[str],
+    ) -> list[dict[str, object]]:
+        """构造短语精确匹配子句。"""
+        phrase_queries: list[dict[str, object]] = [
+            {
+                "match_phrase": {
+                    "searchable_text": {
+                        "query": request.query_text,
+                        "boost": 4.2 if request.query_intent == "document_location" else 2.8,
+                    }
+                }
+            },
+            {
+                "match_phrase": {
+                    "source_filename_text": {
+                        "query": request.query_text,
+                        "boost": 2.6,
+                    }
+                }
+            },
+        ]
+        for exact_term in exact_search_terms:
+            phrase_queries.append(
+                {
+                    "match_phrase": {
+                        "searchable_text": {
+                            "query": exact_term,
+                            "boost": 3.6,
+                        }
+                    }
+                }
+            )
+        return phrase_queries
+
+    @staticmethod
+    def _build_exact_term_queries(exact_search_terms: list[str]) -> list[dict[str, object]]:
+        """构造基于 exact_search_terms 的常量分值精确匹配。"""
+        if not exact_search_terms:
+            return []
+
+        return [
+            {
+                "constant_score": {
+                    "filter": {"terms": {"exact_search_terms": exact_search_terms}},
+                    "boost": 6.8,
+                }
+            },
+            {
+                "constant_score": {
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"term": {"source_type": "ocr"}},
+                                {"terms": {"exact_search_terms": exact_search_terms}},
+                            ]
+                        }
+                    },
+                    "boost": 7.2,
+                }
+            },
+        ]
+
+    @staticmethod
+    def _extract_exact_search_terms(query_text: str) -> list[str]:
+        """从查询文本中提取精确匹配锚点。"""
+        return extract_exact_search_terms(query_text)
+
+    @staticmethod
+    def _should_wrap_with_version_boost(query_text: str) -> bool:
+        """判断是否应按版本号对结果做额外提权。"""
+        if query_prefers_old_version(query_text):
+            return False
+        return query_requests_latest_version(query_text)
 
 
 def _as_string_list(value: object) -> list[str]:

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from fastapi import status
 
 from baozhi_rag.core.exceptions import AppError
+from baozhi_rag.domain.knowledge_file import FileVisibilityScope
 from baozhi_rag.domain.knowledge_file_repository import KnowledgeFileRepository
 from baozhi_rag.services.chunk_embedding import ChunkEmbeddingService
 from baozhi_rag.services.evidence_sufficiency import EvidenceAssessment, EvidenceSufficiencyService
@@ -201,15 +202,19 @@ class ChunkSearchService:
             retrieval_plan=retrieval_plan,
             viewer_user_id=viewer_user_id,
         )
-        hydrated_hits = self._hydrate_file_metadata(pipeline_result.hits)
+        hydrated_pipeline_result = self._hydrate_pipeline_execution_result(pipeline_result)
+        visible_pipeline_result = self._filter_pipeline_execution_result_for_viewer(
+            execution_result=hydrated_pipeline_result,
+            viewer_user_id=viewer_user_id,
+        )
         reranked_hits = self._fast_rerank_service.rerank(
             query_text=normalized_query,
             query_intent=query_intent,
-            hits=hydrated_hits,
+            hits=visible_pipeline_result.hits,
         )
         evidence_assessment = self._evidence_sufficiency_service.assess(reranked_hits)
         retrieval_trace = self._retrieval_trace_service.build(
-            execution_result=pipeline_result,
+            execution_result=visible_pipeline_result,
             final_hits=reranked_hits,
             evidence_assessment=evidence_assessment,
         )
@@ -230,29 +235,47 @@ class ChunkSearchService:
     ) -> RetrievalPlan:
         """构造当前查询的检索计划。"""
         if self._retrieval_planner is None:
-            return RetrievalPlan(
-                mode=retrieval_mode,
+            return self._build_default_retrieval_plan(
                 query_text=query_text,
                 query_intent=query_intent,
-                result_size=size,
-                lanes=[
-                    RetrievalLanePlan(
-                        lane_id="hybrid-default",
-                        query_text=query_text,
-                        lane_weight=1.0,
-                        result_size=size,
-                        lexical_candidate_size=size,
-                        vector_candidate_size=size,
-                        query_intent=query_intent,
-                    )
-                ],
+                size=size,
+                retrieval_mode=retrieval_mode,
             )
 
+        # 统一扩展检索框架由 planner 内部接管，ChunkSearchService 仅负责把
+        # query/query_intent/mode/size 传入，避免在服务层硬编码 MQE/HyDE 细节。
         return self._retrieval_planner.build(
             query_text=query_text,
             query_intent=query_intent,
             result_size=size,
             mode=retrieval_mode,
+        )
+
+    def _build_default_retrieval_plan(
+        self,
+        *,
+        query_text: str,
+        query_intent: str,
+        size: int,
+        retrieval_mode: str,
+    ) -> RetrievalPlan:
+        """构造兼容兜底的单 lane 检索计划。"""
+        return RetrievalPlan(
+            mode=retrieval_mode,
+            query_text=query_text,
+            query_intent=query_intent,
+            result_size=size,
+            lanes=[
+                RetrievalLanePlan(
+                    lane_id="hybrid-default",
+                    query_text=query_text,
+                    lane_weight=1.0,
+                    result_size=size,
+                    lexical_candidate_size=size,
+                    vector_candidate_size=size,
+                    query_intent=query_intent,
+                )
+            ],
         )
 
     def _execute_retrieval_plan(
@@ -294,6 +317,70 @@ class ChunkSearchService:
                 )
             )
         return hydrated_hits
+
+    def _hydrate_pipeline_execution_result(
+        self,
+        execution_result: RetrievalPipelineExecutionResult,
+    ) -> RetrievalPipelineExecutionResult:
+        """把 pipeline 结果中的全局命中与 lane 命中统一回填最新文件元数据。"""
+        return replace(
+            execution_result,
+            lane_executions=[
+                replace(
+                    lane_execution,
+                    hits=self._hydrate_file_metadata(lane_execution.hits),
+                )
+                for lane_execution in execution_result.lane_executions
+            ],
+            hits=self._hydrate_file_metadata(execution_result.hits),
+        )
+
+    def _filter_pipeline_execution_result_for_viewer(
+        self,
+        *,
+        execution_result: RetrievalPipelineExecutionResult,
+        viewer_user_id: str,
+    ) -> RetrievalPipelineExecutionResult:
+        """对 pipeline 结果和各 lane 命中同步执行服务层权限兜底过滤。"""
+        if not viewer_user_id:
+            return execution_result
+
+        return replace(
+            execution_result,
+            lane_executions=[
+                replace(
+                    lane_execution,
+                    hits=self._filter_hits_for_viewer(
+                        hits=lane_execution.hits,
+                        viewer_user_id=viewer_user_id,
+                    ),
+                )
+                for lane_execution in execution_result.lane_executions
+            ],
+            hits=self._filter_hits_for_viewer(
+                hits=execution_result.hits,
+                viewer_user_id=viewer_user_id,
+            ),
+        )
+
+    def _filter_hits_for_viewer(
+        self,
+        *,
+        hits: list[ChunkSearchHit],
+        viewer_user_id: str,
+    ) -> list[ChunkSearchHit]:
+        """在服务层再次执行权限过滤，兜底底层检索侧的过滤漂移。"""
+        if not hits or not viewer_user_id:
+            return hits
+
+        visible_hits: list[ChunkSearchHit] = []
+        for hit in hits:
+            if hit.visibility_scope == FileVisibilityScope.GLOBAL.value:
+                visible_hits.append(hit)
+                continue
+            if hit.uploader_user_id == viewer_user_id:
+                visible_hits.append(hit)
+        return visible_hits
 
     def _infer_file_extension(self, filename: str) -> str | None:
         """从原始文件名中提取扩展名，供聊天链路展示使用。"""
