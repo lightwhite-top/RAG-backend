@@ -71,6 +71,39 @@ class DocumentImageUnderstandingService:
             recognition_model=self._model_name,
         )
 
+    def build_fallback_result(
+        self,
+        *,
+        image_bytes: bytes,
+        content_type: str,
+        fallback_text: str = "",
+    ) -> DocumentImageUnderstandingResult:
+        """在图片识别模型不可用时，构造保守降级结果。
+
+        参数:
+            image_bytes: 原始图片字节流。
+            content_type: 原始图片 MIME 类型。
+            fallback_text: 可选的段落级上下文文本，用于补齐最基础的 OCR 文本。
+
+        返回:
+            不依赖多模态模型的保守识别结果，保证图片资产仍可落库和被引用。
+        """
+        normalized_image_bytes, width, height = self._normalize_image(image_bytes)
+        normalized_fallback_text = self._normalize_ocr_text(fallback_text)
+        return DocumentImageUnderstandingResult(
+            image_sha256=hashlib.sha256(image_bytes).hexdigest(),
+            normalized_image_sha256=hashlib.sha256(normalized_image_bytes).hexdigest(),
+            normalized_image_bytes=normalized_image_bytes,
+            width=width,
+            height=height,
+            ocr_text=normalized_fallback_text,
+            normalized_ocr_text=normalized_fallback_text,
+            summary="",
+            image_type="unknown",
+            content_type=content_type.strip() or self._NORMALIZED_CONTENT_TYPE,
+            recognition_model=(self._model_name or "fallback").strip() or "fallback",
+        )
+
     def ensure_ready(self) -> None:
         """校验图片识别客户端是否可用。"""
         if not self._model_name:

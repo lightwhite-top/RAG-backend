@@ -56,6 +56,10 @@ from baozhi_rag.services.file_upload import (
     FileUploadService,
     StagedUploadFileResult,
 )
+from baozhi_rag.services.retrieval_signals import (
+    extract_version_rank,
+    normalize_filename_title,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,12 +105,14 @@ class KnowledgeUploadService:
         file_upload_service: FileUploadService,
         temp_file_store: LocalFileStore,
         task_repository: KnowledgeUploadTaskRepository,
+        knowledge_file_repository: KnowledgeFileRepository,
         ingest_version: str,
     ) -> None:
         """初始化上传任务服务。"""
         self._file_upload_service = file_upload_service
         self._temp_file_store = temp_file_store
         self._task_repository = task_repository
+        self._knowledge_file_repository = knowledge_file_repository
         self._ingest_version = ingest_version.strip() or "v1"
 
     async def submit_files(
@@ -186,7 +192,10 @@ class KnowledgeUploadService:
         if existing_task.status in {
             KnowledgeUploadTaskStatus.QUEUED,
             KnowledgeUploadTaskStatus.FAILED,
-        }:
+        } or (
+            existing_task.status is KnowledgeUploadTaskStatus.SUCCEEDED
+            and not self._succeeded_task_output_still_exists(existing_task)
+        ):
             next_source_storage_key = staged_file.temp_storage_key
             retained_storage_keys.add(next_source_storage_key)
             superseded_storage_keys.append(existing_task.source_storage_key)
@@ -200,6 +209,17 @@ class KnowledgeUploadService:
             or existing_task
         )
 
+        if (
+            existing_task.status is KnowledgeUploadTaskStatus.SUCCEEDED
+            and not self._succeeded_task_output_still_exists(updated_task)
+        ):
+            retried_task = self._task_repository.retry_task(
+                existing_task.id,
+                uploader_user_id=uploader_user_id,
+                queued_at=datetime.now(UTC),
+            )
+            return retried_task or updated_task
+
         if existing_task.status is KnowledgeUploadTaskStatus.FAILED:
             retried_task = self._task_repository.retry_task(
                 existing_task.id,
@@ -209,6 +229,19 @@ class KnowledgeUploadService:
             return retried_task or updated_task
 
         return updated_task
+
+    def _succeeded_task_output_still_exists(self, task: KnowledgeUploadTask) -> bool:
+        """判断成功任务指向的知识文件是否仍然存在。
+
+        参数:
+            task: 待复用的历史上传任务。
+
+        返回:
+            任务关联文件存在时返回 `True`，否则返回 `False`。
+        """
+        if task.file_id is None:
+            return False
+        return self._knowledge_file_repository.get_file_by_id(task.file_id) is not None
 
     def get_task(self, *, task_id: str, current_user: CurrentUser) -> KnowledgeUploadTask:
         """查询当前用户的单条上传任务。"""
@@ -395,6 +428,10 @@ class KnowledgeUploadProcessor:
                 prepared_segment_image_assets=prepared_segment_image_assets,
                 local_file_path=local_file_path,
             )
+            # 旧文件索引清理失败时，不能把任务标记为成功；否则会出现“新任务成功，
+            # 但旧文件仍可被检索命中”的假成功状态。
+            self._cleanup_superseded_chunk_indexes(process_result.cleanup_file_ids)
+            self._cleanup_superseded_file_metadata(process_result.cleanup_file_ids)
             self._task_repository.mark_succeeded(
                 task.id,
                 worker_id=worker_id,
@@ -408,13 +445,6 @@ class KnowledgeUploadProcessor:
                 completed_at=datetime.now(UTC),
             )
             should_cleanup_source_file = True
-            for cleanup_file_id in process_result.cleanup_file_ids:
-                with suppress(Exception):
-                    self._chunk_store.delete_chunks_by_file_id(cleanup_file_id)
-                with suppress(Exception):
-                    self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
-                        cleanup_file_id
-                    )
             for cleanup_storage_key in process_result.cleanup_storage_keys:
                 with suppress(Exception):
                     self._object_store.delete(cleanup_storage_key)
@@ -460,6 +490,36 @@ class KnowledgeUploadProcessor:
             if should_cleanup_source_file:
                 with suppress(Exception):
                     self._temp_file_store.delete(task.source_storage_key)
+
+    def _cleanup_superseded_chunk_indexes(self, file_ids: Sequence[str]) -> None:
+        """清理被替换旧文件的检索索引，失败时中断成功收口。
+
+        参数:
+            file_ids: 需要清理旧索引的文件 ID 列表。
+
+        返回:
+            None。
+
+        异常:
+            Exception: 当底层索引清理失败时原样向上抛出，由任务统一走失败收口。
+        """
+        for file_id in file_ids:
+            self._chunk_store.delete_chunks_by_file_id(file_id)
+
+    def _cleanup_superseded_file_metadata(self, file_ids: Sequence[str]) -> None:
+        """清理被替换旧文件的元数据与图片资产。
+
+        参数:
+            file_ids: 需要清理旧元数据的文件 ID 列表。
+
+        返回:
+            None。
+        """
+        for file_id in file_ids:
+            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(file_id)
+            # 某些替换路径会先由仓储完成“旧记录删除 + 新记录插入”，此时旧 ID
+            # 再删一次只会返回 False，不应影响成功收口。
+            self._knowledge_file_repository.delete_file(file_id)
 
     def _resolve_task_result(
         self,
@@ -512,10 +572,6 @@ class KnowledgeUploadProcessor:
             cleanup_file_ids: list[str] = []
             cleanup_storage_keys: list[str] = []
             if existing_same_name is not None and existing_same_name.id != existing_same_content.id:
-                self._knowledge_file_repository.delete_file(existing_same_name.id)
-                self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
-                    existing_same_name.id
-                )
                 cleanup_file_ids.append(existing_same_name.id)
                 cleanup_storage_keys.extend(
                     [
@@ -712,10 +768,6 @@ class KnowledgeUploadProcessor:
                 existing_same_content = updated_file or existing_same_content
             cleanup_file_ids: list[str] = []
             if existing_same_name is not None and existing_same_name.id != existing_same_content.id:
-                self._knowledge_file_repository.delete_file(existing_same_name.id)
-                self._knowledge_file_image_asset_repository.delete_assets_by_file_id(
-                    existing_same_name.id
-                )
                 cleanup_file_ids.append(existing_same_name.id)
             return UploadTaskProcessResult(
                 file_id=existing_same_content.id,
@@ -807,15 +859,34 @@ class KnowledgeUploadProcessor:
         """按 segment_id 收集图片并完成规范化识别。"""
         prepared_assets_by_segment: dict[str, list[PreparedChunkImageAsset]] = {}
         seen_source_anchors: set[str] = set()
+        segment_fallback_text = self._build_segment_fallback_text_map(preview_chunks)
 
         for chunk in preview_chunks:
             for asset in chunk.image_assets:
                 if asset.image_bytes is None or asset.source_anchor in seen_source_anchors:
                     continue
-                analysis = self._image_understanding_service.analyze_image(
-                    image_bytes=asset.image_bytes,
-                    content_type=asset.content_type,
-                )
+                try:
+                    analysis = self._image_understanding_service.analyze_image(
+                        image_bytes=asset.image_bytes,
+                        content_type=asset.content_type,
+                    )
+                except Exception:
+                    # 图片理解属于增强链路；上游模型超时或暂时不可用时，保守降级为
+                    # “保留图片资产 + 保留段落 OCR 文本”，避免整份文档上传被拖垮。
+                    LOGGER.warning(
+                        (
+                            "knowledge_upload_image_understanding_fallback "
+                            "segment_id=%s source_anchor=%s"
+                        ),
+                        asset.segment_id,
+                        asset.source_anchor,
+                        exc_info=True,
+                    )
+                    analysis = self._image_understanding_service.build_fallback_result(
+                        image_bytes=asset.image_bytes,
+                        content_type=asset.content_type,
+                        fallback_text=segment_fallback_text.get(asset.segment_id, chunk.content),
+                    )
                 prepared_assets_by_segment.setdefault(asset.segment_id, []).append(
                     PreparedChunkImageAsset(
                         preview_asset=asset,
@@ -825,6 +896,21 @@ class KnowledgeUploadProcessor:
                 seen_source_anchors.add(asset.source_anchor)
 
         return prepared_assets_by_segment
+
+    def _build_segment_fallback_text_map(
+        self,
+        preview_chunks: list[DocumentChunk],
+    ) -> dict[str, str]:
+        """按 segment_id 汇总可用于图片理解降级的段落文本。"""
+        segment_texts: dict[str, list[str]] = {}
+        for chunk in preview_chunks:
+            if chunk.chunk_type != ChunkType.TEXT.value:
+                continue
+            normalized_content = " ".join(chunk.content.split()).strip()
+            if not normalized_content:
+                continue
+            segment_texts.setdefault(chunk.segment_id, []).append(normalized_content)
+        return {segment_id: "\n".join(texts) for segment_id, texts in segment_texts.items()}
 
     def _collect_asset_storage_keys(
         self,
@@ -934,9 +1020,18 @@ class KnowledgeUploadProcessor:
                         content=semantic_content,
                         char_count=len(semantic_content),
                         source_filename=knowledge_file.original_filename,
+                        source_filename_text=normalize_filename_title(
+                            knowledge_file.original_filename
+                        ),
+                        version_rank=extract_version_rank(knowledge_file.original_filename),
                         storage_key=knowledge_file.storage_key,
                         uploader_user_id=knowledge_file.uploader_user_id,
                         visibility_scope=knowledge_file.visibility_scope.value,
+                        content_type="paragraph",
+                        raw_content=semantic_content,
+                        contextual_text=semantic_content,
+                        searchable_text=semantic_content,
+                        source_type="ocr",
                         merged_terms=[],
                         image_asset_refs=[
                             ChunkImageAssetRef(

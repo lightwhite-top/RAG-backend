@@ -144,7 +144,7 @@ class KnowledgeUploadTaskRepository(Protocol):
         uploader_user_id: str,
         queued_at: datetime,
     ) -> KnowledgeUploadTask | None:
-        """将失败任务重新入队。"""
+        """将可恢复任务重新入队。"""
         ...
 
     def requeue_waiting_for_ocr_capacity(

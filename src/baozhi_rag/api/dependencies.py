@@ -237,12 +237,17 @@ def get_knowledge_upload_service(
         KnowledgeUploadTaskRepository,
         Depends(get_knowledge_upload_task_repository),
     ],
+    knowledge_file_repository: Annotated[
+        KnowledgeFileRepository,
+        Depends(get_knowledge_file_repository),
+    ],
 ) -> KnowledgeUploadService:
     """构造知识文件异步上传任务服务。"""
     return KnowledgeUploadService(
         file_upload_service=FileUploadService(temp_file_store),
         temp_file_store=temp_file_store,
         task_repository=task_repository,
+        knowledge_file_repository=knowledge_file_repository,
         ingest_version=settings.upload_ingest_version,
     )
 

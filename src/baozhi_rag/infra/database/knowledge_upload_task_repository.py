@@ -325,12 +325,15 @@ class SqlAlchemyKnowledgeUploadTaskRepository:
         uploader_user_id: str,
         queued_at: datetime,
     ) -> KnowledgeUploadTask | None:
-        """将失败任务重新入队。"""
+        """将可恢复任务重新入队。"""
         with self._session_factory() as session:
             task_model = session.get(KnowledgeUploadTaskModel, task_id)
             if task_model is None or task_model.uploader_user_id != uploader_user_id:
                 return None
-            if task_model.status != KnowledgeUploadTaskStatus.FAILED.value:
+            if task_model.status not in {
+                KnowledgeUploadTaskStatus.FAILED.value,
+                KnowledgeUploadTaskStatus.SUCCEEDED.value,
+            }:
                 raise KnowledgeUploadTaskRetryNotAllowedError()
 
             task_model.status = KnowledgeUploadTaskStatus.QUEUED.value

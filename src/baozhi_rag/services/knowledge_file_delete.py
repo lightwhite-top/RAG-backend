@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Protocol
 
+from baozhi_rag.core.exceptions import AppError
 from baozhi_rag.domain.knowledge_file import KnowledgeFile, KnowledgeFileListPage
 from baozhi_rag.domain.knowledge_file_errors import KnowledgeFileNotFoundError
 from baozhi_rag.domain.knowledge_file_image_asset import KnowledgeFileImageAsset
@@ -156,6 +159,14 @@ class ChatRecordCleanupRepository(Protocol):
         ...
 
 
+class KnowledgeFileDeleteCleanupError(AppError):
+    """知识文件删除时的检索或外部资源清理失败。"""
+
+    default_message = "删除文件关联索引失败，请稍后重试"
+    default_error_code = "knowledge_file_delete_cleanup_failed"
+    default_status_code = int(HTTPStatus.BAD_GATEWAY)
+
+
 @dataclass(frozen=True, slots=True)
 class _KnowledgeFileCleanupPlan:
     """描述单个知识文件删除后的后续清理计划。"""
@@ -228,17 +239,22 @@ class KnowledgeFileDeleteService:
             raise KnowledgeFileNotFoundError()
 
         image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(file_id)
+        self._delete_chunk_index_or_raise(
+            file_id=knowledge_file.id,
+            uploader_user_id=knowledge_file.uploader_user_id,
+        )
         if not self._knowledge_file_repository.delete_file(file_id):
             raise KnowledgeFileNotFoundError()
         self._knowledge_file_image_asset_repository.delete_assets_by_file_id(file_id)
 
-        # 先删除数据库记录，把文件从列表和检索元数据补齐链路中移除；随后再尽力清理
-        # 检索索引与对象存储，避免调用方在外部依赖短暂抖动时继续看到“已删除文件”。
+        # 单文件删除优先保证检索残留不会继续暴露；对象存储失败只记日志，
+        # 但不会再影响搜索或同源下载鉴权结果。
         self._run_cleanup(
             file_id=knowledge_file.id,
             uploader_user_id=knowledge_file.uploader_user_id,
             storage_key=knowledge_file.storage_key,
             image_assets=image_assets,
+            skip_chunk_cleanup=True,
         )
 
     def _run_cleanup(
@@ -248,6 +264,7 @@ class KnowledgeFileDeleteService:
         uploader_user_id: str,
         storage_key: str,
         image_assets: list[KnowledgeFileImageAsset],
+        skip_chunk_cleanup: bool = False,
     ) -> None:
         """执行删除后的索引与对象存储清理。
 
@@ -259,10 +276,16 @@ class KnowledgeFileDeleteService:
         返回:
             None。
         """
-        cleanup_operations = (
-            ("chunk_index", lambda: self._chunk_store.delete_chunks_by_file_id(file_id)),
-            ("object_storage", lambda: self._object_store.delete(storage_key)),
-        )
+        cleanup_operations: tuple[tuple[str, Callable[[], None]], ...]
+        if skip_chunk_cleanup:
+            cleanup_operations = (
+                ("object_storage", lambda: self._object_store.delete(storage_key)),
+            )
+        else:
+            cleanup_operations = (
+                ("chunk_index", lambda: self._chunk_store.delete_chunks_by_file_id(file_id)),
+                ("object_storage", lambda: self._object_store.delete(storage_key)),
+            )
         for cleanup_target, cleanup_operation in cleanup_operations:
             try:
                 cleanup_operation()
@@ -312,22 +335,6 @@ class KnowledgeFileDeleteService:
         """
         if not cleanup_plans:
             return
-
-        # 检索存储属于内部系统元数据，仍保持串行清理，避免一次性放大 ES/Milvus 压力。
-        for cleanup_plan in cleanup_plans:
-            try:
-                self._chunk_store.delete_chunks_by_file_id(cleanup_plan.file_id)
-            except Exception:
-                LOGGER.warning(
-                    (
-                        "knowledge_file_delete_cleanup_failed "
-                        "file_id=%s uploader_user_id=%s cleanup_target=%s"
-                    ),
-                    cleanup_plan.file_id,
-                    cleanup_plan.uploader_user_id,
-                    "chunk_index",
-                    exc_info=True,
-                )
 
         object_cleanup_tasks = self._build_object_storage_cleanup_tasks(cleanup_plans)
         if not object_cleanup_tasks:
@@ -436,6 +443,35 @@ class KnowledgeFileDeleteService:
             批量删除结果摘要。
         """
         files = self._list_all_user_files(current_user.id)
+        image_assets_by_file_id = {
+            knowledge_file.id: self._knowledge_file_image_asset_repository.list_assets_by_file_id(
+                knowledge_file.id
+            )
+            for knowledge_file in files
+        }
+        for knowledge_file in files:
+            self._delete_chunk_index_or_raise(
+                file_id=knowledge_file.id,
+                uploader_user_id=knowledge_file.uploader_user_id,
+            )
+
+        deleted_file_count = 0
+        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
+        for knowledge_file in files:
+            image_assets = image_assets_by_file_id.get(knowledge_file.id, [])
+            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
+                continue
+            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
+            cleanup_plans.append(
+                _KnowledgeFileCleanupPlan(
+                    file_id=knowledge_file.id,
+                    uploader_user_id=knowledge_file.uploader_user_id,
+                    storage_key=knowledge_file.storage_key,
+                    image_assets=image_assets,
+                )
+            )
+            deleted_file_count += 1
+
         chat_purge_result = self._chat_cleanup_repository.delete_chat_records_by_user(
             current_user.id
         )
@@ -455,24 +491,6 @@ class KnowledgeFileDeleteService:
             with suppress(Exception):
                 self._temp_file_store.delete(task.source_storage_key)
 
-        deleted_file_count = 0
-        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
-        for knowledge_file in files:
-            image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
-                knowledge_file.id
-            )
-            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
-                continue
-            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
-            cleanup_plans.append(
-                _KnowledgeFileCleanupPlan(
-                    file_id=knowledge_file.id,
-                    uploader_user_id=knowledge_file.uploader_user_id,
-                    storage_key=knowledge_file.storage_key,
-                    image_assets=image_assets,
-                )
-            )
-            deleted_file_count += 1
         self._run_bulk_cleanup(cleanup_plans)
 
         return KnowledgeFilePurgeResult(
@@ -494,6 +512,35 @@ class KnowledgeFileDeleteService:
             全站批量删除结果摘要。
         """
         files = self._list_all_files()
+        image_assets_by_file_id = {
+            knowledge_file.id: self._knowledge_file_image_asset_repository.list_assets_by_file_id(
+                knowledge_file.id
+            )
+            for knowledge_file in files
+        }
+        for knowledge_file in files:
+            self._delete_chunk_index_or_raise(
+                file_id=knowledge_file.id,
+                uploader_user_id=knowledge_file.uploader_user_id,
+            )
+
+        deleted_file_count = 0
+        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
+        for knowledge_file in files:
+            image_assets = image_assets_by_file_id.get(knowledge_file.id, [])
+            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
+                continue
+            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
+            cleanup_plans.append(
+                _KnowledgeFileCleanupPlan(
+                    file_id=knowledge_file.id,
+                    uploader_user_id=knowledge_file.uploader_user_id,
+                    storage_key=knowledge_file.storage_key,
+                    image_assets=image_assets,
+                )
+            )
+            deleted_file_count += 1
+
         chat_purge_result = self._chat_cleanup_repository.delete_all_chat_records()
         LOGGER.info(
             (
@@ -511,30 +558,45 @@ class KnowledgeFileDeleteService:
             with suppress(Exception):
                 self._temp_file_store.delete(task.source_storage_key)
 
-        deleted_file_count = 0
-        cleanup_plans: list[_KnowledgeFileCleanupPlan] = []
-        for knowledge_file in files:
-            image_assets = self._knowledge_file_image_asset_repository.list_assets_by_file_id(
-                knowledge_file.id
-            )
-            if not self._knowledge_file_repository.delete_file(knowledge_file.id):
-                continue
-            self._knowledge_file_image_asset_repository.delete_assets_by_file_id(knowledge_file.id)
-            cleanup_plans.append(
-                _KnowledgeFileCleanupPlan(
-                    file_id=knowledge_file.id,
-                    uploader_user_id=knowledge_file.uploader_user_id,
-                    storage_key=knowledge_file.storage_key,
-                    image_assets=image_assets,
-                )
-            )
-            deleted_file_count += 1
         self._run_bulk_cleanup(cleanup_plans)
 
         return KnowledgeFilePurgeResult(
             deleted_file_count=deleted_file_count,
             deleted_task_count=len(tasks),
         )
+
+    def _delete_chunk_index_or_raise(
+        self,
+        *,
+        file_id: str,
+        uploader_user_id: str,
+    ) -> None:
+        """删除检索索引，失败时中断删除流程。
+
+        参数:
+            file_id: 待删除文件 ID。
+            uploader_user_id: 上传者用户 ID，用于日志审计。
+
+        返回:
+            None。
+
+        异常:
+            KnowledgeFileDeleteCleanupError: 当 ES/Milvus 清理失败时抛出。
+        """
+        try:
+            self._chunk_store.delete_chunks_by_file_id(file_id)
+        except Exception as exc:
+            LOGGER.warning(
+                (
+                    "knowledge_file_delete_cleanup_failed "
+                    "file_id=%s uploader_user_id=%s cleanup_target=%s"
+                ),
+                file_id,
+                uploader_user_id,
+                "chunk_index",
+                exc_info=True,
+            )
+            raise KnowledgeFileDeleteCleanupError() from exc
 
     def _list_all_user_files(self, uploader_user_id: str) -> list[KnowledgeFile]:
         """按分页方式收集指定用户的全部文件快照。"""
