@@ -282,12 +282,15 @@ def _build_history_message_item(
             )
             for item in message.citations
         ]
+        accessible_citation_ids = {item.id for item in citations if item.file_url is not None}
         content_blocks = [
             _build_content_block_item(
                 block,
                 request=request,
                 file_url_builder=file_url_builder,
                 url_generated_at=url_generated_at,
+                accessible_citation_ids=accessible_citation_ids,
+                available_file_ids=set(file_map),
             )
             for block in message.content_blocks
         ]
@@ -395,6 +398,8 @@ def _build_content_block_item(
     request: Request,
     file_url_builder: AliyunOssFileStore,
     url_generated_at: datetime,
+    accessible_citation_ids: set[str],
+    available_file_ids: set[str],
 ) -> ChatContentBlockItem:
     """构造带资产 URL 的历史正文块，并兼容旧 `image_assets` 结构。"""
     normalized_block = dict(block)
@@ -402,6 +407,28 @@ def _build_content_block_item(
     raw_assets = normalized_block.get("files_assets")
     if raw_assets is None and block_type == "image_gallery":
         raw_assets = normalized_block.get("image_assets", [])
+    raw_citation_ids = normalized_block.get("citation_ids")
+    normalized_citation_ids = (
+        [
+            citation_id.strip()
+            for citation_id in raw_citation_ids
+            if isinstance(citation_id, str) and citation_id.strip()
+        ]
+        if isinstance(raw_citation_ids, list)
+        else []
+    )
+    has_accessible_citation = bool(accessible_citation_ids.intersection(normalized_citation_ids))
+    has_accessible_source_file = bool(
+        block_type == "source_file"
+        and isinstance(raw_assets, list)
+        and any(
+            isinstance(item, dict) and str(item.get("asset_id", "")).strip() in available_file_ids
+            for item in raw_assets
+        )
+    )
+    # 历史消息里的资源链接需要再次校验文件是否仍可访问，避免删除后仅凭旧
+    # `storage_key` 或旧 block 资产继续暴露下载入口。
+    allow_download_urls = has_accessible_citation or has_accessible_source_file
     normalized_block["files_assets"] = [
         item.model_dump(mode="json")
         for item in _build_chat_block_asset_items(
@@ -414,6 +441,8 @@ def _build_content_block_item(
             request=request,
             file_url_builder=file_url_builder,
             url_generated_at=url_generated_at,
+            allow_download_urls=allow_download_urls,
+            allow_presigned_fallback=False,
         )
     ]
     return ChatContentBlockItem.model_validate(normalized_block)

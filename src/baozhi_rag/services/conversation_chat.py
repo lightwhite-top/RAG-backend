@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -18,6 +19,8 @@ from baozhi_rag.domain.user import CurrentUser
 from baozhi_rag.services.chat import ChatCompletionResult, ChatService, ChatStreamEvent
 from baozhi_rag.services.chat_sessions import ChatSessionService
 from baozhi_rag.services.llm import ChatMessage
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ConversationChatService:
@@ -121,6 +124,30 @@ class ConversationChatService:
             applied_temperature=applied_temperature,
         )
 
+    def prepare_stream_request(
+        self,
+        *,
+        session_id: str,
+        messages: list[ChatMessage],
+        current_user: CurrentUser,
+    ) -> ChatMessage:
+        """前置校验会话模式的流式请求，确保可预判错误在返回 SSE 前抛出。
+
+        参数:
+            session_id: 当前会话 ID。
+            messages: 本次流式请求携带的消息列表。
+            current_user: 当前登录用户，用于会话权限校验。
+
+        返回:
+            经过约束校验后的当前用户消息。
+
+        异常:
+            ChatSessionError: 当会话不存在、无权访问或已删除时抛出。
+            ChatSessionModeInvalidMessagesError: 当消息列表不满足会话模式约束时抛出。
+        """
+        self._session_service.get_session(session_id=session_id, current_user=current_user)
+        return self._extract_current_user_message(messages)
+
     def stream(
         self,
         *,
@@ -130,9 +157,31 @@ class ConversationChatService:
         temperature: float | None,
         current_user: CurrentUser,
         request_id: str,
+        prepared_current_message: ChatMessage | None = None,
     ) -> Iterator[ChatStreamEvent]:
-        self._session_service.get_session(session_id=session_id, current_user=current_user)
-        current_message = self._extract_current_user_message(messages)
+        """执行会话模式的流式聊天，并在需要时复用前置校验结果。
+
+        参数:
+            session_id: 当前会话 ID。
+            messages: 本次流式请求携带的消息列表。
+            retrieval_size: 本次检索召回数量。
+            temperature: 本次回答采样温度。
+            current_user: 当前登录用户，用于会话权限校验和权限过滤。
+            request_id: 当前请求 ID，用于审计和消息落库。
+            prepared_current_message: 可选的前置校验结果；存在时复用，避免重复校验。
+
+        返回:
+            按既有契约产出的聊天流式事件迭代器。
+        """
+        current_message = (
+            prepared_current_message
+            if prepared_current_message is not None
+            else self.prepare_stream_request(
+                session_id=session_id,
+                messages=messages,
+                current_user=current_user,
+            )
+        )
         user_record = self._message_repository.append_message(
             session_id=session_id,
             role=ChatMessageRole.USER,
@@ -200,35 +249,49 @@ class ConversationChatService:
                         legacy_retrieval_size=applied_retrieval_size,
                         legacy_temperature=applied_temperature,
                     )
-                    updated_record = self._message_repository.update_message(
-                        assistant_record.id,
-                        status=ChatMessageStatus.COMPLETED,
-                        plain_text=plain_text or answer,
-                        content_blocks=content_blocks,
-                        original_query=original_query,
-                        retrieval_query=retrieval_query,
-                        rewrite_applied=rewrite_applied,
-                        retrieval_size=applied_retrieval_size,
-                        temperature=applied_temperature,
-                        finish_reason=finish_reason,
-                        latency_ms=latency_ms,
-                        completed=True,
-                    )
-                    self._message_repository.replace_citations(
-                        assistant_record.id,
-                        self._build_citation_records_from_event(assistant_record.id, event),
-                    )
-                    resolved_record = updated_record or assistant_record
                     data = dict(event.data)
                     data.setdefault("message_id", assistant_record.id)
                     data.setdefault("session_id", session_id)
                     data.setdefault("sequence_no", assistant_record.sequence_no)
+                    resolved_record = assistant_record
+                    try:
+                        updated_record = self._message_repository.update_message(
+                            assistant_record.id,
+                            status=ChatMessageStatus.COMPLETED,
+                            plain_text=plain_text or answer,
+                            content_blocks=content_blocks,
+                            original_query=original_query,
+                            retrieval_query=retrieval_query,
+                            rewrite_applied=rewrite_applied,
+                            retrieval_size=applied_retrieval_size,
+                            temperature=applied_temperature,
+                            finish_reason=finish_reason,
+                            latency_ms=latency_ms,
+                            completed=True,
+                        )
+                        self._message_repository.replace_citations(
+                            assistant_record.id,
+                            self._build_citation_records_from_event(assistant_record.id, event),
+                        )
+                        resolved_record = updated_record or assistant_record
+                    except Exception:
+                        # 协议层已经拿到最终 `done` 结果时，优先保证客户端收到
+                        # `message.end`，避免持久化抖动把一次已完成回答翻译成 error。
+                        LOGGER.warning(
+                            "conversation_chat_stream_persist_done_failed session_id=%s message_id=%s",
+                            session_id,
+                            assistant_record.id,
+                            exc_info=True,
+                        )
+                    completed_at = (
+                        resolved_record.completed_at.isoformat()
+                        if resolved_record.completed_at is not None
+                        else datetime.now(UTC).isoformat()
+                    )
                     data.setdefault("created_at", resolved_record.created_at.isoformat())
                     data.setdefault(
                         "completed_at",
-                        resolved_record.completed_at.isoformat()
-                        if resolved_record.completed_at is not None
-                        else None,
+                        completed_at,
                     )
                     yield ChatStreamEvent(event="done", data=data)
                     continue

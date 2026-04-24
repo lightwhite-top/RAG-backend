@@ -77,6 +77,11 @@ def create_chat_completion(
     if payload.stream:
         original_query = _resolve_original_query(messages)
         if payload.session_id is not None:
+            prepared_current_message = conversation_service.prepare_stream_request(
+                session_id=payload.session_id,
+                messages=messages,
+                current_user=current_user,
+            )
             stream_iterator = iter(
                 conversation_service.stream(
                     session_id=payload.session_id,
@@ -85,6 +90,7 @@ def create_chat_completion(
                     temperature=payload.temperature,
                     current_user=current_user,
                     request_id=request_id,
+                    prepared_current_message=prepared_current_message,
                 )
             )
         else:
@@ -96,6 +102,8 @@ def create_chat_completion(
                     viewer_user_id=current_user.id,
                 )
             )
+        # 预取首个事件，把“首包前就能确定的异常”前移到常规 HTTP 错误响应。
+        stream_iterator = _prime_stream_events(stream_iterator)
         return StreamingResponse(
             _stream_events(
                 request=request,
@@ -216,6 +224,25 @@ def _build_completion_response(
         citations=citations,
         finish_reason=result.finish_reason,
     )
+
+
+def _prime_stream_events(events: Iterator[ChatStreamEvent]) -> Iterator[ChatStreamEvent]:
+    """在返回 `StreamingResponse` 前预取首个事件，避免首包前异常落入 SSE 错误事件。"""
+    try:
+        first_event = next(events)
+    except StopIteration:
+        return iter(())
+    return _prepend_stream_event(first_event=first_event, remaining_events=events)
+
+
+def _prepend_stream_event(
+    *,
+    first_event: ChatStreamEvent,
+    remaining_events: Iterator[ChatStreamEvent],
+) -> Iterator[ChatStreamEvent]:
+    """把已预取的首个事件重新拼回流中，保持既有 SSE 事件顺序稳定。"""
+    yield first_event
+    yield from remaining_events
 
 
 def _stream_events(
@@ -389,13 +416,35 @@ def _stream_events(
 
             if event.event == "done":
                 message_id = _read_optional_str(event.data.get("message_id")) or message_id
-                if not citations:
+                if "citations" in event.data:
                     citations = _build_citation_items(
                         event.data.get("citations", []),
                         request=request,
                         file_url_builder=file_url_builder,
                         url_generated_at=url_generated_at,
                     )
+                retrieval_trace = event.data.get("retrieval_trace")
+                if isinstance(retrieval_trace, dict):
+                    retrieval_mode = _read_optional_str(retrieval_trace.get("mode"))
+                    lane_count = _read_optional_int(retrieval_trace.get("lane_count"))
+                    final_hit_count = _read_optional_int(retrieval_trace.get("final_hit_count"))
+                    evidence_sufficient = _read_optional_bool(
+                        retrieval_trace.get("evidence_sufficient")
+                    )
+                    evidence_reason = _read_optional_str(retrieval_trace.get("evidence_reason"))
+                    deep_rerank_triggered = _read_optional_bool(
+                        retrieval_trace.get("deep_rerank_triggered")
+                    )
+                    retrieval_lanes = _read_trace_lanes_from_payload(retrieval_trace.get("lanes"))
+                evidence_payload = event.data.get("evidence_assessment")
+                if isinstance(evidence_payload, dict):
+                    evidence_sufficient = _read_optional_bool(evidence_payload.get("sufficient"))
+                    evidence_reason = _read_optional_str(evidence_payload.get("reason_code"))
+                applied_retrieval_size = _read_optional_int(
+                    event.data.get("applied_retrieval_size")
+                )
+                applied_temperature = _read_optional_float(event.data.get("applied_temperature"))
+                query_intent = _read_optional_str(event.data.get("query_intent")) or query_intent
                 session_id = _read_optional_str(event.data.get("session_id")) or session_id
                 sequence_no = _read_optional_int(event.data.get("sequence_no")) or sequence_no
                 if not message_started:
@@ -407,6 +456,7 @@ def _stream_events(
                             "original_query": original_query,
                             "retrieval_query": retrieval_query,
                             "rewrite_applied": rewrite_applied,
+                            "query_intent": query_intent,
                             "model": model_name,
                             "session_id": session_id,
                             "sequence_no": sequence_no,
@@ -471,20 +521,8 @@ def _stream_events(
             exc.message,
         )
         if not message_started:
-            yield _encode_sse_event(
-                "message.start",
-                {
-                    "message_id": message_id,
-                    "request_id": request_id,
-                    "original_query": original_query,
-                    "retrieval_query": retrieval_query,
-                    "rewrite_applied": rewrite_applied,
-                    "query_intent": query_intent,
-                    "model": model_name,
-                    "session_id": session_id,
-                    "sequence_no": sequence_no,
-                },
-            )
+            # 首个事件发出前的异常应交回常规 HTTP 错误链路，避免污染 SSE 契约。
+            raise
         yield _encode_sse_event(
             "message.error",
             {
@@ -497,20 +535,8 @@ def _stream_events(
     except Exception:
         LOGGER.exception("chat_stream_failed request_id=%s", request_id)
         if not message_started:
-            yield _encode_sse_event(
-                "message.start",
-                {
-                    "message_id": message_id,
-                    "request_id": request_id,
-                    "original_query": original_query,
-                    "retrieval_query": retrieval_query,
-                    "rewrite_applied": rewrite_applied,
-                    "query_intent": query_intent,
-                    "model": model_name,
-                    "session_id": session_id,
-                    "sequence_no": sequence_no,
-                },
-            )
+            # 仅保留真正流内异常的 `message.error`；首包前异常直接抛回框架处理。
+            raise
         yield _encode_sse_event(
             "message.error",
             {
@@ -984,14 +1010,17 @@ def _build_file_access_payload(
     storage_key: str,
     file_url_builder: AliyunOssFileStore,
     url_generated_at: datetime,
+    allow_presigned_fallback: bool = True,
 ) -> dict[str, str | None]:
-    """优先构造同源文件地址，缺失文件 ID 时回退到预签名地址。"""
+    """优先构造同源文件地址，必要时再回退到预签名地址。"""
     backend_access = build_backend_file_access_payload(
         request,
         file_id=_read_optional_str(file_id) or "",
     )
     if backend_access["url"] is not None:
         return backend_access
+    if not allow_presigned_fallback:
+        return {"url": None, "expires_at": None}
     return _build_presigned_access_payload(
         storage_key=storage_key,
         file_url_builder=file_url_builder,
@@ -1007,6 +1036,7 @@ def _build_image_asset_access_payloads(
     thumbnail_storage_key: str | None,
     file_url_builder: AliyunOssFileStore,
     url_generated_at: datetime,
+    allow_presigned_fallback: bool = True,
 ) -> tuple[dict[str, str | None], dict[str, str | None]]:
     """优先构造同源图片地址，缺失资产 ID 时回退到预签名地址。"""
     normalized_asset_id = asset_id.strip()
@@ -1020,6 +1050,11 @@ def _build_image_asset_access_payloads(
                 request,
                 asset_id=normalized_asset_id,
             ),
+        )
+    if not allow_presigned_fallback:
+        return (
+            {"url": None, "expires_at": None},
+            {"url": None, "expires_at": None},
         )
     return (
         _build_presigned_access_payload(
@@ -1054,8 +1089,10 @@ def _build_chat_image_asset_items(
     request: Request,
     file_url_builder: AliyunOssFileStore,
     url_generated_at: datetime,
+    allow_download_urls: bool = True,
+    allow_presigned_fallback: bool = True,
 ) -> list[ChatImageAssetItem]:
-    """把图片资产统一转换为可渲染结构，并补充预签名 URL。"""
+    """把图片资产统一转换为可渲染结构，并按需补充访问地址。"""
     if not isinstance(raw_assets, list):
         return []
 
@@ -1079,14 +1116,19 @@ def _build_chat_image_asset_items(
             image_type = str(getattr(item, "image_type", ""))
             summary = str(getattr(item, "summary", ""))
             ocr_text = str(getattr(item, "ocr_text", ""))
-        image_access, preview_access = _build_image_asset_access_payloads(
-            request=request,
-            asset_id=asset_id,
-            storage_key=storage_key,
-            thumbnail_storage_key=thumbnail_storage_key,
-            file_url_builder=file_url_builder,
-            url_generated_at=url_generated_at,
-        )
+        if allow_download_urls:
+            image_access, preview_access = _build_image_asset_access_payloads(
+                request=request,
+                asset_id=asset_id,
+                storage_key=storage_key,
+                thumbnail_storage_key=thumbnail_storage_key,
+                file_url_builder=file_url_builder,
+                url_generated_at=url_generated_at,
+                allow_presigned_fallback=allow_presigned_fallback,
+            )
+        else:
+            image_access = {"url": None, "expires_at": None}
+            preview_access = {"url": None, "expires_at": None}
         image_assets.append(
             ChatImageAssetItem(
                 segment_id=segment_id,
@@ -1111,6 +1153,8 @@ def _build_chat_block_asset_items(
     request: Request,
     file_url_builder: AliyunOssFileStore,
     url_generated_at: datetime,
+    allow_download_urls: bool = True,
+    allow_presigned_fallback: bool = True,
 ) -> list[ChatBlockAssetItem]:
     """把正文块中的新旧资产结构统一转换为 `files_assets`。"""
     if not isinstance(raw_assets, list):
@@ -1165,13 +1209,17 @@ def _build_chat_block_asset_items(
 
         asset_access: dict[str, str | None]
         preview_access: dict[str, str | None]
-        if block_type == "source_file":
+        if not allow_download_urls:
+            asset_access = {"url": None, "expires_at": None}
+            preview_access = {"url": None, "expires_at": None}
+        elif block_type == "source_file":
             asset_access = _build_file_access_payload(
                 request=request,
                 file_id=asset_id,
                 storage_key=storage_key,
                 file_url_builder=file_url_builder,
                 url_generated_at=url_generated_at,
+                allow_presigned_fallback=allow_presigned_fallback,
             )
             preview_access = {"url": None, "expires_at": None}
         elif block_type == "image_gallery":
@@ -1182,6 +1230,7 @@ def _build_chat_block_asset_items(
                 thumbnail_storage_key=preview_storage_key,
                 file_url_builder=file_url_builder,
                 url_generated_at=url_generated_at,
+                allow_presigned_fallback=allow_presigned_fallback,
             )
         else:
             asset_access = _build_presigned_access_payload(
