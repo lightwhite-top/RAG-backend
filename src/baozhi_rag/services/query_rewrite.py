@@ -21,8 +21,9 @@ class QueryRewriteService:
     """对明显依赖上文的短追问做轻量规则改写。"""
 
     _REWRITE_TRIGGER_PATTERN = re.compile(
-        r"(这个|那个|它|其|刚才|上面|上一|前面|继续|再说|第二列|第一列|第二个|上一个|这里|那里)"
+        r"(这个|那个|它|其|刚才|上面|上一|前面|继续|再说|第二列|第一列|第二个|上一个|这里|那里|呢$|那.+呢$)"
     )
+    _STRUCTURE_FOLLOWUP_PATTERN = re.compile(r"(第二列|第一列|下一条边界规则|边界规则)")
 
     def __init__(self, *, max_rewrite_query_length: int = 24) -> None:
         self._max_rewrite_query_length = max(1, max_rewrite_query_length)
@@ -52,7 +53,17 @@ class QueryRewriteService:
                 rewrite_applied=False,
             )
 
-        rewritten_query = f"{previous_user_query}。补充问题：{original_query}".strip()
+        previous_assistant_answer = self._find_previous_assistant_answer(
+            messages,
+            current_query=original_query,
+        )
+        if previous_assistant_answer and self._STRUCTURE_FOLLOWUP_PATTERN.search(original_query):
+            rewritten_query = (
+                f"{previous_user_query}。上一轮回答：{previous_assistant_answer}。"
+                f"补充问题：{original_query}"
+            ).strip()
+        else:
+            rewritten_query = f"{previous_user_query}。补充问题：{original_query}".strip()
         if rewritten_query == original_query:
             return QueryRewriteResult(
                 original_query=original_query,
@@ -71,8 +82,8 @@ class QueryRewriteService:
         normalized_query = query_text.strip()
         if not normalized_query:
             return False
-        if len(normalized_query) <= self._max_rewrite_query_length:
-            return True
+        if len(normalized_query) > self._max_rewrite_query_length:
+            return bool(self._REWRITE_TRIGGER_PATTERN.search(normalized_query))
         return bool(self._REWRITE_TRIGGER_PATTERN.search(normalized_query))
 
     def _find_previous_user_query(
@@ -90,5 +101,22 @@ class QueryRewriteService:
                 seen_current = True
                 continue
             if seen_current:
+                return message.content.strip()
+        return ""
+
+    def _find_previous_assistant_answer(
+        self,
+        messages: list[ChatMessage],
+        *,
+        current_query: str,
+    ) -> str:
+        """查找当前查询之前最近的一条助手回答。"""
+        seen_current = False
+        for message in reversed(messages):
+            if not seen_current:
+                if message.role == "user" and message.content == current_query:
+                    seen_current = True
+                continue
+            if message.role == "assistant":
                 return message.content.strip()
         return ""

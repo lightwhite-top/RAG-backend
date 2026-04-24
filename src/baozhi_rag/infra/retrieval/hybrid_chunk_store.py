@@ -26,7 +26,9 @@ from baozhi_rag.services.chunk_search import ChunkSearchHit, ChunkSearchRequest,
 from baozhi_rag.services.document_chunking import DocumentChunk
 from baozhi_rag.services.retrieval_signals import (
     build_version_chain_key,
+    extract_query_file_anchor,
     extract_version_rank,
+    matches_query_file_anchor,
     query_prefers_old_version,
 )
 
@@ -318,6 +320,7 @@ class HybridChunkStore(ChunkSearchStore):
                 size=request.size,
                 query_text=request.query_text,
                 query_intent=request.query_intent,
+                retrieval_mode=request.retrieval_mode,
                 lexical_weight=lexical_weight,
                 vector_weight=vector_weight,
             )
@@ -352,6 +355,7 @@ class HybridChunkStore(ChunkSearchStore):
         size: int,
         query_text: str,
         query_intent: str,
+        retrieval_mode: str,
         lexical_weight: float,
         vector_weight: float,
     ) -> list[ChunkSearchHit]:
@@ -405,15 +409,23 @@ class HybridChunkStore(ChunkSearchStore):
                     score=round(fused_scores[chunk_id], 6),
                 )
             )
-        return self._collapse_hits(hits=fused_hits, query_text=query_text)[:size]
+        return self._collapse_hits(
+            hits=fused_hits,
+            query_text=query_text,
+            retrieval_mode=retrieval_mode,
+        )[:size]
 
     def _collapse_hits(
         self,
         *,
         hits: list[ChunkSearchHit],
         query_text: str,
+        retrieval_mode: str,
     ) -> list[ChunkSearchHit]:
         """合并同文件重复命中，并在版本链内保留更合适的版本。"""
+        if retrieval_mode == "chat":
+            return self._collapse_chat_hits(hits)
+
         collapsed_by_file: list[ChunkSearchHit] = []
         seen_file_ids: set[str] = set()
         for hit in hits:
@@ -443,6 +455,23 @@ class HybridChunkStore(ChunkSearchStore):
             reverse=True,
         )
 
+    def _collapse_chat_hits(
+        self,
+        hits: list[ChunkSearchHit],
+    ) -> list[ChunkSearchHit]:
+        """聊天场景保留同文件多段证据，避免过早丢失上下文。"""
+        collapsed_hits: list[ChunkSearchHit] = []
+        per_file_count: dict[str, int] = {}
+
+        for hit in hits:
+            current_count = per_file_count.get(hit.file_id, 0)
+            if current_count >= 2:
+                continue
+            per_file_count[hit.file_id] = current_count + 1
+            collapsed_hits.append(hit)
+
+        return collapsed_hits
+
     def _select_preferred_version_hit(
         self,
         *,
@@ -456,6 +485,12 @@ class HybridChunkStore(ChunkSearchStore):
             key=lambda item: (item.score or 0.0, item.file_id),
             reverse=True,
         )
+        query_file_anchor = extract_query_file_anchor(query_text)
+        if query_file_anchor is not None:
+            for hit in ordered_hits:
+                if matches_query_file_anchor(query_file_anchor, hit.source_filename):
+                    return hit
+
         preferred_hit = ordered_hits[0]
         preferred_rank = extract_version_rank(preferred_hit.source_filename)
 

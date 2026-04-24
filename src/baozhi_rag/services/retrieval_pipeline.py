@@ -85,6 +85,7 @@ class RetrievalPipelineService:
                 vector_candidate_size=lane.vector_candidate_size,
                 lexical_rrf_weight=lane.lexical_rrf_weight,
                 vector_rrf_weight=lane.vector_rrf_weight,
+                retrieval_mode=retrieval_plan.mode,
                 viewer_user_id=viewer_user_id,
             )
             lane_executions.append(

@@ -6,17 +6,20 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from baozhi_rag.services.retrieval_signals import (
-    extract_query_terms as extract_signal_query_terms,
-)
-from baozhi_rag.services.retrieval_signals import (
+    extract_query_file_anchor,
     extract_version_rank,
+    matches_query_file_anchor,
     normalize_filename_title,
     normalize_text,
     query_prefers_old_version,
 )
+from baozhi_rag.services.retrieval_signals import (
+    extract_query_terms as extract_signal_query_terms,
+)
 
 if TYPE_CHECKING:
     from baozhi_rag.services.chunk_search import ChunkSearchHit
+    from baozhi_rag.services.retrieval_signals import QueryFileAnchor
 
 
 def _extract_query_terms(text: str) -> list[str]:
@@ -41,6 +44,7 @@ class FastRerankService:
         query_terms = _extract_query_terms(query_text)
         normalized_query_text = normalize_text(query_text)
         prefers_old_version = query_prefers_old_version(query_text)
+        query_file_anchor = extract_query_file_anchor(query_text)
         rescored_hits: list[ChunkSearchHit] = []
         for hit in hits:
             rescored_hits.append(
@@ -53,6 +57,7 @@ class FastRerankService:
                             query_intent=query_intent,
                             normalized_query_text=normalized_query_text,
                             prefers_old_version=prefers_old_version,
+                            query_file_anchor=query_file_anchor,
                         ),
                         6,
                     ),
@@ -73,6 +78,7 @@ class FastRerankService:
         query_intent: str,
         normalized_query_text: str,
         prefers_old_version: bool,
+        query_file_anchor: QueryFileAnchor | None,
     ) -> float:
         """计算启发式快速重排分数。"""
         base_score = hit.score or 0.0
@@ -97,6 +103,12 @@ class FastRerankService:
         if normalized_query_text and normalized_query_text in source_filename_text:
             score += 0.12
 
+        # 显式点名文件名时，把目标文件优先级明显抬高，降低相似文件抢占引用的概率。
+        if query_file_anchor is not None:
+            score += (
+                0.3 if matches_query_file_anchor(query_file_anchor, hit.source_filename) else -0.12
+            )
+
         version_rank = extract_version_rank(hit.source_filename)
         if version_rank > 0:
             if prefers_old_version:
@@ -106,6 +118,10 @@ class FastRerankService:
 
         if query_intent == "structured" and hit.content_type == "table":
             score += 0.08
+        if query_intent == "structured" and hit.chunk_type == "image_semantic":
+            score += 0.18
+        if query_intent == "structured" and hit.image_assets:
+            score += 0.12
         if query_intent == "document_location" and heading_hits:
             score += 0.08
         if query_intent == "procedure" and heading_hits:

@@ -679,11 +679,27 @@ class ElasticsearchChunkStore:
             )
             structure_queries.append(
                 {
+                    "constant_score": {
+                        "filter": {"term": {"chunk_type": "image_semantic"}},
+                        "boost": 3.0,
+                    }
+                }
+            )
+            structure_queries.append(
+                {
                     "match": {
                         "table_schema_text": {
                             "query": request.query_text,
                             "boost": 3.2,
                         }
+                    }
+                }
+            )
+            structure_queries.append(
+                {
+                    "constant_score": {
+                        "filter": {"term": {"source_type": "ocr"}},
+                        "boost": 1.8,
                     }
                 }
             )

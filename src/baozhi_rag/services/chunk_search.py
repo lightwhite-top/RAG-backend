@@ -18,7 +18,19 @@ from baozhi_rag.services.retrieval_pipeline import (
     RetrievalPipelineExecutionResult,
     RetrievalPipelineService,
 )
-from baozhi_rag.services.retrieval_plan import RetrievalLanePlan, RetrievalPlan, RetrievalPlanner
+from baozhi_rag.services.retrieval_plan import (
+    RetrievalLanePlan,
+    RetrievalLaneSeed,
+    RetrievalPlan,
+    RetrievalPlanner,
+)
+from baozhi_rag.services.retrieval_signals import (
+    QueryFileAnchor,
+    belongs_to_query_file_family,
+    extract_query_file_anchor,
+    extract_query_terms,
+    matches_query_file_anchor,
+)
 from baozhi_rag.services.retrieval_trace import RetrievalTrace, RetrievalTraceService
 from baozhi_rag.services.term_matching import MaximumMatchingTermMatcher
 
@@ -57,6 +69,7 @@ class ChunkSearchRequest:
     vector_candidate_size: int | None = None
     lexical_rrf_weight: float | None = None
     vector_rrf_weight: float | None = None
+    retrieval_mode: str = "search"
     viewer_user_id: str = ""
 
 
@@ -120,6 +133,51 @@ class ChunkSearchStore(Protocol):
 
 class ChunkSearchService:
     """编排查询词分解、向量化、权限过滤与元数据补齐。"""
+
+    _NEGATIVE_EVIDENCE_QUERY_MARKERS = (
+        "有没有",
+        "是否",
+        "有无",
+        "是否允许",
+        "是否明确",
+        "有没有写明",
+        "有没有规定",
+        "是否要求",
+        "是否写了",
+        "有没有提到",
+    )
+    _GUIDANCE_QUERY_MARKERS = (
+        "证据不足时",
+        "怎么说",
+        "如何表述",
+        "表述要求",
+        "边界条件",
+        "边界规则",
+        "下一条边界规则",
+    )
+    _NEGATIVE_QUERY_STOP_TERMS = {
+        "有没有",
+        "是否",
+        "有无",
+        "允许",
+        "明确",
+        "写明",
+        "规定",
+        "要求",
+        "提及",
+        "内容",
+        "文档",
+        "材料",
+        "知识库",
+        "规则",
+        "相关",
+        "当前",
+        "现有",
+        "所有",
+        "必须",
+        "需要",
+        "文件名",
+    }
 
     def __init__(
         self,
@@ -212,9 +270,30 @@ class ChunkSearchService:
             query_intent=query_intent,
             hits=visible_pipeline_result.hits,
         )
-        evidence_assessment = self._evidence_sufficiency_service.assess(reranked_hits)
+        query_file_anchor = extract_query_file_anchor(normalized_query)
+        anchored_execution_result, reranked_hits, anchor_reason_code = (
+            self._apply_query_file_anchor_constraint(
+                query_file_anchor=query_file_anchor,
+                hydrated_execution_result=hydrated_pipeline_result,
+                visible_execution_result=visible_pipeline_result,
+                reranked_hits=reranked_hits,
+            )
+        )
+        if self._should_suppress_negative_query_hits(
+            query_text=normalized_query,
+            hits=reranked_hits,
+        ):
+            reranked_hits = []
+            anchor_reason_code = anchor_reason_code or "no_evidence"
+        evidence_assessment = self._evidence_sufficiency_service.assess(
+            reranked_hits,
+            override_reason_code=anchor_reason_code,
+            top_score_override=visible_pipeline_result.hits[0].score
+            if visible_pipeline_result.hits
+            else None,
+        )
         retrieval_trace = self._retrieval_trace_service.build(
-            execution_result=visible_pipeline_result,
+            execution_result=anchored_execution_result,
             final_hits=reranked_hits,
             evidence_assessment=evidence_assessment,
         )
@@ -224,6 +303,168 @@ class ChunkSearchService:
             retrieval_trace=retrieval_trace,
             evidence_assessment=evidence_assessment,
         )
+
+    def _should_suppress_negative_query_hits(
+        self,
+        *,
+        query_text: str,
+        hits: list[ChunkSearchHit],
+    ) -> bool:
+        """对“有没有/是否”类问题压制不具备直接支撑能力的弱相关命中。"""
+        if not hits:
+            return False
+        if self._query_is_guidance_or_boundary_request(query_text):
+            return False
+        if not self._query_requests_negative_evidence_judgement(query_text):
+            return False
+        return not self._hits_provide_direct_negative_query_support(
+            query_text=query_text,
+            hits=hits,
+        )
+
+    def _query_requests_negative_evidence_judgement(self, query_text: str) -> bool:
+        """判断查询是否在确认“文档中是否存在某项明确要求”。"""
+        normalized_query = " ".join(query_text.split())
+        return any(marker in normalized_query for marker in self._NEGATIVE_EVIDENCE_QUERY_MARKERS)
+
+    def _query_is_guidance_or_boundary_request(self, query_text: str) -> bool:
+        """判断查询是否是在询问治理口径/边界规则。"""
+        normalized_query = " ".join(query_text.split())
+        return any(marker in normalized_query for marker in self._GUIDANCE_QUERY_MARKERS)
+
+    def _hits_provide_direct_negative_query_support(
+        self,
+        *,
+        query_text: str,
+        hits: list[ChunkSearchHit],
+    ) -> bool:
+        """判断命中结果是否真正覆盖了负样本查询里的核心约束词。"""
+        normalized_query = " ".join(query_text.split())
+        query_file_anchor = extract_query_file_anchor(normalized_query)
+        query_without_anchor = (
+            normalized_query.replace(query_file_anchor.raw_filename, " ")
+            if query_file_anchor is not None
+            else normalized_query
+        )
+        focus_terms = [
+            term.casefold()
+            for term in extract_query_terms(query_without_anchor)
+            if len(term.strip()) >= 2 and term.casefold() not in self._NEGATIVE_QUERY_STOP_TERMS
+        ]
+        if not focus_terms:
+            return False
+
+        hit_text = " ".join(
+            " ".join(
+                filter(
+                    None,
+                    [
+                        hit.source_filename,
+                        " ".join(hit.heading_path),
+                        hit.section_title or "",
+                        hit.content,
+                    ],
+                )
+            ).casefold()
+            for hit in hits[:5]
+        )
+        matched_terms = {term for term in focus_terms if term in hit_text}
+        return matched_terms.issuperset(focus_terms)
+
+    def _apply_query_file_anchor_constraint(
+        self,
+        *,
+        query_file_anchor: QueryFileAnchor | None,
+        hydrated_execution_result: RetrievalPipelineExecutionResult,
+        visible_execution_result: RetrievalPipelineExecutionResult,
+        reranked_hits: list[ChunkSearchHit],
+    ) -> tuple[RetrievalPipelineExecutionResult, list[ChunkSearchHit], str | None]:
+        """对显式点名文件的查询执行最终文件约束，阻止无关文件兜底作答。"""
+        if query_file_anchor is None:
+            return visible_execution_result, reranked_hits, None
+
+        anchored_hits = self._filter_hits_for_query_file_anchor(
+            hits=reranked_hits,
+            query_file_anchor=query_file_anchor,
+        )
+        if anchored_hits:
+            anchored_execution_result = self._filter_execution_result_for_query_file_anchor(
+                execution_result=visible_execution_result,
+                query_file_anchor=query_file_anchor,
+            )
+            return anchored_execution_result, anchored_hits, None
+
+        anchored_execution_result = self._filter_execution_result_for_query_file_anchor(
+            execution_result=visible_execution_result,
+            query_file_anchor=query_file_anchor,
+        )
+        return (
+            anchored_execution_result,
+            [],
+            self._resolve_query_file_anchor_miss_reason(
+                query_file_anchor=query_file_anchor,
+                hydrated_hits=hydrated_execution_result.hits,
+                visible_hits=visible_execution_result.hits,
+            ),
+        )
+
+    def _filter_execution_result_for_query_file_anchor(
+        self,
+        *,
+        execution_result: RetrievalPipelineExecutionResult,
+        query_file_anchor: QueryFileAnchor,
+    ) -> RetrievalPipelineExecutionResult:
+        """同步过滤全局命中和各 lane 命中，保持 trace 与最终结果一致。"""
+        return replace(
+            execution_result,
+            lane_executions=[
+                replace(
+                    lane_execution,
+                    hits=self._filter_hits_for_query_file_anchor(
+                        hits=lane_execution.hits,
+                        query_file_anchor=query_file_anchor,
+                    ),
+                )
+                for lane_execution in execution_result.lane_executions
+            ],
+            hits=self._filter_hits_for_query_file_anchor(
+                hits=execution_result.hits,
+                query_file_anchor=query_file_anchor,
+            ),
+        )
+
+    def _filter_hits_for_query_file_anchor(
+        self,
+        *,
+        hits: list[ChunkSearchHit],
+        query_file_anchor: QueryFileAnchor,
+    ) -> list[ChunkSearchHit]:
+        """只保留满足显式目标文件锚点的命中结果。"""
+        return [
+            hit for hit in hits if matches_query_file_anchor(query_file_anchor, hit.source_filename)
+        ]
+
+    def _resolve_query_file_anchor_miss_reason(
+        self,
+        *,
+        query_file_anchor: QueryFileAnchor,
+        hydrated_hits: list[ChunkSearchHit],
+        visible_hits: list[ChunkSearchHit],
+    ) -> str:
+        """区分“目标文件不可见”和“版本/文件锚点不匹配”两类失败原因。"""
+        if any(
+            matches_query_file_anchor(query_file_anchor, hit.source_filename)
+            for hit in hydrated_hits
+        ):
+            return "target_file_inaccessible"
+
+        if query_file_anchor.version_rank is not None and any(
+            belongs_to_query_file_family(query_file_anchor, hit.source_filename)
+            for hit in visible_hits
+        ):
+            return "target_file_version_mismatch"
+
+        return "target_file_mismatch"
 
     def _build_retrieval_plan(
         self,
@@ -242,13 +483,28 @@ class ChunkSearchService:
                 retrieval_mode=retrieval_mode,
             )
 
-        # 统一扩展检索框架由 planner 内部接管，ChunkSearchService 仅负责把
-        # query/query_intent/mode/size 传入，避免在服务层硬编码 MQE/HyDE 细节。
-        return self._retrieval_planner.build(
+        default_plan = self._retrieval_planner.build(
             query_text=query_text,
             query_intent=query_intent,
             result_size=size,
             mode=retrieval_mode,
+        )
+        anchor_lane_seeds = self._build_query_file_anchor_lane_seeds(query_text=query_text)
+        if not anchor_lane_seeds:
+            return default_plan
+
+        # 统一扩展检索框架由 planner 内部接管，ChunkSearchService 仅负责把
+        # query/query_intent/mode/size 传入，避免在服务层硬编码 MQE/HyDE 细节。
+        anchor_plan = self._retrieval_planner.build(
+            query_text=query_text,
+            query_intent=query_intent,
+            result_size=size,
+            mode=retrieval_mode,
+            lane_seeds=anchor_lane_seeds,
+        )
+        return replace(
+            default_plan,
+            lanes=default_plan.lanes + anchor_plan.lanes,
         )
 
     def _build_default_retrieval_plan(
@@ -277,6 +533,51 @@ class ChunkSearchService:
                 )
             ],
         )
+
+    def _build_query_file_anchor_lane_seeds(
+        self,
+        *,
+        query_text: str,
+    ) -> list[RetrievalLaneSeed] | None:
+        """为显式点名文件的查询补充 filename-focused 检索 lane。"""
+        query_file_anchor = extract_query_file_anchor(query_text)
+        if query_file_anchor is None:
+            return None
+
+        lane_seeds = [
+            RetrievalLaneSeed(
+                lane_id="filename-anchor",
+                lexical_query_text=query_file_anchor.raw_filename,
+                embedding_source_text=query_file_anchor.raw_filename,
+                source_strategy="filename_anchor",
+                source_query=query_text,
+                strategy_label="filename_anchor",
+                lane_weight=1.15,
+                lexical_candidate_size=30,
+                vector_candidate_size=0,
+                lexical_rrf_weight=1.4,
+                vector_rrf_weight=0.0,
+                query_intent="document_location",
+            )
+        ]
+        if query_file_anchor.normalized_title:
+            lane_seeds.append(
+                RetrievalLaneSeed(
+                    lane_id="title-anchor",
+                    lexical_query_text=query_file_anchor.normalized_title,
+                    embedding_source_text=query_file_anchor.normalized_title,
+                    source_strategy="title_anchor",
+                    source_query=query_text,
+                    strategy_label="title_anchor",
+                    lane_weight=1.0,
+                    lexical_candidate_size=24,
+                    vector_candidate_size=0,
+                    lexical_rrf_weight=1.2,
+                    vector_rrf_weight=0.0,
+                    query_intent="document_location",
+                )
+            )
+        return lane_seeds
 
     def _execute_retrieval_plan(
         self,

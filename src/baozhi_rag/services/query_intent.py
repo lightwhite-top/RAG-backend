@@ -9,7 +9,7 @@ class QueryIntentService:
     """根据规则识别查询主意图。"""
 
     _STRUCTURED_INTENT_PATTERN = re.compile(
-        r"(表格|图片|截图|配图|图示|流程图|印章|ocr)",
+        r"(表格|图片|图像|截图|配图|图示|流程图|印章|ocr|影像|扫描|扫描件)",
         re.IGNORECASE,
     )
     _COMPARISON_INTENT_PATTERN = re.compile(

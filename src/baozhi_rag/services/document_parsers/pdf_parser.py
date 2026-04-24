@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from statistics import median
-from typing import cast
+from typing import Any, cast
 
 import pymupdf
 from PIL import Image
@@ -31,6 +32,7 @@ class PdfParsedImageAsset:
     image_bytes: bytes
     width: int | None = None
     height: int | None = None
+    bbox: BoundingBox | None = None
 
 
 @dataclass
@@ -402,6 +404,7 @@ class PdfDocumentParser:
     ) -> list[PdfParsedImageAsset]:
         """抽取页内原始图片对象。"""
         assets: list[PdfParsedImageAsset] = []
+        seen_asset_keys: set[tuple[str, tuple[float, float, float, float] | None]] = set()
         asset_index = 1
         for image_info in page.get_images(full=True):
             if not image_info:
@@ -416,26 +419,204 @@ class PdfDocumentParser:
                 continue
             extension = f".{str(extracted.get('ext', 'bin')).strip() or 'bin'}"
             content_type = mimetypes.guess_type(f"image{extension}", strict=False)[0]
-            rects = page.get_image_rects(xref)
-            if not rects:
-                rects = [page.rect]
-            for _rect in rects:
-                source_anchor = f"p:{page_number}:image:{asset_index}"
-                assets.append(
-                    PdfParsedImageAsset(
-                        segment_id=source_anchor,
-                        asset_id=source_anchor,
-                        asset_index=asset_index,
-                        source_anchor=source_anchor,
-                        content_type=content_type or "application/octet-stream",
-                        extension=extension,
-                        image_bytes=image_bytes,
-                        width=self._safe_int(extracted.get("width")),
-                        height=self._safe_int(extracted.get("height")),
-                    )
+            try:
+                rects = page.get_image_rects(xref)
+            except Exception:  # pragma: no cover - 第三方异常类型不稳定
+                rects = []
+            bbox_list = [self._read_bbox(rect) for rect in rects]
+            normalized_bboxes: list[BoundingBox | None] = [
+                bbox for bbox in bbox_list if bbox is not None
+            ]
+            if not normalized_bboxes:
+                page_bbox = self._read_bbox(page.rect)
+                normalized_bboxes = [page_bbox] if page_bbox is not None else [None]
+            for bbox in normalized_bboxes:
+                asset_index = self._append_page_image_asset(
+                    assets=assets,
+                    seen_asset_keys=seen_asset_keys,
+                    asset_index=asset_index,
+                    page_number=page_number,
+                    image_bytes=image_bytes,
+                    content_type=content_type or "application/octet-stream",
+                    extension=extension,
+                    width=self._safe_int(extracted.get("width")),
+                    height=self._safe_int(extracted.get("height")),
+                    bbox=bbox,
                 )
-                asset_index += 1
+
+        return self._extract_page_image_assets_from_blocks(
+            page=page,
+            page_number=page_number,
+            assets=assets,
+            seen_asset_keys=seen_asset_keys,
+            next_asset_index=asset_index,
+        )
+
+    def _extract_page_image_assets_from_blocks(
+        self,
+        *,
+        page: pymupdf.Page,
+        page_number: int,
+        assets: list[PdfParsedImageAsset],
+        seen_asset_keys: set[tuple[str, tuple[float, float, float, float] | None]],
+        next_asset_index: int,
+    ) -> list[PdfParsedImageAsset]:
+        """用 text-dict 图片块作为兜底，补齐 `get_images()` 可能漏掉的图片。"""
+        try:
+            page_dict = page.get_text("dict")
+        except Exception:  # pragma: no cover - 第三方异常类型不稳定
+            return assets
+        if not isinstance(page_dict, dict):
+            return assets
+
+        asset_index = next_asset_index
+        page_bbox = self._read_bbox(page.rect)
+        for raw_block in page_dict.get("blocks", []):
+            if not isinstance(raw_block, dict) or int(raw_block.get("type", 0)) != 1:
+                continue
+
+            image_bytes = raw_block.get("image")
+            if not isinstance(image_bytes, bytes) or not image_bytes:
+                continue
+
+            extension = f".{str(raw_block.get('ext', 'bin')).strip() or 'bin'}"
+            content_type = mimetypes.guess_type(f"image{extension}", strict=False)[0]
+            block_bbox = self._read_bbox(raw_block.get("bbox"))
+            if (
+                page_bbox is not None
+                and block_bbox is not None
+                and self._replace_page_bbox_placeholder_asset(
+                    assets=assets,
+                    seen_asset_keys=seen_asset_keys,
+                    image_bytes=image_bytes,
+                    page_bbox=page_bbox,
+                    actual_bbox=block_bbox,
+                    content_type=content_type or "application/octet-stream",
+                    extension=extension,
+                    width=self._safe_int(raw_block.get("width")),
+                    height=self._safe_int(raw_block.get("height")),
+                )
+            ):
+                continue
+            asset_index = self._append_page_image_asset(
+                assets=assets,
+                seen_asset_keys=seen_asset_keys,
+                asset_index=asset_index,
+                page_number=page_number,
+                image_bytes=image_bytes,
+                content_type=content_type or "application/octet-stream",
+                extension=extension,
+                width=self._safe_int(raw_block.get("width")),
+                height=self._safe_int(raw_block.get("height")),
+                bbox=block_bbox,
+            )
+
         return assets
+
+    def _replace_page_bbox_placeholder_asset(
+        self,
+        *,
+        assets: list[PdfParsedImageAsset],
+        seen_asset_keys: set[tuple[str, tuple[float, float, float, float] | None]],
+        image_bytes: bytes,
+        page_bbox: BoundingBox,
+        actual_bbox: BoundingBox,
+        content_type: str,
+        extension: str,
+        width: int | None,
+        height: int | None,
+    ) -> bool:
+        """把仅能定位到整页的占位图片资产升级为更精确的图片块坐标。"""
+        placeholder_key = self._build_image_asset_dedupe_key(
+            image_bytes=image_bytes,
+            bbox=page_bbox,
+        )
+        actual_key = self._build_image_asset_dedupe_key(
+            image_bytes=image_bytes,
+            bbox=actual_bbox,
+        )
+        if placeholder_key not in seen_asset_keys or actual_key in seen_asset_keys:
+            return False
+
+        for index, asset in enumerate(assets):
+            if (
+                self._build_image_asset_dedupe_key(
+                    image_bytes=asset.image_bytes,
+                    bbox=asset.bbox,
+                )
+                != placeholder_key
+            ):
+                continue
+
+            assets[index] = replace(
+                asset,
+                content_type=content_type,
+                extension=extension,
+                width=width if width is not None else asset.width,
+                height=height if height is not None else asset.height,
+                bbox=actual_bbox,
+            )
+            seen_asset_keys.discard(placeholder_key)
+            seen_asset_keys.add(actual_key)
+            return True
+
+        return False
+
+    def _append_page_image_asset(
+        self,
+        *,
+        assets: list[PdfParsedImageAsset],
+        seen_asset_keys: set[tuple[str, tuple[float, float, float, float] | None]],
+        asset_index: int,
+        page_number: int,
+        image_bytes: bytes,
+        content_type: str,
+        extension: str,
+        width: int | None,
+        height: int | None,
+        bbox: BoundingBox | None,
+    ) -> int:
+        """向图片资产列表中追加去重后的单个图片。"""
+        dedupe_key = self._build_image_asset_dedupe_key(image_bytes=image_bytes, bbox=bbox)
+        if dedupe_key in seen_asset_keys:
+            return asset_index
+
+        seen_asset_keys.add(dedupe_key)
+        source_anchor = f"p:{page_number}:image:{asset_index}"
+        assets.append(
+            PdfParsedImageAsset(
+                segment_id=source_anchor,
+                asset_id=source_anchor,
+                asset_index=asset_index,
+                source_anchor=source_anchor,
+                content_type=content_type,
+                extension=extension,
+                image_bytes=image_bytes,
+                width=width,
+                height=height,
+                bbox=bbox,
+            )
+        )
+        return asset_index + 1
+
+    @staticmethod
+    def _build_image_asset_dedupe_key(
+        *,
+        image_bytes: bytes,
+        bbox: BoundingBox | None,
+    ) -> tuple[str, tuple[float, float, float, float] | None]:
+        """为图片资产构造稳定去重键，避免主路径与兜底路径重复挂载。"""
+        bbox_key = (
+            (
+                round(bbox[0], 3),
+                round(bbox[1], 3),
+                round(bbox[2], 3),
+                round(bbox[3], 3),
+            )
+            if bbox is not None
+            else None
+        )
+        return hashlib.sha1(image_bytes).hexdigest(), bbox_key
 
     def _attach_image_assets_to_segments(
         self,
@@ -449,34 +630,106 @@ class PdfDocumentParser:
             return
 
         if not segments:
-            synthetic_segment_id = f"p:{page_number}:block:image"
-            segments.append(
-                PdfParsedSegment(
-                    segment_id=synthetic_segment_id,
-                    content=f"第{page_number}页图片区域",
-                    segment_type="paragraph",
-                    heading_context="",
-                    page_number=page_number,
-                    source_anchor=synthetic_segment_id,
-                    image_assets=[
-                        replace(asset, segment_id=synthetic_segment_id) for asset in image_assets
-                    ],
-                )
+            page_fallback_segment = self._ensure_image_fallback_segment(
+                segments=segments,
+                page_number=page_number,
+            )
+            page_fallback_segment.image_assets.extend(
+                replace(asset, segment_id=page_fallback_segment.segment_id)
+                for asset in image_assets
             )
             return
 
+        fallback_segment: PdfParsedSegment | None = None
         for asset in image_assets:
-            target_segment = min(
-                segments,
-                key=lambda segment: self._segment_distance(segment_bbox=segment.bbox),
+            target_segment = self._select_image_asset_target_segment(
+                segments=segments,
+                asset=asset,
             )
+            if target_segment is None:
+                if fallback_segment is None:
+                    fallback_segment = self._ensure_image_fallback_segment(
+                        segments=segments,
+                        page_number=page_number,
+                    )
+                target_segment = fallback_segment
             target_segment.image_assets.append(replace(asset, segment_id=target_segment.segment_id))
 
-    def _segment_distance(self, *, segment_bbox: BoundingBox | None) -> float:
-        """为图片资产选最近片段时的保守距离。"""
-        if segment_bbox is None:
+    def _ensure_image_fallback_segment(
+        self,
+        *,
+        segments: list[PdfParsedSegment],
+        page_number: int,
+    ) -> PdfParsedSegment:
+        """确保当前页存在可挂载图片的兜底片段。"""
+        synthetic_segment_id = f"p:{page_number}:block:image"
+        for segment in segments:
+            if segment.segment_id == synthetic_segment_id:
+                return segment
+
+        fallback_segment = PdfParsedSegment(
+            segment_id=synthetic_segment_id,
+            content=f"第{page_number}页图片区域",
+            segment_type="paragraph",
+            heading_context="",
+            page_number=page_number,
+            source_anchor=synthetic_segment_id,
+        )
+        segments.append(fallback_segment)
+        return fallback_segment
+
+    def _select_image_asset_target_segment(
+        self,
+        *,
+        segments: list[PdfParsedSegment],
+        asset: PdfParsedImageAsset,
+    ) -> PdfParsedSegment | None:
+        """优先按空间位置选择最接近的片段，失败时再回退。"""
+        segments_with_bbox = [segment for segment in segments if segment.bbox is not None]
+        asset_bbox = asset.bbox
+        if asset_bbox is not None and segments_with_bbox:
+            return min(
+                segments_with_bbox,
+                key=lambda segment: self._bbox_distance(
+                    source_bbox=asset_bbox,
+                    target_bbox=segment.bbox,
+                ),
+            )
+
+        if len(segments) == 1:
+            return segments[0]
+        if len(segments_with_bbox) == 1:
+            return segments_with_bbox[0]
+        return None
+
+    @staticmethod
+    def _bbox_distance(
+        *,
+        source_bbox: BoundingBox,
+        target_bbox: BoundingBox | None,
+    ) -> float:
+        """计算图片框与文本框之间的保守距离，优先命中重叠或相邻区域。"""
+        if target_bbox is None:
             return float("inf")
-        return segment_bbox[1]
+
+        horizontal_gap = max(
+            target_bbox[0] - source_bbox[2],
+            source_bbox[0] - target_bbox[2],
+            0.0,
+        )
+        vertical_gap = max(
+            target_bbox[1] - source_bbox[3],
+            source_bbox[1] - target_bbox[3],
+            0.0,
+        )
+        source_center_x = (source_bbox[0] + source_bbox[2]) / 2
+        source_center_y = (source_bbox[1] + source_bbox[3]) / 2
+        target_center_x = (target_bbox[0] + target_bbox[2]) / 2
+        target_center_y = (target_bbox[1] + target_bbox[3]) / 2
+        center_offset = abs(source_center_x - target_center_x) + abs(
+            source_center_y - target_center_y
+        )
+        return horizontal_gap + vertical_gap + center_offset * 0.01
 
     def _resolve_heading_level(
         self,
@@ -508,7 +761,14 @@ class PdfDocumentParser:
         """按 OCR 返回的 bbox 裁切区域。"""
         with Image.open(BytesIO(image_bytes)) as image:
             x0, y0, x1, y1 = bbox
-            cropped = image.crop((max(x0, 0), max(y0, 0), max(x1, 0), max(y1, 0)))
+            left = max(min(x0, x1), 0.0)
+            top = max(min(y0, y1), 0.0)
+            right = min(max(x0, x1), float(image.width))
+            bottom = min(max(y0, y1), float(image.height))
+            if right <= left or bottom <= top:
+                # OCR 返回异常框时回退整图，避免表格二次 OCR 直接丢失内容。
+                return image_bytes
+            cropped = image.crop((left, top, right, bottom))
             buffer = BytesIO()
             cropped.save(buffer, format="PNG")
             return buffer.getvalue()
@@ -567,17 +827,42 @@ class PdfDocumentParser:
     @staticmethod
     def _read_bbox(raw_bbox: object) -> BoundingBox | None:
         """安全读取 bbox。"""
-        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) < 4:
+        if raw_bbox is None:
             return None
         try:
-            return (
+            if (
+                hasattr(raw_bbox, "x0")
+                and hasattr(raw_bbox, "y0")
+                and hasattr(raw_bbox, "x1")
+                and hasattr(raw_bbox, "y1")
+            ):
+                rect_like = cast(Any, raw_bbox)
+                return PdfDocumentParser._normalize_bbox(
+                    float(rect_like.x0),
+                    float(rect_like.y0),
+                    float(rect_like.x1),
+                    float(rect_like.y1),
+                )
+            if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) < 4:
+                return None
+            return PdfDocumentParser._normalize_bbox(
                 float(raw_bbox[0]),
                 float(raw_bbox[1]),
                 float(raw_bbox[2]),
                 float(raw_bbox[3]),
             )
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _normalize_bbox(x0: float, y0: float, x1: float, y1: float) -> BoundingBox:
+        """归一化 bbox，避免出现反向坐标。"""
+        return (
+            min(x0, x1),
+            min(y0, y1),
+            max(x0, x1),
+            max(y0, y1),
+        )
 
     @staticmethod
     def _safe_int(value: object) -> int | None:

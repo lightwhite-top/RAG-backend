@@ -919,11 +919,29 @@ class DocumentChunkService:
 
         返回:
             元组 (DocumentSegment | None, 更新后的 headings 列表)。
-            空段落返回 (None, headings)。
+            纯图片段落会保留为占位片段，避免图片资产在后续链路中丢失。
         """
         text = paragraph.text.strip()
-        if not text:
+        if not text and not image_assets and not comment_texts:
             return None, headings
+
+        if not text and image_assets:
+            # `python-docx` 中纯图片段落的 `paragraph.text` 为空，这里保留一个稳定占位，
+            # 确保图片资产仍能进入图片理解、索引和聊天渲染链路。
+            context = " / ".join(headings)
+            content = f"{context}\n图片段落" if context else "图片段落"
+            content = self._append_comment_block(content, comment_texts)
+            return (
+                DocumentSegment(
+                    segment_id=segment_id,
+                    content=content,
+                    segment_type=SegmentType.PARAGRAPH,
+                    heading_context=context,
+                    comment_texts=comment_texts,
+                    image_assets=image_assets,
+                ),
+                headings,
+            )
 
         heading_level = self._get_heading_level(paragraph)
         if heading_level is not None:

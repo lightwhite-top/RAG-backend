@@ -227,38 +227,215 @@ class RemoteHttpOcrClient(OcrClientProtocol):
 
     def _read_bbox(self, item: dict[str, object]) -> BoundingBox | None:
         """从远程 OCR 响应中读取矩形边界。"""
-        bbox_value = item.get("bbox") or item.get("box") or item.get("bounding_box")
-        if isinstance(bbox_value, list) and len(bbox_value) >= 4:
+        # 兼容更多 OCR 服务常见字段：既支持传统 bbox，也支持 polygon / points / vertices。
+        for key in ("bbox", "box", "bounding_box", "polygon", "points", "vertices", "quad"):
+            if key not in item:
+                continue
             try:
-                return (
-                    float(bbox_value[0]),
-                    float(bbox_value[1]),
-                    float(bbox_value[2]),
-                    float(bbox_value[3]),
-                )
-            except (TypeError, ValueError):
-                raise RemoteHttpOcrInvocationError("OCR 返回的 bbox 坐标格式非法") from None
-        if isinstance(bbox_value, dict):
-            try:
-                if {"x0", "y0", "x1", "y1"} <= set(bbox_value):
-                    return (
-                        float(bbox_value["x0"]),
-                        float(bbox_value["y0"]),
-                        float(bbox_value["x1"]),
-                        float(bbox_value["y1"]),
-                    )
-                if {"left", "top", "right", "bottom"} <= set(bbox_value):
-                    return (
-                        float(bbox_value["left"]),
-                        float(bbox_value["top"]),
-                        float(bbox_value["right"]),
-                        float(bbox_value["bottom"]),
-                    )
-            except KeyError:
+                parsed_bbox = self._parse_bbox_candidate(item.get(key))
+            except ValueError:
+                raise RemoteHttpOcrInvocationError(f"OCR 返回的 {key} 坐标格式非法") from None
+            if parsed_bbox is not None:
+                return parsed_bbox
+
+        try:
+            return self._parse_bbox_mapping(item, allow_missing=True)
+        except ValueError:
+            raise RemoteHttpOcrInvocationError("OCR 返回的 bbox 坐标格式非法") from None
+
+    def _parse_bbox_candidate(self, value: object) -> BoundingBox | None:
+        """把单个 bbox 候选值规整为标准矩形坐标。"""
+        if value in (None, ""):
+            return None
+        if isinstance(value, dict):
+            if not value:
                 return None
-            except (TypeError, ValueError):
-                raise RemoteHttpOcrInvocationError("OCR 返回的 bbox 坐标格式非法") from None
-        return None
+            return self._parse_bbox_mapping(value, allow_missing=False)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            return self._parse_bbox_sequence(value)
+        raise ValueError("unsupported bbox type")
+
+    def _parse_bbox_mapping(
+        self,
+        bbox_value: dict[str, object],
+        *,
+        allow_missing: bool,
+    ) -> BoundingBox | None:
+        """解析字典形态的 bbox / polygon 元数据。"""
+        if {"x0", "y0", "x1", "y1"} <= set(bbox_value):
+            return self._normalize_bbox(
+                bbox_value["x0"],
+                bbox_value["y0"],
+                bbox_value["x1"],
+                bbox_value["y1"],
+            )
+        if {"left", "top", "right", "bottom"} <= set(bbox_value):
+            return self._normalize_bbox(
+                bbox_value["left"],
+                bbox_value["top"],
+                bbox_value["right"],
+                bbox_value["bottom"],
+            )
+        if {"xmin", "ymin", "xmax", "ymax"} <= set(bbox_value):
+            return self._normalize_bbox(
+                bbox_value["xmin"],
+                bbox_value["ymin"],
+                bbox_value["xmax"],
+                bbox_value["ymax"],
+            )
+        if {"x", "y", "width", "height"} <= set(bbox_value):
+            return self._normalize_bbox(
+                self._coerce_coordinate(bbox_value["x"]),
+                self._coerce_coordinate(bbox_value["y"]),
+                self._coerce_coordinate(bbox_value["x"])
+                + self._coerce_coordinate(bbox_value["width"]),
+                self._coerce_coordinate(bbox_value["y"])
+                + self._coerce_coordinate(bbox_value["height"]),
+            )
+        if {"x", "y", "w", "h"} <= set(bbox_value):
+            return self._normalize_bbox(
+                self._coerce_coordinate(bbox_value["x"]),
+                self._coerce_coordinate(bbox_value["y"]),
+                self._coerce_coordinate(bbox_value["x"]) + self._coerce_coordinate(bbox_value["w"]),
+                self._coerce_coordinate(bbox_value["y"]) + self._coerce_coordinate(bbox_value["h"]),
+            )
+        if {"left", "top", "width", "height"} <= set(bbox_value):
+            return self._normalize_bbox(
+                self._coerce_coordinate(bbox_value["left"]),
+                self._coerce_coordinate(bbox_value["top"]),
+                self._coerce_coordinate(bbox_value["left"])
+                + self._coerce_coordinate(bbox_value["width"]),
+                self._coerce_coordinate(bbox_value["top"])
+                + self._coerce_coordinate(bbox_value["height"]),
+            )
+        if {"left", "top", "w", "h"} <= set(bbox_value):
+            return self._normalize_bbox(
+                self._coerce_coordinate(bbox_value["left"]),
+                self._coerce_coordinate(bbox_value["top"]),
+                self._coerce_coordinate(bbox_value["left"])
+                + self._coerce_coordinate(bbox_value["w"]),
+                self._coerce_coordinate(bbox_value["top"])
+                + self._coerce_coordinate(bbox_value["h"]),
+            )
+
+        for key in ("points", "polygon", "vertices", "quad"):
+            if key not in bbox_value:
+                continue
+            nested_bbox = self._parse_bbox_candidate(bbox_value.get(key))
+            if nested_bbox is not None:
+                return nested_bbox
+
+        point_candidates = [
+            self._parse_point_candidate(bbox_value.get(key))
+            for key in (
+                "top_left",
+                "top_right",
+                "bottom_right",
+                "bottom_left",
+                "lt",
+                "rt",
+                "rb",
+                "lb",
+            )
+            if key in bbox_value
+        ]
+        normalized_points = [point for point in point_candidates if point is not None]
+        if len(normalized_points) >= 2:
+            return self._build_bbox_from_points(normalized_points)
+
+        if allow_missing:
+            return None
+        raise ValueError("missing bbox coordinates")
+
+    def _parse_bbox_sequence(
+        self,
+        bbox_value: list[object] | tuple[object, ...],
+    ) -> BoundingBox:
+        """解析列表形态的 bbox / polygon / points。"""
+        if self._is_flat_coordinate_sequence(bbox_value):
+            numeric_values = [self._coerce_coordinate(value) for value in bbox_value]
+            # 部分 OCR 服务会把 score / angle 等附加字段拼在 bbox 后面，这里优先兼容。
+            if len(numeric_values) >= 8 and len(numeric_values) % 2 == 0:
+                return self._build_bbox_from_flat_points(numeric_values)
+            if len(numeric_values) < 4:
+                raise ValueError("bbox coordinates are incomplete")
+            return self._normalize_bbox(
+                numeric_values[0],
+                numeric_values[1],
+                numeric_values[2],
+                numeric_values[3],
+            )
+
+        points: list[tuple[float, float]] = []
+        for point_value in bbox_value:
+            point = self._parse_point_candidate(point_value)
+            if point is None:
+                raise ValueError("invalid polygon point")
+            points.append(point)
+        if len(points) < 2:
+            raise ValueError("polygon points are incomplete")
+        return self._build_bbox_from_points(points)
+
+    @staticmethod
+    def _is_flat_coordinate_sequence(
+        bbox_value: list[object] | tuple[object, ...],
+    ) -> bool:
+        """判断当前列表是否为扁平数值坐标序列。"""
+        return not any(isinstance(value, (list, tuple, dict)) for value in bbox_value)
+
+    @staticmethod
+    def _parse_point_candidate(value: object) -> tuple[float, float] | None:
+        """解析 polygon 中的单个点。"""
+        if value in (None, ""):
+            return None
+        if isinstance(value, dict):
+            if {"x", "y"} <= set(value):
+                return (float(value["x"]), float(value["y"]))
+            if {"left", "top"} <= set(value):
+                return (float(value["left"]), float(value["top"]))
+            raise ValueError("invalid point mapping")
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return (float(value[0]), float(value[1]))
+        raise ValueError("invalid point sequence")
+
+    @classmethod
+    def _build_bbox_from_flat_points(cls, values: list[float]) -> BoundingBox:
+        """把扁平多边形坐标序列折叠为最小包围矩形。"""
+        x_values = values[0::2]
+        y_values = values[1::2]
+        if not x_values or not y_values:
+            raise ValueError("polygon coordinates are incomplete")
+        return cls._normalize_bbox(min(x_values), min(y_values), max(x_values), max(y_values))
+
+    @classmethod
+    def _build_bbox_from_points(cls, points: list[tuple[float, float]]) -> BoundingBox:
+        """把点集折叠为最小包围矩形。"""
+        x_values = [point[0] for point in points]
+        y_values = [point[1] for point in points]
+        return cls._normalize_bbox(min(x_values), min(y_values), max(x_values), max(y_values))
+
+    @staticmethod
+    def _normalize_bbox(x0: object, y0: object, x1: object, y1: object) -> BoundingBox:
+        """归一化 bbox 坐标顺序，避免出现反向矩形。"""
+        normalized_x0 = RemoteHttpOcrClient._coerce_coordinate(x0)
+        normalized_y0 = RemoteHttpOcrClient._coerce_coordinate(y0)
+        normalized_x1 = RemoteHttpOcrClient._coerce_coordinate(x1)
+        normalized_y1 = RemoteHttpOcrClient._coerce_coordinate(y1)
+        return (
+            min(normalized_x0, normalized_x1),
+            min(normalized_y0, normalized_y1),
+            max(normalized_x0, normalized_x1),
+            max(normalized_y0, normalized_y1),
+        )
+
+    @staticmethod
+    def _coerce_coordinate(value: object) -> float:
+        """把 OCR 坐标值安全收敛为浮点数。"""
+        if not isinstance(value, (str, bytes, bytearray, int, float)):
+            raise ValueError("invalid coordinate value")
+        return float(value)
 
     def _raise_http_error(self, exc: HTTPError) -> None:
         """把 HTTP 层错误统一转换为项目异常。"""

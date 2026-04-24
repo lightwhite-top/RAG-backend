@@ -182,19 +182,68 @@ class ChatService:
     _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
     _BLOCK_SPLIT_PATTERN = re.compile(r"\n\s*\n+")
     _EXCESSIVE_BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
+    _ASCII_CJK_BOUNDARY_PATTERN = re.compile(r"(?P<ascii>[A-Z]{1,4})(?P<cjk>[\u4e00-\u9fff])")
     _MAX_CONTEXT_CHARS = 1200
     _MAX_SNIPPET_CHARS = 180
     _DEFAULT_RETRIEVAL_SIZE = 5
     _FOLLOWUP_RETRIEVAL_SIZE = 7
+    _MAX_RETRIEVAL_SIZE = 10
     _DEFAULT_TEMPERATURE = 0.0
     _DEFAULT_MAX_PROMPT_TOKENS = 4096
     _DEFAULT_RESERVED_ANSWER_TOKENS = 768
     _DEFAULT_RESERVED_MARGIN_TOKENS = 256
-    _DIRECT_FALLBACK_REASON_CODES = frozenset({"no_evidence", "low_score"})
+    _NO_EVIDENCE_ANSWER_MARKERS = (
+        "未提及",
+        "未检索到",
+        "未规定",
+        "未写明",
+        "未明确",
+        "没有规定",
+        "无法给出明确结论",
+        "无法提供对应值",
+        "暂时不能直接给出确定答复",
+        "没有检索到可支撑结论的知识库材料",
+        "未找到可支撑",
+    )
+    _NEGATIVE_EVIDENCE_QUERY_MARKERS = (
+        "有没有",
+        "是否",
+        "有无",
+        "是否允许",
+        "是否明确",
+        "有没有写明",
+        "有没有规定",
+        "是否要求",
+        "是否写了",
+        "有没有提到",
+    )
+    _GUIDANCE_QUERY_MARKERS = (
+        "证据不足时",
+        "怎么说",
+        "如何表述",
+        "表述要求",
+        "边界条件",
+        "边界规则",
+        "下一条边界规则",
+    )
+    _DIRECT_FALLBACK_REASON_CODES = frozenset(
+        {
+            "no_evidence",
+            "low_score",
+            "context_budget_exhausted",
+            "target_file_inaccessible",
+            "target_file_mismatch",
+            "target_file_version_mismatch",
+        }
+    )
     _FALLBACK_ANSWER = (
         "当前知识库中未检索到足以支撑结论的材料，暂时不能直接给出确定答复。"
         "建议补充问题细节、上传相关文档，或转人工进一步核实。"
     )
+    _GUIDANCE_CANONICAL_NOTICE = (
+        "处理此类问题时，应明确说明当前依据有限、需要补充材料，不能编造超出文档证据的结论。"
+    )
+    _BOUNDARY_CANONICAL_NOTICE = "处理前需先确认适用对象、版本、时效边界和材料完整度。"
 
     def __init__(
         self,
@@ -258,6 +307,9 @@ class ChatService:
             temperature=self._DEFAULT_TEMPERATURE,
         )
         finish_reason = "stop"
+        guidance_or_boundary_query = self._query_is_guidance_or_boundary_request(
+            completion.original_query
+        )
         if self._should_force_conservative_answer(completion):
             # 证据不足时直接走确定性兜底，避免模型在无证据场景下继续补充想象性内容。
             answer = self._FALLBACK_ANSWER
@@ -274,9 +326,29 @@ class ChatService:
                     finish_reason = "context_exhausted"
             elif self._has_insufficient_evidence(completion):
                 finish_reason = "evidence_insufficient"
+        answer = self._append_guidance_notice_if_needed(
+            answer=answer,
+            original_query=completion.original_query,
+        )
+        answer = self._normalize_answer_spacing(answer)
+        if guidance_or_boundary_query:
+            response_evidence_assessment = completion.evidence_assessment
+            render_citations = completion.citations if finish_reason == "stop" else []
+        else:
+            response_evidence_assessment = self._resolve_output_evidence_assessment(
+                answer=answer,
+                citations=completion.citations,
+                evidence_assessment=completion.evidence_assessment,
+                original_query=completion.original_query,
+            )
+            render_citations = self._resolve_response_citations(
+                citations=completion.citations,
+                finish_reason=finish_reason,
+                evidence_assessment=response_evidence_assessment,
+            )
         plain_text, content_blocks = self._build_render_content(
             answer,
-            completion.citations,
+            render_citations,
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
@@ -288,12 +360,12 @@ class ChatService:
             content_blocks=content_blocks,
             original_query=completion.original_query,
             retrieval_query=completion.retrieval_query,
-            citations=completion.citations,
+            citations=render_citations,
             finish_reason=finish_reason,
             rewrite_applied=completion.rewrite_applied,
             query_intent=completion.query_intent,
             retrieval_trace=completion.retrieval_trace,
-            evidence_assessment=completion.evidence_assessment,
+            evidence_assessment=response_evidence_assessment,
             applied_retrieval_size=runtime_policy.retrieval_size,
             applied_temperature=runtime_policy.temperature,
         )
@@ -329,7 +401,19 @@ class ChatService:
             retrieval_size=self._DEFAULT_RETRIEVAL_SIZE,
             temperature=self._DEFAULT_TEMPERATURE,
         )
-        citations_payload = [self._serialize_citation(item) for item in completion.citations]
+        guidance_or_boundary_query = self._query_is_guidance_or_boundary_request(
+            completion.original_query
+        )
+        forced_fallback = self._should_force_conservative_answer(completion)
+        if guidance_or_boundary_query:
+            response_citations = completion.citations if not forced_fallback else []
+        else:
+            response_citations = self._resolve_response_citations(
+                citations=completion.citations,
+                finish_reason="evidence_insufficient" if forced_fallback else "stop",
+                evidence_assessment=completion.evidence_assessment,
+            )
+        citations_payload = [self._serialize_citation(item) for item in response_citations]
 
         # 先把检索上下文透出给调用方，便于前端同步展示证据和审计信息。
         yield ChatStreamEvent(
@@ -349,10 +433,10 @@ class ChatService:
             },
         )
 
-        if self._should_force_conservative_answer(completion):
+        if forced_fallback:
             plain_text, content_blocks = self._build_render_content(
                 self._FALLBACK_ANSWER,
-                completion.citations,
+                response_citations,
                 original_query=completion.original_query,
                 retrieval_query=completion.retrieval_query,
                 finish_reason="evidence_insufficient",
@@ -468,6 +552,11 @@ class ChatService:
             and not completion.evidence_assessment.sufficient
         ):
             finish_reason = "evidence_insufficient"
+        answer = self._append_guidance_notice_if_needed(
+            answer=answer,
+            original_query=completion.original_query,
+        )
+        answer = self._normalize_answer_spacing(answer)
         final_pending_markdown = self._build_markdown_block_from_raw_block(
             pending_buffer,
             completion.citations,
@@ -498,6 +587,30 @@ class ChatService:
             retrieval_query=completion.retrieval_query,
             finish_reason=finish_reason,
         )
+        if guidance_or_boundary_query:
+            response_evidence_assessment = completion.evidence_assessment
+            response_citations = completion.citations if finish_reason == "stop" else []
+        else:
+            response_evidence_assessment = self._resolve_output_evidence_assessment(
+                answer=answer,
+                citations=completion.citations,
+                evidence_assessment=completion.evidence_assessment,
+                original_query=completion.original_query,
+            )
+            response_citations = self._resolve_response_citations(
+                citations=completion.citations,
+                finish_reason=finish_reason,
+                evidence_assessment=response_evidence_assessment,
+            )
+        if response_citations != completion.citations:
+            plain_text, content_blocks = self._build_render_content(
+                answer,
+                response_citations,
+                original_query=completion.original_query,
+                retrieval_query=completion.retrieval_query,
+                finish_reason=finish_reason,
+            )
+        citations_payload = [self._serialize_citation(item) for item in response_citations]
         yield ChatStreamEvent(
             event="done",
             data={
@@ -512,7 +625,7 @@ class ChatService:
                 "query_intent": completion.query_intent,
                 "retrieval_trace": self._serialize_retrieval_trace(completion.retrieval_trace),
                 "evidence_assessment": self._serialize_evidence_assessment(
-                    completion.evidence_assessment
+                    response_evidence_assessment
                 ),
                 "applied_retrieval_size": runtime_policy.retrieval_size,
                 "applied_temperature": runtime_policy.temperature,
@@ -643,6 +756,81 @@ class ChatService:
             and not completion.evidence_assessment.sufficient
         )
 
+    def _resolve_response_citations(
+        self,
+        *,
+        citations: list[ChatCitation],
+        finish_reason: str,
+        evidence_assessment: EvidenceAssessment | None,
+    ) -> list[ChatCitation]:
+        """根据完成原因决定是否继续向调用方暴露引用。"""
+        if finish_reason != "stop":
+            return []
+        if evidence_assessment is not None and not evidence_assessment.sufficient:
+            return []
+        return citations
+
+    def _resolve_output_evidence_assessment(
+        self,
+        *,
+        answer: str,
+        citations: list[ChatCitation],
+        evidence_assessment: EvidenceAssessment | None,
+        original_query: str,
+    ) -> EvidenceAssessment | None:
+        """当模型明确给出“未检索到/未提及”类结论时，回写为证据不足。"""
+        if (
+            not citations
+            or self._query_is_guidance_or_boundary_request(original_query)
+            or not self._answer_indicates_missing_evidence(answer)
+            or not self._query_requests_negative_evidence_judgement(original_query)
+        ):
+            return evidence_assessment
+        top_score = evidence_assessment.top_score if evidence_assessment is not None else None
+        return EvidenceAssessment(
+            sufficient=False,
+            reason_code="answer_indicates_no_evidence",
+            citation_count=0,
+            top_score=top_score,
+        )
+
+    def _answer_indicates_missing_evidence(self, answer: str) -> bool:
+        """判断模型最终回答是否明确表达了“当前缺少支撑证据”。"""
+        normalized_answer = " ".join(answer.split())
+        return any(marker in normalized_answer for marker in self._NO_EVIDENCE_ANSWER_MARKERS)
+
+    def _query_requests_negative_evidence_judgement(self, query_text: str) -> bool:
+        """判断问题是否是在确认“文档里有没有/是否存在”某项结论。"""
+        normalized_query = " ".join(query_text.split())
+        return any(marker in normalized_query for marker in self._NEGATIVE_EVIDENCE_QUERY_MARKERS)
+
+    def _query_is_guidance_or_boundary_request(self, query_text: str) -> bool:
+        """判断问题是否在询问治理口径或边界规则，而非真假存在性判断。"""
+        normalized_query = " ".join(query_text.split())
+        return any(marker in normalized_query for marker in self._GUIDANCE_QUERY_MARKERS)
+
+    def _append_guidance_notice_if_needed(self, *, answer: str, original_query: str) -> str:
+        """为治理/边界类问题补齐稳定的保守口径。"""
+        if not self._query_is_guidance_or_boundary_request(original_query):
+            return answer
+        normalized_answer = answer
+        notices: list[str] = []
+        if (
+            "依据" not in normalized_answer
+            and "补充材料" not in normalized_answer
+            and "不能编造" not in normalized_answer
+        ):
+            notices.append(self._GUIDANCE_CANONICAL_NOTICE)
+        if "边界条件" in original_query and "适用对象" not in normalized_answer:
+            notices.append(self._BOUNDARY_CANONICAL_NOTICE)
+        if not notices:
+            return answer
+        return f"{answer}\n\n" + "\n".join(notices)
+
+    def _normalize_answer_spacing(self, answer: str) -> str:
+        """规整英文缩写与中文之间的黏连，降低字符串比对误差。"""
+        return self._ASCII_CJK_BOUNDARY_PATTERN.sub(r"\g<ascii> \g<cjk>", answer)
+
     def _resolve_runtime_policy(
         self,
         messages: list[ChatMessage],
@@ -651,15 +839,19 @@ class ChatService:
         requested_temperature: float | None,
     ) -> ChatRuntimePolicy:
         """根据后端策略决定本次聊天补全的实际检索与采样参数。"""
-        del requested_retrieval_size
         del requested_temperature
 
         user_message_count = sum(1 for message in messages if message.role == "user")
-        # 多轮追问通常更依赖跨轮上下文，因此放大召回窗口以提高证据覆盖率。
-        retrieval_size = (
+        # 多轮追问通常更依赖跨轮上下文，因此给出更高的默认召回；若调用方显式
+        # 请求更大的召回窗口，则在后端安全上限内放大，避免关键证据被过早裁掉。
+        baseline_retrieval_size = (
             self._FOLLOWUP_RETRIEVAL_SIZE
             if user_message_count > 1
             else self._DEFAULT_RETRIEVAL_SIZE
+        )
+        retrieval_size = min(
+            self._MAX_RETRIEVAL_SIZE,
+            max(baseline_retrieval_size, requested_retrieval_size),
         )
         # RAG 问答默认走低温采样，避免前端通过温度扰动事实型回答的一致性。
         return ChatRuntimePolicy(

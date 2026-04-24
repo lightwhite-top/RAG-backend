@@ -38,18 +38,30 @@ class EvidenceSufficiencyService:
         self._min_score = min_score
         self._min_citation_count = max(1, min_citation_count)
 
-    def assess(self, hits: list[ChunkSearchHit]) -> EvidenceAssessment:
-        """判断当前证据是否足以支撑回答。"""
+    def assess(
+        self,
+        hits: list[ChunkSearchHit],
+        *,
+        override_reason_code: str | None = None,
+        top_score_override: float | None = None,
+    ) -> EvidenceAssessment:
+        """判断当前证据是否足以支撑回答。
+
+        参数:
+            hits: 当前检索命中结果。
+            override_reason_code: 可选的强制失败原因，用于显式文件锚点等上游守门场景。
+            top_score_override: 当 `hits` 为空但需要保留观测得分时使用的候选分数。
+        """
         citation_count = len(hits)
+        top_score = hits[0].score if hits else top_score_override
         if citation_count < self._min_citation_count:
             return EvidenceAssessment(
                 sufficient=False,
-                reason_code="no_evidence",
+                reason_code=override_reason_code or "no_evidence",
                 citation_count=citation_count,
-                top_score=None,
+                top_score=top_score,
             )
 
-        top_score = hits[0].score
         if top_score is not None and top_score < self._min_score:
             return EvidenceAssessment(
                 sufficient=False,
